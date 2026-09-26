@@ -714,7 +714,10 @@ export async function renderSheet(id) {
       const count = Math.max(0, Math.min(hd.current, Number(input?.value) || 0));
       if (count <= 0) return;
       const conMod = getAbilityMod(data, "con");
-      const rolls = rollDice(count, hd.die);
+      // «Стойкий»: each Hit Die spent this way heals at least 2×Con modifier
+      // (minimum 2), regardless of what the die itself rolled.
+      const durableFloor = hasFeat("durable") ? Math.max(2, 2 * conMod) : 0;
+      const rolls = rollDice(count, hd.die).map((r) => Math.max(r, durableFloor));
       const healTotal = Math.max(0, rolls.reduce((a, b) => a + b, 0) + count * conMod);
       data.hitDice.current = hd.current - count;
       const max = Number(data.hp.max) || 0;
@@ -778,6 +781,14 @@ export async function renderSheet(id) {
   // scores, so it gets pulled out of the generic feature list below and
   // given its own chooser UI instead.
   const ASI_FEATURE_NAME = /увеличение характеристик/i;
+  // "Заклинания N-го круга" (Wizard/Cleric level-up entries marking that a
+  // new spell circle just opened up) isn't a real umение either -- it's a
+  // notice, and the actual effect (being able to prepare/cast that circle)
+  // already shows up on its own once the player raises the matching number
+  // in "Количество ячеек" on the Заклинания tab. So, like ASI/subclass
+  // markers above, it's filtered out of the generic feature-card push
+  // instead of becoming its own inert card.
+  const SPELL_CIRCLE_UNLOCK_FEATURE_NAME = /^Заклинания\s+\d+-(?:го|й)\s+круга$/i;
   function levelHasAsiChoice(cls, newLevel) {
     const raw = cls && cls.features && cls.features[newLevel];
     return !!(raw || []).some((f) => ASI_FEATURE_NAME.test(f));
@@ -1086,7 +1097,11 @@ export async function renderSheet(id) {
     const conMod = getAbilityMod(data, "con");
     const avg = levelUpAverageHp(cls);
     const features = levelUpFeaturesFor(cls, newLevel).filter(
-      (f) => !ASI_FEATURE_NAME.test(f.name) && !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) && f.name !== ARCHETYPE_FEATURE_MARKER
+      (f) =>
+        !ASI_FEATURE_NAME.test(f.name) &&
+        !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) &&
+        f.name !== ARCHETYPE_FEATURE_MARKER &&
+        !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name)
     );
     // Once a subclass is chosen (already, or right here in subclassChoice),
     // its own features at this exact level replace the "Умение архетипа"
@@ -1101,6 +1116,13 @@ export async function renderSheet(id) {
     const archetypeFeatures = archetypeFeaturesRaw.filter((f) => !(levelUpState.fightingStyleChoice && f.name === SECOND_FIGHTING_STYLE_FEATURE_NAME));
     const allFeatures = [...features, ...archetypeFeatures];
     const missingSubclassForArchetypeLevel = !c.subclass && !levelUpState.subclassChoice && (cls.features?.[newLevel] || []).some((f) => f === ARCHETYPE_FEATURE_MARKER);
+    // An explicit `N: []` in cls.features (see e.g. Воин 11/13/17/20) means
+    // "this level really has nothing new for this class" -- distinct from a
+    // level number simply missing from the object, which means "not modeled
+    // yet". Object.prototype.hasOwnProperty is the only way to tell those
+    // two apart, since `cls.features[newLevel]` reads as falsy either way
+    // once mapped through levelUpFeaturesFor.
+    const levelHasNoFeaturesByDesign = Object.prototype.hasOwnProperty.call(cls.features || {}, newLevel);
     const hpGain = Math.max(1, (levelUpState.hpMethod === "roll" ? levelUpState.rolledAmount ?? 0 : avg) + conMod);
     return `
       <h3 style="margin-top:0;">Повышение уровня</h3>
@@ -1138,7 +1160,9 @@ export async function renderSheet(id) {
               ? `<p class="muted">На этом уровне только выбор ниже — новых карточек умений нет.</p>`
               : missingSubclassForArchetypeLevel
                 ? `<p class="muted">У этого персонажа ещё не выбран архетип (боевой архетип выбирается на 3-м уровне) — повысьте сначала до 3-го уровня, чтобы выбрать его, тогда умения архетипа появятся и здесь.</p>`
-                : `<p class="muted">Нет данных об умениях класса «${escapeHtml(cls.name)}» на ${newLevel} уровне в базе — добавьте их вручную на вкладке «Умения» после повышения.</p>`
+                : levelHasNoFeaturesByDesign
+                  ? `<p class="muted">На этом уровне класс не получает новых умений.</p>`
+                  : `<p class="muted">Нет данных об умениях класса «${escapeHtml(cls.name)}» на ${newLevel} уровне в базе — добавьте их вручную на вкладке «Умения» после повышения.</p>`
         }
       </div>
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
@@ -1271,6 +1295,22 @@ export async function renderSheet(id) {
     data.hp.max = Math.max(1, (Number(data.hp.max) || 0) + gain);
     data.hp.current = Math.max(0, (Number(data.hp.current) || 0) + gain);
   }
+  // «Крепкий»: "max HP increases by twice your level when you take this
+  // feat, and by another 2 every level you gain after that" -- both halves
+  // of that wording add up to the same running total as simply "2 × current
+  // total level" at every point in time, so granting it retroactively adds
+  // 2×totalLevel right away, and applyLevelUp (below) just adds +2 more on
+  // every later level-up, exactly like the flat per-level HP gain it sits
+  // next to.
+  const TOUGH_FEAT_ID = "tough";
+  function hasToughFeat() {
+    return (data.feats || []).some((f) => f.id === TOUGH_FEAT_ID);
+  }
+  function applyToughFeatHpGrant() {
+    const gain = 2 * totalLevel(data);
+    data.hp.max = Math.max(1, (Number(data.hp.max) || 0) + gain);
+    data.hp.current = Math.max(0, (Number(data.hp.current) || 0) + gain);
+  }
   // Applies the ASI/feat choice made in asiChooserHtml() above -- mirrors
   // the "Черты" tab's own add-feat handler for the feat branch (same
   // data.feats entry shape, same ability/skill-grant bookkeeping) so a feat
@@ -1314,6 +1354,7 @@ export async function renderSheet(id) {
     data.feats = data.feats || [];
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
+    if (feat.id === TOUGH_FEAT_ID) applyToughFeatHpGrant();
   }
   // Snapshot of the ENTIRE character taken right before a level-up is
   // applied, so "Откатить уровень" can restore it wholesale -- a level-up
@@ -1342,6 +1383,10 @@ export async function renderSheet(id) {
     c.level = newLevel;
     data.hp.max = (Number(data.hp.max) || 0) + hpGain;
     data.hp.current = (Number(data.hp.current) || 0) + hpGain;
+    if (hasToughFeat()) {
+      data.hp.max += 2;
+      data.hp.current += 2;
+    }
     // Level-dependent feature TEXT (e.g. Второе дыхание's "1к10 + ваш
     // уровень воина") already reads the class's current level live rather
     // than baking a number in, and its 🎲 roll amount is likewise resolved
@@ -1349,7 +1394,13 @@ export async function renderSheet(id) {
     // bumping c.level here is enough for those to "recalculate themselves";
     // nothing stored on the feature card itself needs updating.
     levelUpFeaturesFor(cls, newLevel)
-      .filter((f) => !ASI_FEATURE_NAME.test(f.name) && !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) && f.name !== ARCHETYPE_FEATURE_MARKER)
+      .filter(
+        (f) =>
+          !ASI_FEATURE_NAME.test(f.name) &&
+          !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) &&
+          f.name !== ARCHETYPE_FEATURE_MARKER &&
+          !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name)
+      )
       .forEach((f) => {
         if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) return;
         data.features.push({ name: f.name, source: cls.name, desc: f.desc || "" });
@@ -1532,11 +1583,21 @@ export async function renderSheet(id) {
   function subclassIntroName(cls, subName) {
     return cls.level1Choice && cls.level1Choice.type === "subclass" ? `${cls.level1Choice.label}: ${subName}` : subName;
   }
+  // Class features that grant a saving-throw proficiency outright (not a
+  // choice, unlike a feat's grantsSaveProficiency) are rare enough to just
+  // special-case by name here, same convention as the many other exact-name
+  // special cases in this file (e.g. GENIE_VESSEL_FEATURE_NAME).
+  const SAVE_PROFICIENCY_GRANTS = { "Стойкий разум": "wis" };
   function applyFeatureProficiencyGrants(name, desc) {
     data.proficiencies = data.proficiencies || {};
     if (!Array.isArray(data.proficiencies.skills)) data.proficiencies.skills = [];
     if (!Array.isArray(data.proficiencies.armor)) data.proficiencies.armor = [];
     if (!Array.isArray(data.proficiencies.weapons)) data.proficiencies.weapons = [];
+    if (!Array.isArray(data.proficiencies.savingThrows)) data.proficiencies.savingThrows = [];
+    const savingThrowGrant = SAVE_PROFICIENCY_GRANTS[name];
+    if (savingThrowGrant && !data.proficiencies.savingThrows.includes(savingThrowGrant)) {
+      data.proficiencies.savingThrows.push(savingThrowGrant);
+    }
     const skillMatch = /Владение\s+навык(?:ом|ами)\s+([^.]+)\.?/i.exec(desc || "");
     if (skillMatch) {
       skillMatch[1]
@@ -2015,7 +2076,7 @@ export async function renderSheet(id) {
                     ${ABILITIES.map((ab) => `<option value="${ab.id}" ${a.ability === ab.id ? "selected" : ""}>${ab.short || ab.label}</option>`).join("")}
                   </select>
                 </td>
-                <td><input type="text" data-attack-field="bonus" data-attack-index="${i}" value="${escapeHtml(a.bonus ?? "")}" placeholder="+5" ${a.ability ? "readonly title=\"Считается автоматически по выбранной характеристике\"" : ""} /></td>
+                <td><input type="text" data-attack-field="bonus" data-attack-index="${i}" value="${a.ability ? formatModifier(attackBonusValue(a)) : escapeHtml(a.bonus ?? "")}" placeholder="+5" ${a.ability ? "readonly title=\"Считается автоматически: модификатор характеристики + бонус мастерства, растёт вместе с уровнем\"" : ""} /></td>
                 <td><input type="text" data-attack-field="damage" data-attack-index="${i}" value="${escapeHtml(a.damage ?? "")}" placeholder="1к8+3 рубящий" /></td>
                 <td>
                   <select data-attack-range-type data-attack-index="${i}" title="Ближний бой / дальнобойное / метательное — используется боевыми стилями (напр. «Стрельба из лука», «Дуэлянт»)">
@@ -3102,6 +3163,12 @@ export async function renderSheet(id) {
                     BARD_INSPIRATION_FEATURE_NAME.test(f.name || "") ||
                     /^Проклятие ведьмовского клинка$/i.test(f.name || "") ||
                     /^Ужасающий облик$/i.test(f.name || "") ||
+                    // Плут «Надёжный талант»'s own text mentions "к20, равный
+                    // 9 и ниже" as the threshold it rewrites, not something
+                    // to actually roll from this card -- featureDiceInfo's
+                    // generic "к20" match would otherwise add a bogus
+                    // "🎲 Бросить 1к20" button.
+                    /^Надёжный талант$/i.test(f.name || "") ||
                     // Лечащий свет already gets its own dice-count-adjustable
                     // roll button from featureResourceHtml's pool tracker above --
                     // this would otherwise add a second, fixed "🎲 Бросить к6".
@@ -3120,7 +3187,23 @@ export async function renderSheet(id) {
                   const isTentacle = /^Щупальце из глубин$/i.test(f.name || "");
                   const attackBonus = isTentacle ? spellAttackBonus(data) : null;
                   const isSuperiority = BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "");
-                  if (!dice && !dc && attackBonus === null && !isSuperiority) return "";
+                  // Чемпион «Уцелевший»: passive at-the-start-of-your-turn
+                  // heal, triggered off a game moment (your turn starting)
+                  // the sheet has no clock for -- a button the player clicks
+                  // themselves each such turn, same idea as a rest button but
+                  // per-turn instead of per-rest.
+                  const isSurvivor = /^Уцелевший$/i.test(f.name || "");
+                  const survivorAmount = isSurvivor ? 5 + getAbilityMod(data, "con") : 0;
+                  const survivorEligible = isSurvivor && Number(data.hp.current) > 0 && Number(data.hp.current) <= Math.floor((Number(data.hp.max) || 0) / 2);
+                  // Скрытая атака deliberately gets no roll button of its own
+                  // (see noRollButton above -- it's only ever rolled as a
+                  // checkbox alongside a weapon's damage), but the card still
+                  // benefits from showing the CURRENT die count somewhere,
+                  // since it grows with Rogue level and the desc text can't
+                  // bake in a number that would go stale.
+                  const isSneakAttack = /^Скрытая атака\b/i.test(f.name || "");
+                  const sneakInfo = isSneakAttack ? sneakAttackDice() : null;
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -3133,7 +3216,13 @@ export async function renderSheet(id) {
                   const rollBtn = dice
                     ? `<button class="small feature-card-roll" data-action="roll-feature" data-index="${i}">🎲 Бросить ${escapeHtml(dice.raw)}</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${attackBtn}${superiorityBtn}${rollBtn}${dcSpan}</div>`;
+                  const survivorBtn = isSurvivor
+                    ? `<button class="small feature-card-roll" data-action="apply-survivor-heal" data-index="${i}" ${survivorEligible ? "" : "disabled"} title="${survivorEligible ? "" : "Доступно только когда текущие хиты не выше половины максимума и больше 0"}">✚ Восстановить ${survivorAmount} хитов</button>`
+                    : "";
+                  const sneakSpan = sneakInfo
+                    ? `<span class="feature-card-dc" title="Растёт с уровнем Плута — добавляется как флажок в окне броска урона оружием">Сейчас: ${escapeHtml(sneakInfo.raw)}</span>`
+                    : "";
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -3365,23 +3454,26 @@ export async function renderSheet(id) {
     data.attacks[i].rangeType = el.value;
     doSave();
   });
-  // Attack bonus auto-calc: picking an ability here sets bonus = ability
-  // modifier + proficiency bonus and keeps the bonus field read-only while
-  // an ability stays selected. Choosing "—" hands the field back for manual entry.
+  // Attack bonus, when an ability is picked, is always (that ability's
+  // modifier + current proficiency bonus) computed live -- NOT a number
+  // baked into a.bonus once and left stale as the character's proficiency
+  // bonus grows with level. a.bonus itself is only ever read/written for
+  // the manual-entry case (no ability picked).
+  function attackBonusValue(a) {
+    return getAbilityMod(data, a.ability) + proficiencyBonus(data);
+  }
+  // Picking an ability here just switches the bonus field to live/read-only
+  // mode (see attackBonusValue above and its use in the table render and
+  // roll-attack below); choosing "—" hands the field back for manual entry.
   on(app, "change", "[data-attack-ability]", (e, el) => {
     const i = Number(el.dataset.attackIndex);
-    const ability = el.value;
-    data.attacks[i].ability = ability;
-    if (ability) {
-      const total = getAbilityMod(data, ability) + proficiencyBonus(data);
-      data.attacks[i].bonus = formatModifier(total);
-    }
+    data.attacks[i].ability = el.value;
     doSave();
     render();
   });
   on(app, "click", "[data-action=roll-attack]", (e, el) => {
     const a = data.attacks[Number(el.dataset.index)];
-    let bonus = parseInt(String(a.bonus).replace(/[^-\d]/g, ""), 10) || 0;
+    let bonus = a.ability ? attackBonusValue(a) : parseInt(String(a.bonus).replace(/[^-\d]/g, ""), 10) || 0;
     // Боевой стиль «Стрельба из лука»: +2 к броскам атаки, but only for a
     // weapon actually classified Дальнобойное -- a thrown Ближний бой
     // weapon (dagger, handaxe...) doesn't qualify even at range, per how
@@ -3433,6 +3525,10 @@ export async function renderSheet(id) {
     const re = new RegExp(`боевой стиль\\s*:\\s*${styleName}\\s*$`, "i");
     return (data.features || []).some((f) => re.test(f.name || ""));
   }
+  function hasFeat(featId) {
+    return (data.feats || []).some((f) => f.id === featId);
+  }
+  const SAVAGE_ATTACKER_FEAT_ID = "savage-attacker";
   // Half-orc's "Свирепые атаки": on a critical hit, one extra weapon damage
   // die (on top of the normal crit doubling) is merged straight into the
   // base weapon die count -- unlike Скрытая атака this is automatic on
@@ -3499,7 +3595,19 @@ export async function renderSheet(id) {
     weaponRolls.forEach((v) => breakdown.push({ value: v, label: "оружие" }));
     savageRolls.forEach((v) => breakdown.push({ value: v, label: "свирепые атаки" }));
   }
-  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority) {
+  // «Дикий атакующий» (feat): once per turn, reroll all the weapon's own
+  // damage dice and keep either result -- implemented as "roll the base
+  // dice expression twice, keep the higher total", which is equivalent to
+  // "reroll and choose" without needing a separate confirm step. Only the
+  // base weapon dice are rerolled (not Скрытая атака/особые свойства/etc,
+  // which are each their own roll already), matching the feat's own wording.
+  function rollBaseExprWithSavageAttacker(expr, useSavageAttacker) {
+    const first = rollExpr(expr);
+    if (!useSavageAttacker) return { picked: first, discarded: null };
+    const second = rollExpr(expr);
+    return second.total > first.total ? { picked: second, discarded: first } : { picked: first, discarded: second };
+  }
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
     if (useVersatile) {
@@ -3514,12 +3622,12 @@ export async function renderSheet(id) {
       let dieOnly = base.expr.replace(/[+-]\s*\d+$/, "");
       if (isCrit) dieOnly = doubleDiceCount(dieOnly);
       if (isSavage) dieOnly = addSavageAttacksDie(dieOnly);
-      const rBase = rollExpr(dieOnly);
+      const { picked: rBase, discarded } = rollBaseExprWithSavageAttacker(dieOnly, useSavageAttacker);
       const abilityMod = getAbilityMod(data, a.ability);
       total += rBase.total + abilityMod;
       // Just the number, not the ability's name -- the modifier is already
       // implied by this being a damage roll for that attack.
-      parts.push(`${toCyrillicDice(dieOnly)} = ${rBase.rolls.join("+")}${abilityMod ? formatModifier(abilityMod) : ""}`);
+      parts.push(`${toCyrillicDice(dieOnly)} = ${rBase.rolls.join("+")}${abilityMod ? formatModifier(abilityMod) : ""}${discarded ? ` (дикий атакующий, отброшено: ${discarded.rolls.join("+")})` : ""}`);
       pushBaseRollBreakdown(breakdown, rBase.rolls, isSavage);
       if (abilityMod) {
         const abilityInfo = ABILITIES.find((ab) => ab.id === a.ability);
@@ -3528,12 +3636,12 @@ export async function renderSheet(id) {
     } else {
       let expr = isCrit ? doubleDiceCount(base.expr) : base.expr;
       if (isSavage) expr = addSavageAttacksDie(expr);
-      const rBase = rollExpr(expr);
+      const { picked: rBase, discarded } = rollBaseExprWithSavageAttacker(expr, useSavageAttacker);
       total += rBase.total;
       // formatModifier always signs its number ("+0" for a zero modifier),
       // which reads as a bogus "+0" tacked onto the roll when the dice
       // expression had no flat modifier at all -- only show it when nonzero.
-      parts.push(`${toCyrillicDice(isCrit || isSavage ? expr : base.raw)} = ${rBase.rolls.join("+")}${rBase.modifier ? formatModifier(rBase.modifier) : ""}`);
+      parts.push(`${toCyrillicDice(isCrit || isSavage ? expr : base.raw)} = ${rBase.rolls.join("+")}${rBase.modifier ? formatModifier(rBase.modifier) : ""}${discarded ? ` (дикий атакующий, отброшено: ${discarded.rolls.join("+")})` : ""}`);
       pushBaseRollBreakdown(breakdown, rBase.rolls, isSavage);
       if (rBase.modifier) breakdown.push({ value: rBase.modifier, label: "модификатор" });
     }
@@ -3596,8 +3704,9 @@ export async function renderSheet(id) {
     const duelist = a.rangeType === "melee" && hasFightingStyle("Дуэлянт");
     const versatileSides = versatileDieSidesForAttack(a);
     const superiorityAvailable = hasBattlemaster() && superiorityDiceAvailable() > 0;
-    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable) {
-      doRollAttackDamage(a, false, isCrit, false, false, false, false);
+    const savageAttacker = hasFeat(SAVAGE_ATTACKER_FEAT_ID);
+    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !savageAttacker) {
+      doRollAttackDamage(a, false, isCrit, false, false, false, false, false);
       return;
     }
     const oneHandedRaw = parseDiceFromText(a.damage);
@@ -3643,6 +3752,14 @@ export async function renderSheet(id) {
       </label>`
           : ""
       }
+      ${
+        savageAttacker
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable ? "6px" : "0"};">
+        <input type="checkbox" data-use-savage-attacker />
+        добавить черту «Дикий атакующий» — переброс костей урона оружия, взять лучший результат (раз за ход)
+      </label>`
+          : ""
+      }
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
         <button data-action="confirm-roll-damage" class="primary">Бросить</button>
       </div>`;
@@ -3653,10 +3770,11 @@ export async function renderSheet(id) {
       const useDuelist = duelist ? modal.querySelector("[data-use-duelist]").checked : false;
       const useVersatile = versatileSides ? modal.querySelector("[data-use-versatile]").checked : false;
       const useSuperiority = superiorityAvailable ? modal.querySelector("[data-use-superiority]").checked : false;
+      const useSavageAttacker = savageAttacker ? modal.querySelector("[data-use-savage-attacker]").checked : false;
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority);
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
@@ -3783,6 +3901,7 @@ export async function renderSheet(id) {
     }
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
+    if (feat.id === TOUGH_FEAT_ID) applyToughFeatHpGrant();
     featPreviewId = "";
     featChosenAbility = "";
     featChosenSkills = [];
@@ -3802,6 +3921,11 @@ export async function renderSheet(id) {
       // Only drop skills not granted by another source we can't tell apart —
       // simplest safe behaviour: leave proficiency as-is (player can uncheck
       // manually in Владения если нужно), just clean up the bonus log entry.
+    }
+    if (feat && feat.id === TOUGH_FEAT_ID) {
+      const loss = 2 * totalLevel(data);
+      data.hp.max = Math.max(1, (Number(data.hp.max) || 0) - loss);
+      data.hp.current = Math.max(0, Math.min(data.hp.current, data.hp.max));
     }
     doSave();
     render();
@@ -3856,6 +3980,13 @@ export async function renderSheet(id) {
     }
     const r = rollExpr(expr);
     showRollResult({ label: f.name || "Умение", detail: `${toCyrillicDice(expr)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`, total: r.total });
+  });
+  on(app, "click", "[data-action=apply-survivor-heal]", (e, el) => {
+    const amount = 5 + getAbilityMod(data, "con");
+    const max = Number(data.hp.max) || 0;
+    data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + amount);
+    doSave();
+    render();
   });
   on(app, "click", "[data-action=roll-feature-attack]", (e, el) => {
     const f = data.features[Number(el.dataset.index)];

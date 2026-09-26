@@ -236,7 +236,8 @@ export function armorClass(data) {
 }
 
 export function initiativeBonus(data) {
-  return getAbilityMod(data, "dex");
+  const alert = (data.feats || []).some((f) => f.id === "alert") ? 5 : 0;
+  return getAbilityMod(data, "dex") + alert;
 }
 
 export function spellSaveDC(data) {
