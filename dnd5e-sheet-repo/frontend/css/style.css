@@ -1,0 +1,634 @@
+:root {
+  --bg: #0f1c2e;
+  --bg-panel: #16273f;
+  --bg-panel-2: #1c3050;
+  --border: #28406b;
+  --gold: #d4af37;
+  --gold-bright: #f5dd9a;
+  --gold-dim: #a3822f;
+  --text: #f2e6c8;
+  --text-dim: #cdbfa0;
+  --red: #9c352b;
+  --red-deep: #6e211c;
+  --red-glow: #e2604a;
+  --green: #5c8a5c;
+  --blue: #3d6099;
+  --blue-glow: #6fa3e0;
+  --radius: 8px;
+  font-size: 17px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "IM Fell English", "Iowan Old Style", Georgia, serif;
+  line-height: 1.45;
+  font-size: 1.05rem;
+}
+#app { max-width: 1240px; margin: 0 auto; padding: 24px 32px; padding-bottom: 80px; }
+@media (max-width: 900px) {
+  #app { padding: 14px; }
+}
+
+h1, h2, h3 { font-family: "Cormorant Garamond", "Palatino Linotype", Georgia, serif; font-weight: 600; color: var(--gold-bright); margin: 0 0 8px; }
+h1 {
+  font-size: 1.9rem;
+  font-weight: 700;
+  background: linear-gradient(180deg, #fff3d1, #f5dd9a 40%, #d4af37 75%, #9c352b);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 10px rgba(245, 221, 154, 0.25));
+  display: inline-block;
+}
+h2 { font-size: 1.35rem; font-weight: 700; letter-spacing: 0.01em; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-top: 20px; }
+h3 { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.01em; color: var(--gold); }
+a { color: var(--gold-bright); }
+
+button, .btn {
+  /* Cinzel (all-caps, geometric numerals) made button labels and any digits
+     in them hard to read; "Cormorant Garamond" keeps the fantasy feel while
+     staying legible, matching the headers. */
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: linear-gradient(180deg, var(--bg-panel-2), var(--bg-panel));
+  color: var(--text);
+  border: 1px solid var(--gold-dim);
+  border-radius: var(--radius);
+  padding: 9px 16px;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+button:hover { border-color: var(--gold); color: var(--gold-bright); box-shadow: 0 0 10px rgba(212, 175, 55, 0.35); }
+button.primary { background: linear-gradient(180deg, var(--gold-bright), var(--gold)); color: #1a1206; border-color: var(--gold); font-weight: bold; }
+button.primary:hover { filter: brightness(1.08); box-shadow: 0 0 12px rgba(245, 221, 154, 0.5); }
+button.danger { background: linear-gradient(180deg, var(--red), var(--red-deep)); color: var(--text); border-color: var(--red-glow); font-weight: bold; }
+button.danger:hover { box-shadow: 0 0 12px rgba(226, 96, 74, 0.5); filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.small { padding: 5px 10px; font-size: 0.85rem; }
+button.icon-btn { padding: 7px 11px; }
+
+input, select, textarea {
+  font-family: inherit;
+  background: var(--bg-panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 1rem;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--gold); }
+label { display: block; font-size: 0.88rem; color: var(--text-dim); margin-bottom: 3px; }
+textarea { width: 100%; resize: vertical; font-family: inherit; }
+/* The browser's native up/down spin buttons occupy real width on the right
+   side of a number input, so text-align:center actually centers the digits
+   within the remaining (narrower) space — visibly left of center relative
+   to the box itself, and out of line with a centered value underneath/next
+   to it (e.g. the ability-score box vs. its modifier). Hiding the spinner
+   removes that reserved space so the value centers in the whole box. */
+input[type="number"] { font-family: "Manrope", sans-serif; font-weight: 700; text-align: center; -moz-appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.num { font-family: "Manrope", sans-serif; color: var(--gold-bright); font-weight: 800; }
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.row.between { justify-content: space-between; }
+.col { display: flex; flex-direction: column; gap: 4px; }
+.grid { display: grid; gap: 10px; }
+.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.grid.cols-6 { grid-template-columns: repeat(6, 1fr); }
+
+.money-row { display: flex; gap: 10px; }
+.money-box { display: flex; flex-direction: column; gap: 3px; width: 76px; }
+.money-box label { font-size: 0.96rem; color: var(--text-dim); text-align: center; }
+.money-box input { width: 100%; text-align: center; padding: 5px 2px; font-family: "Manrope", sans-serif; font-weight: 700; }
+@media (max-width: 480px) {
+  .money-box { width: 64px; }
+}
+.grid > * { min-width: 0; }
+@media (max-width: 640px) {
+  .grid.cols-3 { grid-template-columns: repeat(2, 1fr); }
+  .grid.cols-6 { grid-template-columns: repeat(3, 1fr); }
+}
+
+.muted { color: var(--text-dim); }
+.top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; flex-wrap: wrap; }
+.top-bar .brand {
+  font-family: "Metamorphous", "Cormorant Garamond", Georgia, serif;
+  font-weight: 400;
+  background: linear-gradient(180deg, #fff3d1, #f5dd9a 40%, #d4af37 75%, #9c352b);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-size: 1.4rem;
+  text-decoration: none;
+}
+
+/* The Инвентарь tab's Деньги/Оружие/Боеприпасы/Прочее снаряжение panels
+   are all one connected "inventory" concern, so they sit closer together
+   than panels elsewhere (which stay at the default 16px). */
+.inventory-panels .panel { margin-bottom: 8px; }
+.inventory-panels .panel:last-child { margin-bottom: 0; }
+
+.panel-tight { padding: 8px 12px; }
+.panel-tight h2 { margin-top: 0; margin-bottom: 6px; padding-bottom: 5px; }
+/* Compact header: smaller labels/inputs and tighter spacing so the whole
+   block (name/race/background/classes) takes noticeably less vertical
+   room even after the portrait box next to it got bigger. */
+.panel-tight label { font-size: 0.96rem; margin-bottom: 1px; }
+.panel-tight input, .panel-tight select { padding: 4px 7px; font-size: 0.86rem; }
+.panel-tight .grid { gap: 6px; }
+/* Was the smallest text in the app (0.7rem) -- bumped +4pt per the same
+   "~0.06rem per pt" convention used just below for the ammo panel. */
+.panel-tight table.sheet-table th { padding: 3px 5px; font-size: 0.94rem; }
+.panel-tight table.sheet-table td { padding: 2px 5px; }
+/* Ammo panel also uses panel-tight (for the same reduced padding), but its
+   own text should read at +2pt over that compact default, not inherit it. */
+.ammo-panel.panel-tight label { font-size: 0.84rem; }
+.ammo-panel.panel-tight input { font-size: 1rem; padding: 5px 7px; }
+.panel-tight table.sheet-table input, .panel-tight table.sheet-table select { padding: 3px 6px; font-size: 0.82rem; }
+
+.abilities-grid { gap: 6px; }
+.ability-box {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+.ability-box:hover { border-color: var(--gold); }
+.ability-box .label { font-size: 0.98rem; color: var(--gold-bright); font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; text-shadow: 0 0 6px rgba(245, 221, 154, 0.35); }
+.ability-box .score-input { width: 100%; max-width: 64px; text-align: center; font-size: 0.95rem; margin: 3px auto; font-family: "Manrope", sans-serif; font-weight: 700; padding: 3px 2px; }
+.ability-box .mod { font-size: 1rem; color: var(--text); font-weight: 700; font-family: "Manrope", sans-serif; }
+
+.skill-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 1rem; border-bottom: 1px dashed rgba(255,255,255,0.05); }
+/* Not scoped to .skill-row so the same circular dot can also be used as a
+   swatch in the владение/компетентность legend below the skills list. */
+.prof-dot { width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--text-dim); cursor: pointer; flex: none; box-sizing: border-box; display: inline-block; }
+/* Proficient: a solid gold dot. Expertise: the same gold dot with a
+   thicker red ring around it, so it reads unambiguously different from
+   plain proficiency at a glance (and matches the legend swatch below). */
+.prof-dot.prof { background: var(--gold); border-color: var(--gold); }
+.prof-dot.expert { background: var(--gold); border-color: var(--gold); box-shadow: 0 0 0 5px var(--red-deep); }
+.skill-row .name { flex: 1; }
+.skill-row .bonus { width: 36px; text-align: center; cursor: pointer; color: var(--gold-bright); font-weight: 800; font-family: "Manrope", sans-serif; }
+.skill-row .bonus:hover { text-decoration: underline; }
+.skill-row .ability-tag { font-size: 0.8rem; color: var(--text-dim); width: 34px; white-space: nowrap; }
+
+.skills-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 20px; }
+/* +2pt over the previous 0.83rem/0.85rem sizing on both the skill/save name
+   and its bonus number — the whole row scales together since .name/.bonus
+   don't set their own font-size and just inherit .skill-row's. */
+.skills-grid .skill-row { font-size: 0.97rem; gap: 9px; padding: 4px 0; line-height: 1.25; }
+.skills-grid .skill-row .ability-tag { width: 34px; font-size: 1.02rem; margin-right: 4px; white-space: nowrap; }
+.skills-grid .skill-row .name { padding-right: 6px; }
+.skills-grid .skill-row .bonus { width: 32px; }
+@media (max-width: 700px) {
+  .skills-grid { grid-template-columns: 1fr; }
+}
+
+.saves-compact .skill-row { font-size: 0.99rem; gap: 8px; padding: 3px 0; }
+.saves-compact .skill-row .prof-dot { width: 12px; height: 12px; }
+.saves-compact .skill-row .bonus { width: 34px; }
+
+.passive-grid { display: flex; flex-direction: column; }
+.passive-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 0; font-size: 0.97rem; border-bottom: 1px dashed rgba(255,255,255,0.05);
+}
+.passive-item .name { color: var(--text); }
+.passive-item .bonus { font-weight: 800; color: var(--gold-bright); font-family: "Manrope", sans-serif; }
+
+.insp-star { cursor: pointer; font-size: 1.05rem; color: var(--text-dim); line-height: 1; }
+.insp-star.filled { color: var(--gold-bright); text-shadow: 0 0 6px rgba(245, 221, 154, 0.5); }
+
+.d20-icon { cursor: pointer; flex: none; filter: drop-shadow(0 0 2px rgba(0,0,0,0.4)); transition: transform 0.1s; }
+.d20-icon:hover { transform: scale(1.1); filter: drop-shadow(0 0 6px rgba(245, 221, 154, 0.6)); }
+
+.rest-icon { cursor: pointer; flex: none; align-self: flex-start; filter: drop-shadow(0 0 2px rgba(0,0,0,0.4)); transition: transform 0.1s; }
+.rest-icon:hover { transform: scale(1.1); filter: drop-shadow(0 0 6px rgba(245, 221, 154, 0.6)); }
+
+.death-banner {
+  margin-top: 8px; padding: 8px 12px; background: rgba(156, 53, 43, 0.22);
+  border: 1px solid #9c352b; color: #ff8a75; border-radius: var(--radius);
+  font-weight: 700; text-align: center; font-size: 0.85rem;
+}
+
+.potion-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.potion-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 8px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.potion-svg-icon { flex: none; filter: drop-shadow(0 0 3px rgba(226, 96, 74, 0.45)); }
+.potion-info { flex: 1; min-width: 0; }
+.potion-info .potion-name { font-size: 0.88rem; }
+.potion-info .potion-dice { font-size: 0.98rem; }
+.potion-controls { display: flex; align-items: center; gap: 6px; flex: none; }
+.potion-controls .num { min-width: 16px; text-align: center; }
+@media (max-width: 640px) {
+  .potion-row { flex-wrap: wrap; }
+}
+
+.stat-box { text-align: center; background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+.stat-box .value { font-size: 1.7rem; font-weight: 800; color: var(--gold-bright); font-family: "Manrope", sans-serif; }
+.stat-box .label { font-size: 0.8rem; color: var(--text-dim); text-transform: uppercase; }
+/* КД / Инициатива / Скорость: -4pt off the shared .stat-box value size, with
+   the box's own padding trimmed to match so it hugs the now-smaller text
+   instead of leaving the original box mostly empty. */
+.combat-stats .stat-box { padding: 7px 6px; }
+.combat-stats .stat-box .value { font-size: 1.45rem; }
+.combat-stats .stat-box .label { font-size: 0.96rem; }
+
+.hp-circles, .dot-track { display: flex; flex-wrap: wrap; gap: 6px; }
+.hp-circles .circle, .dot-track .circle {
+  width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--text-dim);
+  cursor: pointer; flex: none;
+}
+.dot-track .circle.filled { background: var(--gold); border-color: var(--gold); }
+
+table.sheet-table { width: 100%; border-collapse: collapse; font-size: 0.98rem; table-layout: fixed; }
+table.sheet-table th { text-align: left; color: var(--text-dim); font-weight: normal; font-size: 0.82rem; text-transform: uppercase; padding: 5px 7px; border-bottom: 1px solid var(--border); }
+table.sheet-table td { padding: 5px 7px; border-bottom: 1px solid rgba(255,255,255,0.05); vertical-align: middle; }
+table.sheet-table input, table.sheet-table select { width: 100%; }
+
+/* The attacks row's "Особые свойства" cell can hold two stacked lines (the
+   text field plus its "учитывать ..." checkbox), which made that row taller
+   than the rest and, with vertical-align:middle, pushed every other field in
+   the same row down/up out of line with it. Top-aligning the whole row keeps
+   every field flush with the row's top edge regardless of how tall any one
+   cell's content gets. */
+table.sheet-table.attacks-table td { vertical-align: top; }
+table.sheet-table.attacks-table td input[data-attack-field="bonus"] { text-align: center; }
+/* The action cell holds 4 buttons (Атака/Урон/Крит/✕) in a narrow column --
+   wrap them onto two lines instead of forcing one line, which was pushing
+   the crit button past the table/panel edge. */
+table.sheet-table.attacks-table .attack-actions { flex-wrap: wrap; }
+table.sheet-table.attacks-table .attack-actions button.small { padding: 3px 5px; font-size: 0.82rem; white-space: nowrap; }
+/* Same crowding problem the weapons table below solves -- seven columns
+   (Название/Хар-ка/Бонус/Урон.../Дальность/Особые свойства/действия) in
+   one row overflow the panel at the plain sheet-table size, so this table
+   gets the same size-down treatment. */
+table.sheet-table.attacks-table th { font-size: 0.72rem; padding: 3px 4px; }
+table.sheet-table.attacks-table td { padding: 3px 4px; }
+table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { font-size: 0.8rem; padding: 3px 4px; }
+
+/* Оружие (inventory) table: two font-size steps down from the plain
+   sheet-table default (one step further than .panel-tight elsewhere) --
+   this table has more columns than most (Название/Урон/Тип/Дальность/
+   Свойства/Особые свойства/действия) and was overflowing its panel at the
+   normal size. */
+.weapons-table-compact { font-size: 0.84rem; }
+.weapons-table-compact th { font-size: 0.72rem; padding: 3px 4px; }
+.weapons-table-compact td { padding: 2px 4px; }
+.weapons-table-compact input, .weapons-table-compact select { font-size: 0.76rem; padding: 3px 4px; }
+
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+.tabs button { background: transparent; }
+.tabs button.active { background: linear-gradient(180deg, var(--gold-bright), var(--gold)); color: #1a1206; border-color: var(--gold); font-weight: bold; }
+
+.card { background: var(--bg-panel-2); border: 1px solid var(--border); border-left: 4px solid var(--gold); border-radius: 6px; padding: 12px; }
+.card.selectable { cursor: pointer; }
+.card.selected { border-left-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+
+.level1-choice-panel { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 0 14px rgba(212, 175, 55, 0.25); }
+.card h4 { margin: 0 0 4px; color: var(--gold-bright); font-size: 1.05rem; }
+.card p { margin: 4px 0; font-size: 0.95rem; color: var(--text-dim); }
+
+/* Portrait banner at the top of a race card (only races that have a
+   portrait get one, see RACE_PORTRAITS in wizard.js): the picture is
+   cropped at the waist, sits on the left and fades out at its own right
+   edge into the panel background; the caption sits in its own column
+   to the right of the picture, on the plain panel background. */
+.race-portrait-banner {
+  position: relative;
+  display: flex;
+  height: 150px;
+  margin: 0 0 10px;
+  overflow: hidden;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel-2);
+}
+.race-portrait-banner .race-portrait-img {
+  position: relative; flex: 0 0 48%; width: 48%; height: 100%;
+  background-size: cover; background-position: 50% 8%;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 80%, transparent 100%);
+  mask-image: linear-gradient(to right, #000 0%, #000 80%, transparent 100%);
+}
+.race-portrait-banner .race-portrait-caption {
+  position: relative; flex: 1; display: flex; align-items: center;
+  padding: 6px 12px 6px 4px;
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: 0.74rem; line-height: 1.28; font-weight: 700;
+  color: var(--gold);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* "Умения" (features) as an ornate card per item, laid out in rows that
+   wrap to fill the panel's width — a gold-framed circle icon + title up
+   top, a source "badge" row (race/class/background), then the description,
+   loosely echoing the illustrated feature-card reference. */
+/* Every card is the same fixed size regardless of how much text its
+   feature has -- a short description just leaves empty space, a long one
+   scrolls inside its own box (.feature-card-desc below) instead of
+   stretching the card or the whole row. */
+.feature-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin-top: 12px; align-items: start; }
+.feature-card {
+  position: relative; display: flex; flex-direction: column; gap: 8px; height: 430px;
+  background: var(--bg-panel-2); border: 2px solid var(--gold-dim); border-radius: 10px;
+  padding: 14px; box-shadow: 0 0 0 1px rgba(212, 175, 55, 0.15) inset;
+}
+.feature-card:focus-within, .feature-card:hover { border-color: var(--gold); }
+.feature-card-remove {
+  position: absolute; top: 8px; right: 8px; width: 22px; height: 22px; padding: 0;
+  line-height: 1; font-size: 0.99rem; border-radius: 50%; background: var(--bg-panel);
+}
+.feature-card-header { display: flex; align-items: flex-start; gap: 10px; padding-right: 22px; }
+.feature-card-icon {
+  flex: none; width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 1.25rem; background: var(--bg-panel);
+  border: 2px solid var(--gold); box-shadow: 0 0 8px rgba(212, 175, 55, 0.25);
+}
+/* The title is a textarea (not an <input>) so a long name naturally wraps
+   onto a second line instead of scrolling sideways; auto-grow sizes it to
+   whatever that takes, one line or two. */
+.feature-card-header textarea {
+  flex: 1; min-width: 0; background: transparent; border: none; padding: 3px 0; margin: 0;
+  font-family: "Cormorant Garamond", Georgia, serif; font-weight: 700; font-size: 1.08rem; color: var(--gold-bright);
+  line-height: 1.25; resize: none; overflow: hidden; white-space: normal;
+}
+.feature-card-divider { height: 1px; background: linear-gradient(90deg, transparent, var(--gold-dim), transparent); }
+.feature-card-source, .feature-card-desc {
+  display: flex; align-items: flex-start; gap: 8px; background: var(--bg-panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+}
+.feature-card-source { align-items: center; }
+/* Fills the rest of the fixed-height card; text past what fits scrolls
+   inside this box (about the first ~400 characters show before scrolling,
+   at this font size/line-height) instead of growing the card. */
+.feature-card-desc { flex: 1; min-height: 0; overflow: hidden; }
+.feature-card-source-icon { flex: none; font-size: 0.95rem; opacity: 0.85; }
+.feature-card-source input {
+  flex: 1; min-width: 0; background: transparent; border: none; padding: 0; font-size: 0.88rem;
+}
+.feature-card-desc textarea {
+  flex: 1; min-width: 0; background: transparent; border: none; padding: 0; font-size: 0.88rem;
+  resize: none; overflow-y: auto; height: 100%; line-height: 1.4; color: var(--text);
+}
+.feature-card-uses { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
+.feature-card-uses .pip {
+  width: 16px; height: 16px; border-radius: 50%; flex: none; cursor: pointer;
+  border: 2px solid var(--gold-dim); background: transparent; padding: 0;
+}
+.feature-card-uses .pip.filled { background: var(--gold); border-color: var(--gold); box-shadow: 0 0 5px rgba(212, 175, 55, 0.5); }
+.feature-card-uses .pip-label { font-size: 0.96rem; color: var(--text-dim); margin-right: 2px; }
+.feature-card-roll { align-self: flex-start; }
+.feature-card-dc {
+  font-size: 1.02rem; color: var(--gold-dim); border: 1px solid var(--gold-dim); border-radius: 4px;
+  padding: 2px 7px; white-space: nowrap; flex: none;
+}
+.feature-card-refresh { align-self: flex-start; border-color: var(--gold); font-size: 1.00rem; padding: 3px 8px; }
+
+/* Spells & cantrips as ornate cards (gold-framed icon circle, title +
+   italic subtitle, a labeled property grid, then the description),
+   matching the "Умения" feature-card look. */
+/* Spell-slot count fields: sized to the "N-й уровень" label above them
+   instead of stretching to the grid column's full width, with the typed
+   number left-aligned (the app's number inputs are centered by default). */
+/* Spell-slot count fields: a tight row of 9 (wrapping to 2 rows only if
+   the panel is too narrow to fit them all), each sized to its own
+   "N-й ур." label instead of stretching to a grid column's full width,
+   with the typed number left-aligned (number inputs are centered by
+   default elsewhere in the app). */
+.spell-slots-grid { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+.spell-slots-grid .col { align-items: flex-start; flex: none; gap: 2px; }
+.spell-slots-grid input[type="number"] { width: 58px; padding: 6px 7px; text-align: left; }
+
+.spell-filters input[type="text"], .spell-filters select { margin: 0; }
+.spell-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-top: 4px; align-items: start; }
+/* Fixed size like feature cards -- a spell with a long description
+   scrolls inside .spell-card-desc instead of growing the card. */
+.spell-card {
+  display: flex; flex-direction: column; gap: 10px; height: 560px;
+  background: var(--bg-panel-2); border: 2px solid var(--gold-dim); border-radius: 10px;
+  padding: 14px; box-shadow: 0 0 0 1px rgba(212, 175, 55, 0.15) inset;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.spell-card:hover { border-color: var(--gold); }
+.spell-card.known { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 0 12px rgba(212, 175, 55, 0.25); }
+.spell-card-header { display: flex; align-items: flex-start; gap: 10px; }
+.spell-card-icon {
+  flex: none; width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 1.2rem; background: var(--bg-panel);
+  border: 2px solid var(--gold); box-shadow: 0 0 8px rgba(212, 175, 55, 0.25);
+}
+.spell-card-title-group { flex: 1; min-width: 0; }
+.spell-card-title { margin: 0; font-size: 1.08rem; color: var(--gold-bright); line-height: 1.25; }
+.spell-card-subtitle { margin: 2px 0 0; font-size: 0.85rem; font-style: italic; color: var(--text-dim); }
+.spell-card-toggle { flex: none; }
+.spell-card-toggle input { width: 18px; height: 18px; cursor: pointer; }
+.spell-card-toggle button { white-space: nowrap; }
+/* Non-interactive "prepared today" indicator shown on a spell card outside
+   of the "Подготовить заклинания" editing picker, so glancing at the list
+   can't accidentally unprepare anything (see spellCardControlHtml). */
+.spell-card-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--gold-dim); color: var(--bg-panel);
+  font-size: 0.99rem; font-weight: bold; line-height: 1;
+}
+/* "дар домена" is a whole word, not a single glyph like the plain ✓/✕
+   badges above -- the fixed 18px circle those use would clip it and push
+   it past the card's edge, so this variant sizes to its text instead and
+   sits on its own pill background rather than the gold "checkmark" fill. */
+.spell-card-badge-domain {
+  width: auto; height: auto; border-radius: 999px;
+  padding: 3px 9px; background: var(--bg-panel); border: 1px solid var(--gold-dim);
+  color: #ffffff; font-size: 0.78rem; font-weight: normal; white-space: nowrap;
+  max-width: 100%;
+}
+.spell-card-props {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+}
+.spell-card-prop { display: flex; flex-direction: column; gap: 1px; font-size: 0.85rem; }
+.spell-card-prop .prop-label { font-size: 0.96rem; letter-spacing: 0.02em; text-transform: uppercase; color: var(--gold-dim); }
+.spell-card-classes { grid-column: 1 / -1; }
+/* Fills the rest of the fixed-height card; past roughly the first ~400
+   characters the text scrolls inside this box instead of growing the card. */
+.spell-card-desc { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.9rem; color: var(--text); line-height: 1.4; }
+.spell-card-desc p { margin: 0 0 6px; }
+.spell-card-desc p:last-child { margin-bottom: 0; }
+
+/* Hoverable spell/cantrip name (e.g. a level-up chooser's checkbox label)
+   that pops up the full spell card on :hover -- pure CSS, no JS wiring
+   needed. The nested .spell-card reuses spellCardHtml's own markup but
+   drops its fixed grid-card height so it can size to its content instead. */
+.spell-hover-name {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dotted var(--gold-dim);
+}
+.spell-hover-card {
+  display: none;
+  position: absolute;
+  z-index: 60;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  width: 320px;
+}
+.spell-hover-card .spell-card {
+  height: auto;
+  max-height: 420px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(212, 175, 55, 0.15) inset;
+}
+.spell-hover-name:hover .spell-hover-card,
+.spell-hover-name:focus-within .spell-hover-card { display: block; }
+
+/* Known spells grouped by circle: a header naming the circle plus its
+   slot-tracking circles, then a gold divider line, then that circle's
+   spell cards -- repeated per circle, so circles don't run together. */
+.spell-level-section { margin-top: 18px; }
+.spell-level-section:first-child { margin-top: 4px; }
+.spell-level-header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.spell-level-header h4 { margin: 0; color: var(--gold-bright); font-size: 1.05rem; flex: none; }
+.spell-level-divider { height: 2px; margin: 6px 0 12px; background: linear-gradient(90deg, var(--gold), var(--gold-dim), transparent); }
+.spell-slot-circles { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.spell-slot-circles .pip-label { font-size: 0.96rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); margin-right: 2px; }
+.spell-slot-circle {
+  width: 22px; height: 22px; border-radius: 50%; flex: none; cursor: pointer; padding: 0;
+  border: 2px solid var(--gold-dim); background: transparent;
+  transition: background-color 0.15s, box-shadow 0.15s;
+}
+.spell-slot-circle.filled { background: var(--gold); border-color: var(--gold); box-shadow: 0 0 8px rgba(212, 175, 55, 0.5); }
+.spell-slot-circle:hover { border-color: var(--gold); }
+
+.wizard-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 14px; }
+.wizard-steps .step { font-size: 0.82rem; padding: 5px 10px; border-radius: 12px; background: var(--bg-panel-2); border: 1px solid var(--border); color: var(--text-dim); }
+.wizard-steps .step.active { background: linear-gradient(180deg, var(--gold-bright), var(--gold)); color: #1a1206; border-color: var(--gold); font-weight: bold; }
+.wizard-steps .step.done { color: var(--green); border-color: var(--green); }
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px;
+}
+.modal { background: var(--bg-panel); border: 1px solid var(--gold); border-radius: var(--radius); padding: 20px; max-width: 460px; width: 100%; max-height: 90vh; overflow-y: auto; }
+
+.roll-log { max-height: 220px; overflow-y: auto; font-size: 0.92rem; }
+.roll-log .entry { border-bottom: 1px dashed var(--border); padding: 6px 0; display: flex; justify-content: space-between; gap: 8px; }
+.roll-log .entry .total { color: var(--gold-bright); font-weight: 800; font-size: 1.2rem; font-family: "Manrope", sans-serif; }
+.roll-log .entry .crit { color: var(--green); }
+.roll-log .entry .fumble { color: var(--red-glow); }
+
+/* Collapsible per-die breakdown under a damage-roll result ("2 оружие",
+   "6 скрытая атака", ...) -- collapsed by default so the plain formula/total
+   stays the primary thing shown, expandable when the player wants to see
+   which die rolled what. */
+.roll-breakdown { margin-top: 10px; font-size: 0.88rem; }
+.roll-breakdown summary { cursor: pointer; color: var(--gold); user-select: none; }
+.roll-breakdown summary:hover { color: var(--gold-bright); }
+.roll-breakdown ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.roll-breakdown li { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--border); }
+.roll-breakdown li .roll-breakdown-value { color: var(--gold-bright); font-weight: 700; min-width: 1.6em; text-align: right; }
+.roll-breakdown li .roll-breakdown-label { color: var(--text-dim); }
+
+.badge { display: inline-block; font-size: 0.8rem; padding: 3px 8px; border-radius: 10px; background: var(--bg-panel-2); border: 1px solid var(--border); color: var(--text-dim); }
+.error-text { color: var(--red-glow); font-size: 0.95rem; }
+.save-indicator { font-size: 0.85rem; color: var(--text-dim); }
+.save-indicator.saved { color: var(--green); }
+.save-indicator.saving { color: var(--gold); }
+.save-indicator.error { color: var(--red-glow); }
+
+.center-screen { min-height: 80vh; display: flex; align-items: center; justify-content: center; }
+.auth-box { width: 100%; max-width: 380px; }
+.auth-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.auth-tabs button { flex: 1; background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px; }
+.auth-tabs button.active { color: var(--gold-bright); border-bottom-color: var(--gold); }
+
+.char-list-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.char-list-item .info { flex: 1; }
+.char-list-item .name { font-size: 1.2rem; color: var(--gold-bright); }
+
+.dice-picker { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }
+.dice-picker button { padding: 16px 4px; font-size: 1.1rem; font-family: "Manrope", sans-serif; font-weight: 700; }
+
+/* Static d20 icon (a copy of the reference picture, no animation) shown next
+   to the "Кубики" panel controls -- purely decorative now, clicking it does
+   not roll anything (only the "Бросить" button does). */
+.d20-quick-icon { display: block; filter: drop-shadow(0 0 5px rgba(212, 175, 55, 0.35)); }
+
+.dice-panel-body { display: flex; align-items: center; gap: 14px; margin-top: 8px; }
+.dice-panel-icon { flex: none; padding: 4px; }
+.dice-panel-body select { width: 100%; }
+
+/* Inline roll log embedded directly in the "Кубики" panel (replaces the old
+   journal-in-a-modal button), so recent rolls from anywhere in the app are
+   visible at a glance without opening anything. */
+.dice-panel-log .roll-log-inline { max-height: 180px; margin-top: 4px; }
+
+/* Dice-pool builder inside the "Кубики" modal: pick a die type, add it to
+   the pool as a removable chip, repeat for as many dice as needed, then
+   roll the whole pool together as one total. */
+.dice-pool-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; min-height: 30px; }
+.dice-pool-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px;
+  background: var(--bg-panel-2); border: 1px solid var(--gold-dim); border-radius: 999px;
+  font-family: "Manrope", sans-serif; font-weight: 700; font-size: 0.88rem; color: var(--gold-bright);
+}
+.dice-pool-chip button {
+  border: none; background: none; padding: 0 2px; color: var(--text-dim); cursor: pointer; font-size: 0.85rem;
+}
+.dice-pool-chip button:hover { color: var(--red-glow); }
+
+.footer-note { text-align: center; color: var(--text-dim); font-size: 0.88rem; margin-top: 20px; }
+
+/* A bit of extra room at the bottom of the Атаки panel so it doesn't feel
+   as cramped against the attack rows above it. */
+.attacks-panel { padding-bottom: 26px; }
+
+/* Thin gold ring marking every clickable element that triggers a dice roll. */
+[data-action^="roll"], [data-action="drink-potion"], [data-action="open-dice"] {
+  box-shadow: 0 0 0 1px var(--gold-dim);
+  border-radius: 4px;
+}
+[data-action^="roll"]:hover, [data-action="drink-potion"]:hover, [data-action="open-dice"]:hover {
+  box-shadow: 0 0 0 1px var(--gold-bright);
+}
+
+/* Equipment-step hover tooltip (character creation): shows a short
+   description of a weapon/armor/pack/tool option on hover, styled instead
+   of relying on the slow/plain native title="" tooltip. */
+.eq-tip { position: relative; cursor: help; border-bottom: 1px dotted var(--gold-dim); }
+.eq-tip-bubble {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 6px;
+  z-index: 50;
+  min-width: 220px;
+  max-width: 340px;
+  background: var(--bg-panel-2, #1c1a14);
+  border: 1px solid var(--gold-dim);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text, #e8dfc8);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+  white-space: normal;
+}
+.eq-tip:hover .eq-tip-bubble, .eq-tip:focus .eq-tip-bubble { display: block; }

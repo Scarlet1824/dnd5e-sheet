@@ -1,0 +1,4261 @@
+import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal } from "../dom.js";
+import { api, getUser, clearSession } from "../api.js";
+import { navigate } from "../router.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS } from "../data/dnd5e-data.js";
+import {
+  totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
+  isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
+  passivePerception, passiveInvestigation, passiveInsight, armorClass, initiativeBonus, spellSaveDC, spellAttackBonus,
+} from "../character.js";
+import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
+import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
+import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
+
+// showRollResult() (diceModal.js) fires this on `document` after every roll
+// anywhere in the app, so the inline roll-log on the sheet's main tab can
+// refresh itself without a full page re-render. Tracked at module scope (not
+// #app, which freshApp() resets) so re-visiting a sheet swaps the listener
+// instead of stacking a new one on top of the old.
+let rollLogRefreshHandler = null;
+
+// Russian plural forms for "кубик" (1 кубик, 2-4 кубика, 5+/11-14 кубиков).
+function pluralizeDice(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "кубик";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "кубика";
+  return "кубиков";
+}
+
+function get(obj, path) {
+  return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+function set(obj, path, value) {
+  const keys = path.split(".");
+  let o = obj;
+  for (let i = 0; i < keys.length - 1; i++) {
+    if (o[keys[i]] == null) o[keys[i]] = {};
+    o = o[keys[i]];
+  }
+  o[keys[keys.length - 1]] = value;
+}
+
+export async function renderSheet(id) {
+  const user = getUser();
+  // Scopes the roll log (dice.js) to this character -- every roll made
+  // while this sheet is open gets filed under its own log instead of one
+  // shared across every character sheet in the browser.
+  setRollLogCharacter(id);
+  // See dom.js freshApp(): drops listeners left over from viewing another
+  // (or the same) character earlier, so the ones wired below don't stack.
+  freshApp();
+  mount(`<div class="panel"><p class="muted">Загрузка персонажа…</p></div>`);
+
+  let character;
+  try {
+    const res = await api.getCharacter(id);
+    character = res.character;
+  } catch (err) {
+    mount(`<div class="panel"><p class="error-text">${escapeHtml(err.message)}</p><a href="#/characters">← К списку</a></div>`);
+    return;
+  }
+
+  const data = character.data;
+  let activeTab = "main"; // main | attacks | spells | inventory | feats | traits | personality | pets
+  let dicePool = []; // [{sides, count}] -- dice queued in the "Кубики" panel, rolled together and cleared on "Бросить"
+  let featPreviewId = ""; // currently-highlighted feat in the picker, for description preview before adding
+  let featChosenAbility = ""; // ability chosen for a multi-choice abilityIncrease feat, before "Добавить"
+  let featChosenSkills = []; // skills chosen for a skillChoice feat (Одарённый), before "Добавить"
+  let spellSearch = ""; // free-text filter in the spells tab's "add spell" browser
+  let spellLevelFilter = "all"; // "all" | "0" | "1" in the spells tab's "add spell" browser
+  let spellBrowseOpen = false; // spells tab: whether the "+ Добавить заклинание" browse panel is open
+  let spellPrepMode = false; // spells tab: whether the full prepare-spells picker (all available spells, not just today's prepared ones) is open
+  let restState = { tab: "short", message: "" }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
+  let restModalEl = null; // the rest modal's root element, once opened -- used to refresh its content in place without closing it
+
+  const saveIndicator = () => $("[data-save-indicator]");
+  const doSave = debounce(async () => {
+    const el = saveIndicator();
+    if (el) { el.textContent = "Сохранение…"; el.className = "save-indicator saving"; }
+    try {
+      await api.updateCharacter(id, { name: data.name, edition: data.edition, data });
+      const el2 = saveIndicator();
+      if (el2) { el2.textContent = "Сохранено ✓"; el2.className = "save-indicator saved"; }
+    } catch (err) {
+      const el2 = saveIndicator();
+      if (el2) { el2.textContent = "Ошибка сохранения"; el2.className = "save-indicator error"; }
+    }
+  }, 700);
+
+  // One-time migration for characters created before class features were
+  // split into name+description: back then a class feature like "Второе
+  // дыхание (1к10 + уровень хитов, ...)" was saved with its whole
+  // parenthetical jammed into the name and an empty desc, so the card
+  // showed a long title and no description. Split those the same way new
+  // characters are seeded, and save once if anything changed.
+  (function migrateFeatureText() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (!f.desc && /\)\s*$/.test(f.name || "")) {
+        const split = splitFeatureText(f.name);
+        if (split.desc) {
+          f.name = split.name;
+          f.desc = split.desc;
+          changed = true;
+        }
+      }
+    });
+    if (changed) doSave();
+  })();
+
+  // One-time migration for Forest Gnome characters created before the
+  // racial "малая иллюзия" cantrip and the fuller "Общение с маленькими
+  // зверями" trait text existed on file: back-fills the missing cantrip
+  // and renames the old short "Разговор с мелкими зверями" card over to
+  // the current name+text, the same way a fresh character gets it now.
+  (function migrateGnomeTraits() {
+    let changed = false;
+    const gnome = RACES.find((r) => r.id === "gnome");
+    const forestGnome = gnome && (gnome.subraces || []).find((s) => s.id === "forest-gnome");
+    if (forestGnome && (data.raceName || "").includes(forestGnome.name)) {
+      const oldTrait = (data.features || []).find((f) => f.name === "Разговор с мелкими зверями");
+      const newTrait = (forestGnome.traits || []).find((t) => t.name === "Общение с маленькими зверями");
+      if (oldTrait && newTrait) {
+        oldTrait.name = newTrait.name;
+        oldTrait.desc = newTrait.desc;
+        changed = true;
+      }
+      if (forestGnome.grantedCantrips && forestGnome.grantedCantrips.length) {
+        if (!data.spellcasting) data.spellcasting = { ability: "int", classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+        if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+        forestGnome.grantedCantrips.forEach((cid) => {
+          if (!data.spellcasting.cantrips.includes(cid)) {
+            data.spellcasting.cantrips.push(cid);
+            changed = true;
+          }
+        });
+      }
+    }
+    if (changed) doSave();
+  })();
+
+  // Generic backfill for any race/subrace with `grantedCantrips` (Forest
+  // Gnome's малая иллюзия above, Aasimar's свет, ...) on a character
+  // created before that race entry had the field, or before the cantrip
+  // existed on file at all. Matches by name against data.raceName, so it
+  // works whether the race has subraces or not -- entirely additive, never
+  // touches an existing pick.
+  (function migrateRaceGrantedCantrips() {
+    let changed = false;
+    const raceName = data.raceName || "";
+    if (!raceName) return;
+    RACES.forEach((race) => {
+      [race, ...(race.subraces || [])].forEach((source) => {
+        if (!source.grantedCantrips || !source.grantedCantrips.length) return;
+        if (!raceName.includes(source.name)) return;
+        if (!data.spellcasting) data.spellcasting = { ability: source.grantedCantripsAbility || "int", classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+        if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+        source.grantedCantrips.forEach((cid) => {
+          if (!data.spellcasting.cantrips.includes(cid)) {
+            data.spellcasting.cantrips.push(cid);
+            changed = true;
+          }
+        });
+      });
+    });
+    if (changed) doSave();
+  })();
+
+  // "Небесное сопротивление" is also a level-10 Sorcerer (Divine
+  // Soul/Aberrant Mind-adjacent) subclass feature with an entirely
+  // different effect (temp HP, not damage resistance) -- so this is scoped
+  // to Aasimar characters specifically rather than matched by name alone,
+  // and skips anything that already looks like that other feature's text.
+  (function migrateAasimarCelestialResistanceText() {
+    if (!/Аасимар/i.test(data.raceName || "")) return;
+    const correct = "У вас есть сопротивление урону излучением и некротической энергией.";
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (f.name === "Небесное сопротивление" && f.desc !== correct && !/временные хиты/i.test(f.desc || "")) {
+        f.desc = correct;
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+
+  // One-time migration for characters whose race/subrace grants a skill
+  // proficiency through trait text (e.g. Half-Orc "Угрожающий вид": "Владение
+  // навыком Запугивание.") -- wizard.js now applies that automatically at
+  // creation, but an existing character's card was only ever text, so its
+  // skill's proficiency dot was never actually turned on.
+  (function migrateTraitSkillProficiencies() {
+    let changed = false;
+    data.proficiencies = data.proficiencies || {};
+    if (!Array.isArray(data.proficiencies.skills)) data.proficiencies.skills = [];
+    (data.features || []).forEach((f) => {
+      const m = /Владение\s+навык(?:ом|ами)\s+([^.]+)\.?/i.exec(f.desc || "");
+      if (!m) return;
+      m[1]
+        .split(/,| и /i)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((nm) => {
+          const skill = SKILLS.find((s) => s.label.toLowerCase() === nm.toLowerCase());
+          if (skill && !data.proficiencies.skills.includes(skill.id)) {
+            data.proficiencies.skills.push(skill.id);
+            changed = true;
+          }
+        });
+    });
+    if (changed) doSave();
+  })();
+
+  // One-time migration for characters whose race/class feature grants armor
+  // or weapon proficiency through its text (e.g. Dwarf's "Дварфская боевая
+  // тренировка": "Вы владеете боевым топором, ручным топором, лёгким и
+  // боевым молотом.") -- wizard.js now folds that into "Владения и языки"
+  // automatically at creation, but an existing character's card was only
+  // ever flavor text, so the actual proficiency was never added to the list.
+  (function migrateTraitWeaponArmorProficiencies() {
+    let changed = false;
+    data.proficiencies = data.proficiencies || {};
+    if (!Array.isArray(data.proficiencies.armor)) data.proficiencies.armor = [];
+    if (!Array.isArray(data.proficiencies.weapons)) data.proficiencies.weapons = [];
+    (data.features || []).forEach((f) => {
+      const namedWeapons = TRAIT_NAMED_WEAPON_GRANTS[f.name];
+      if (namedWeapons) {
+        namedWeapons.forEach((w) => {
+          if (!data.proficiencies.weapons.includes(w)) {
+            data.proficiencies.weapons.push(w);
+            changed = true;
+          }
+        });
+        return;
+      }
+      const grants = parseProficiencyGrantsFromText(f.desc);
+      grants.weapons.forEach((w) => {
+        if (!data.proficiencies.weapons.includes(w)) {
+          data.proficiencies.weapons.push(w);
+          changed = true;
+        }
+      });
+      grants.armor.forEach((a) => {
+        if (!data.proficiencies.armor.includes(a)) {
+          data.proficiencies.armor.push(a);
+          changed = true;
+        }
+      });
+    });
+    if (changed) doSave();
+  })();
+
+  // One-time migration for simple feature-name renames (data corrections,
+  // not text rewrites) -- e.g. the Noble background's feature was renamed
+  // from "Привилегированность" to "Благородный". Old-name -> new-name.
+  const RENAMED_FEATURE_NAMES = {
+    "Привилегированность": "Благородный",
+  };
+  (function migrateRenamedFeatureNames() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      const renamed = RENAMED_FEATURE_NAMES[f.name];
+      if (renamed) {
+        f.name = renamed;
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+
+  // One-time migration for a handful of feature texts that were shortened
+  // or slightly wrong in the data file and have since been corrected --
+  // refreshes an existing character's card ONLY if its saved text still
+  // matches the exact old (stale) wording, so a player's own edits to that
+  // card are never overwritten. Mapped by exact OLD TEXT (not just feature
+  // name) -- several unrelated races/traits happen to share the name
+  // "Наследие фей" with genuinely different official wording each (PHB Elf
+  // vs. Half-Elf vs. the MPMM-revised Goblin), so a name-only lookup would
+  // risk overwriting one race's correct text with another's.
+  const STALE_FEATURE_TEXT_FIXES = {
+    "Перебрасывает результат 1 на атаках, проверках и спасбросках.":
+      "Когда вы совершаете бросок к20 и выпадает 1, вы можете перебросить кубик и должны использовать новый результат.",
+    "Преимущество на спасброски против испуга.":
+      "Вы получаете преимущество на спасброски против испуга.",
+    "Может проходить через клетки более крупных существ.":
+      "Вы можете передвигаться через пространство любого существа, чей размер больше вашего.",
+    "Сопротивление урону огнём.":
+      "Вы обладаете сопротивлением урону огнём.",
+    "Знает заговор Чудотворство; с 3 ур. — Адское возмездие, с 5 ур. — Тьма (1/день).":
+      "Вы знаете заговор Чудотворство. По достижении 3 уровня вы можете сотворить заклинание Адское возмездие как заклинание 2 уровня один раз с помощью этой черты, восстанавливая возможность делать это после окончания продолжительного отдыха. По достижении 5 уровня вы можете также сотворить заклинание Тьма один раз с помощью этой черты, восстанавливая возможность делать это после окончания продолжительного отдыха. Харизма является вашей базовой характеристикой заклинаний для этих заклинаний.",
+    "Преимущество на спасброски против очарования; нельзя усыпить магией.":
+      "Вы обладаете преимуществом на спасброски против того, чтобы быть очарованным, и на вас не действует магический сон.",
+    "Преимущество на спасброски против магического усыпления и очарования.":
+      "Вы обладаете преимуществом на спасброски против того, чтобы быть очарованным, и на вас не действует магический сон.",
+    "Преимущество на спасброски против состояния очарован.":
+      "Вы обладаете преимуществом на спасброски, совершаемые, чтобы избежать состояния очарования или закончить его действие.",
+    "к8, бонусное действие":
+      "Вы можете воодушевлять других посредством вдохновляющих слов или музыки. Чтобы сделать это, вы используете бонусное действие в свой ход, чтобы выбрать одно существо, помимо себя, в пределах 60 футов от себя, которое может вас слышать. Это существо получает от вас кость бардовского вдохновения, к6.\n\nОдин раз в течение следующих 10 минут существо может бросить эту кость и прибавить результат к одной проверке характеристики, броску атаки или спасброску, который оно совершает. Существо может подождать с броском кости до после броска к20, но должно решить использовать кость бардовского вдохновения до того, как Мастер объявит, успешен бросок или нет. Как только кость бардовского вдохновения брошена, она теряется. Существо может иметь только одну кость бардовского вдохновения за раз.\n\nВы можете использовать эту способность количество раз, равное модификатору Харизмы (минимум раз в день). Вы восстанавливаете все потраченные использования после продолжительного отдыха.\n\nВаша кость бардовского вдохновения меняется, когда вы достигаете определённых уровней в этом классе: к8 на 5 уровне и к10 на 10 уровне.",
+  };
+  (function migrateStaleFeatureText() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      const fixed = STALE_FEATURE_TEXT_FIXES[f.desc];
+      if (fixed) {
+        f.desc = fixed;
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+
+  // Ranger's level-1 features ("Избранный враг"/"Природный следопыт") used to
+  // have no description at all (the raw features[1] entry had no parenthetical
+  // to split text out of) -- fills in the now-added classFeatureText, but only
+  // when the card is still blank, never overwriting anything a player wrote.
+  const EMPTY_DESC_FEATURE_FIXES = ["Избранный враг", "Природный следопыт"];
+  (function migrateEmptyRangerFeatureText() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (EMPTY_DESC_FEATURE_FIXES.includes(f.name) && !f.desc) {
+        const known = findKnownFeatureText(f.name, f.source);
+        if (known) {
+          f.desc = known;
+          changed = true;
+        }
+      }
+    });
+    if (changed) doSave();
+  })();
+
+  // Hill Dwarf's "Дварфская выносливость" ("Максимум хитов увеличен на 1, и
+  // ещё на 1 за каждый следующий уровень") was, like every other trait, just
+  // flavor text -- this actually applies it to data.hp.max/.current. Since
+  // this app has no automatic level-up flow (hp.max is a plain number the
+  // player edits by hand as they level), the bonus is tracked as "already
+  // applied through level N" and topped up by the difference whenever the
+  // character's current total level has moved past that -- runs every time
+  // the sheet loads, so it self-heals after a manual level change instead of
+  // needing its own level-up UI, and never re-applies the same level twice.
+  (function applyDwarvenToughnessHp() {
+    const hasTrait = (data.features || []).some((f) => f.name === "Дварфская выносливость");
+    if (!hasTrait) return;
+    const lvl = totalLevel(data);
+    const appliedThrough = Number(data.dwarvenToughnessAppliedLevel) || 0;
+    if (lvl > appliedThrough) {
+      const delta = lvl - appliedThrough;
+      data.hp.max = (Number(data.hp.max) || 0) + delta;
+      data.hp.current = (Number(data.hp.current) || 0) + delta;
+      data.dwarvenToughnessAppliedLevel = lvl;
+      doSave();
+    }
+  })();
+
+  // One-time cleanup for characters whose proficiency lists picked up an
+  // actual duplicate entry from an earlier version of the app (before the
+  // wizard's auto-grant code checked .includes() on every push) -- a skill
+  // granted by both a race trait and a class feature/skill pick, say, could
+  // end up listed twice. Every current write path already guards against
+  // this, but old saves keep whatever got written back then, so this
+  // dedupes the arrays once per load rather than needing a manual fix.
+  (function migrateDedupeProficiencies() {
+    let changed = false;
+    const prof = data.proficiencies || {};
+    ["skills", "expertise", "savingThrows", "armor", "weapons", "tools", "languages"].forEach((key) => {
+      if (!Array.isArray(prof[key])) return;
+      const deduped = [...new Set(prof[key])];
+      if (deduped.length !== prof[key].length) {
+        prof[key] = deduped;
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+
+  function render() {
+    mount(`
+      <div class="top-bar">
+        <a href="#/characters" class="brand">← ⚔ D&D 5e</a>
+        <div class="row">
+          <span class="save-indicator" data-save-indicator></span>
+          <span class="muted">${escapeHtml(user?.email || "")}</span>
+        </div>
+      </div>
+      ${headerBlock()}
+      <div class="tabs">
+        ${tabBtn("main", "Лист")}
+        ${tabBtn("attacks", "Атаки")}
+        ${tabBtn("spells", "Заклинания")}
+        ${tabBtn("inventory", "Инвентарь")}
+        ${tabBtn("feats", "Черты")}
+        ${tabBtn("traits", "Умения")}
+        ${tabBtn("personality", "Личность")}
+        ${tabBtn("pets", "Спутники")}
+      </div>
+      <div data-tab-content>
+        ${activeTab === "main" ? mainTab() : ""}
+        ${activeTab === "attacks" ? attacksTab() : ""}
+        ${activeTab === "spells" ? spellsTab() : ""}
+        ${activeTab === "inventory" ? inventoryTab() : ""}
+        ${activeTab === "feats" ? featsTab() : ""}
+        ${activeTab === "traits" ? traitsTab() : ""}
+        ${activeTab === "personality" ? personalityTab() : ""}
+        ${activeTab === "pets" ? petsTab() : ""}
+      </div>
+      <div class="footer-note">Изменения сохраняются автоматически в облако.</div>
+    `);
+    // Feature-card title is an auto-growing textarea (so a long name wraps
+    // onto a second line instead of scrolling sideways) — size it to its
+    // content right after mount. The description box is fixed-height with
+    // its own internal scrollbar instead (see .feature-card-desc in CSS),
+    // so cards stay a uniform size regardless of how much text a feature has.
+    $all(".feature-card-header textarea", app).forEach(autoGrowTextarea);
+  }
+
+  function autoGrowTextarea(el) {
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }
+
+  function tabBtn(id2, label) {
+    return `<button data-tab="${id2}" class="${activeTab === id2 ? "active" : ""}">${label}</button>`;
+  }
+
+  function headerBlock() {
+    const lvl = totalLevel(data);
+    const pb = proficiencyBonus(data);
+    return `
+      <div class="panel panel-tight">
+        <div class="row" style="align-items:flex-start;gap:10px;">
+          ${portraitBox()}
+          <div style="flex:1;min-width:0;">
+            <div class="grid cols-2">
+              <div class="col">
+                <label>Имя персонажа</label>
+                <input type="text" data-bind="name" maxlength="30" value="${escapeHtml(data.name)}" style="font-size:1.05rem;" />
+              </div>
+              <div class="col">
+                <label>Редакция</label>
+                <select data-bind="edition">
+                  <option value="2014" ${data.edition === "2014" ? "selected" : ""}>2014</option>
+                  <option value="2024" ${data.edition === "2024" ? "selected" : ""}>2024</option>
+                </select>
+              </div>
+            </div>
+            <div class="grid cols-3" style="margin-top:4px;">
+              <div class="col">
+                <label>Раса</label>
+                <input type="text" data-bind="raceName" maxlength="30" value="${escapeHtml(data.raceName || "")}" placeholder="напр. Эльф" />
+              </div>
+              <div class="col">
+                <label>Предыстория</label>
+                <input type="text" data-bind="backgroundName" maxlength="30" value="${escapeHtml(data.backgroundName || "")}" placeholder="напр. Мудрец" />
+              </div>
+              <div class="col">
+                <label>Мировоззрение</label>
+                <select data-bind="alignment">
+                  <option value="">—</option>
+                  ${ALIGNMENTS.map((a) => `<option value="${escapeHtml(a)}" ${data.alignment === a ? "selected" : ""}>${escapeHtml(a)}</option>`).join("")}
+                </select>
+              </div>
+            </div>
+          </div>
+          ${restButtonHtml()}
+        </div>
+        ${classesEditor()}
+        <p class="muted" style="margin:2px 0 0;font-size:0.76rem;">Суммарный уровень: <strong class="num">${lvl}</strong> · Бонус мастерства: <strong class="num">${formatModifier(pb)}</strong></p>
+        <div style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px;">
+          ${inspirationWidget()}
+        </div>
+      </div>`;
+  }
+
+  // Rest button, top-right of the header panel: sun/moon icon (no button
+  // chrome behind it, just the image), opens the short/long rest modal.
+  function restButtonHtml() {
+    return `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+        <img class="rest-icon" src="assets/icons/rest.png" data-action="open-rest-modal" width="52" height="52" alt="Отдых" title="Короткий или продолжительный отдых" />
+        <span class="muted" style="font-size:0.68rem;margin-top:-2px;">Отдых</span>
+      </div>`;
+  }
+
+  // ---- Rest (short/long) -----------------------------------------------
+  // Hit Dice on this sheet are a single pool ({die,total,current}), not
+  // broken out per class -- fine for single-class characters and a
+  // reasonable simplification for multiclass ones (the player sets total
+  // manually already, same as elsewhere on this sheet).
+  function ensureHitDice() {
+    if (!data.hitDice) data.hitDice = { die: 8, total: 1, current: 1 };
+  }
+  function hitDiceInfo() {
+    ensureHitDice();
+    return {
+      die: Number(data.hitDice.die) || 8,
+      total: Number(data.hitDice.total) || 1,
+      current: Number(data.hitDice.current) || 0,
+    };
+  }
+  // Resets usesState -> all-available for every feature whose parsed/forced
+  // recharge matches one of the given recharge kinds ("short"/"long"/"any").
+  // Infinite-use features (Rage at 20) have nothing to reset.
+  function restoreFeatureUses(rechargeKinds) {
+    (data.features || []).forEach((f) => {
+      const uses = resolveFeatureUses(f);
+      if (!uses || uses.max <= 0 || uses.max === Infinity) return;
+      if (!uses.recharge || !rechargeKinds.includes(uses.recharge)) return;
+      f.usesState = Array(uses.max).fill(true);
+    });
+  }
+  // Refills every spell-slot circle at every level that currently has slots.
+  function restoreAllSpellSlots() {
+    const sc = data.spellcasting;
+    if (!sc || !sc.slots) return;
+    if (!sc.slotsFilled) sc.slotsFilled = {};
+    Object.keys(sc.slots).forEach((lvl) => {
+      const max = Number(sc.slots[lvl]) || 0;
+      if (max > 0) sc.slotsFilled[lvl] = Array(max).fill(true);
+    });
+  }
+  // Pact Magic (Warlock): all of that class's spell slots come back on a
+  // SHORT rest, not just a long one. This sheet keeps one shared slot pool
+  // rather than a separate pact pool, so "has a pact-casting class" is
+  // treated as "this character's whole slot pool is pact slots" -- true for
+  // a single-classed Warlock, a reasonable simplification for a multiclass
+  // one (same simplification the sheet already makes for Hit Dice/slots).
+  function isPactCaster() {
+    return (data.classes || []).some((c) => getClass(c.id)?.spellcasting?.pact);
+  }
+  // "Магическое восстановление" (Wizard) / "Естественное восстановление"
+  // (Circle of the Land Druid): once per day, during a short rest, recover
+  // spell slots whose levels sum to at most half your class level (round
+  // up), none 6th level or higher. Both are forced into resolveFeatureUses
+  // as {max:1, recharge:"long"} (see there) so they get normal pip tracking
+  // and this rest flow can tell whether today's use is still available.
+  const ARCANE_RECOVERY_FEATURES = [
+    { match: /^Магическое восстановление$/i, classId: "wizard", classLabel: "волшебника" },
+    { match: /^Естественное восстановление$/i, classId: "druid", classLabel: "друида" },
+  ];
+  function findArcaneRecovery() {
+    for (const entry of ARCANE_RECOVERY_FEATURES) {
+      const feature = (data.features || []).find((f) => entry.match.test(f.name || ""));
+      if (!feature) continue;
+      const uses = resolveFeatureUses(feature);
+      if (!uses) continue;
+      const arr = usesArrayFor(feature, uses.max);
+      if (arr.some(Boolean)) return { feature, uses, ...entry };
+    }
+    return null;
+  }
+  function refreshRestModal() {
+    if (restModalEl) restModalEl.innerHTML = restModalBodyHtml();
+  }
+  function restModalBodyHtml() {
+    return `
+      <h3 style="margin:0 0 10px;">Отдых</h3>
+      <div class="tabs" style="margin:0 0 12px;">
+        <button type="button" data-rest-tab="short" class="${restState.tab === "short" ? "active" : ""}">Короткий отдых</button>
+        <button type="button" data-rest-tab="long" class="${restState.tab === "long" ? "active" : ""}">Продолжительный отдых</button>
+      </div>
+      ${restState.tab === "short" ? shortRestTabHtml() : longRestTabHtml()}
+      ${restState.message ? `<p class="muted" style="margin-top:10px;">${escapeHtml(restState.message)}</p>` : ""}
+    `;
+  }
+  function shortRestTabHtml() {
+    const hd = hitDiceInfo();
+    return `
+      <div class="panel panel-tight" style="margin:0;">
+        <p style="margin:0 0 8px;">Кости хитов: <strong class="num">${hd.current}</strong> из ${hd.total} (к${hd.die})</p>
+        <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap;">
+          <label class="row" style="gap:6px;align-items:center;">
+            <span class="muted" style="font-size:0.82rem;">Потратить костей:</span>
+            <input type="number" min="0" max="${hd.current}" value="${Math.min(1, hd.current)}" data-rest-dice-count style="width:60px;" />
+          </label>
+          <button type="button" class="small primary" data-action="spend-hit-dice" ${hd.current <= 0 ? "disabled" : ""}>Бросить и восстановить хиты</button>
+        </div>
+        <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">Каждая кость даёт 1к${hd.die} ${formatModifier(getAbilityMod(data, "con"))} (модификатор Телосложения) хитов.</p>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px;">
+        <button type="button" class="primary" data-action="do-short-rest">Отдохнуть (короткий отдых)</button>
+      </div>`;
+  }
+  function longRestTabHtml() {
+    const hd = hitDiceInfo();
+    const recover = Math.max(1, Math.floor(hd.total / 2));
+    return `
+      <div class="panel panel-tight" style="margin:0;">
+        <p style="margin:0;">Кости хитов: <strong class="num">${hd.current}</strong> из ${hd.total} (к${hd.die})</p>
+        <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">Продолжительный отдых восстановит ${recover} ${pluralizeDice(recover)} хитов (половина максимума, минимум 1), все хиты (кроме временных), все ячейки заклинаний и все умения.</p>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px;">
+        <button type="button" class="primary" data-action="do-long-rest">Отдохнуть (продолжительный отдых)</button>
+      </div>`;
+  }
+  // Finishes a short rest: restores everything that recharges on a short
+  // (or "any") rest, plus Pact Magic slots for a Warlock. Called either
+  // directly (no pending Arcane Recovery choice) or after that choice modal
+  // confirms/skips.
+  function finishShortRest() {
+    restoreFeatureUses(["short", "any"]);
+    if (isPactCaster()) restoreAllSpellSlots();
+    restState.message = "Короткий отдых завершён: умения и заклинания, восстанавливающиеся на коротком отдыхе, обновлены.";
+    doSave();
+    render();
+    refreshRestModal();
+  }
+  function performLongRest() {
+    const max = Number(data.hp.max) || 0;
+    data.hp.current = max; // temp HP is deliberately left untouched
+    const hd = hitDiceInfo();
+    const recover = Math.max(1, Math.floor(hd.total / 2));
+    data.hitDice.current = Math.min(hd.total, hd.current + recover);
+    restoreFeatureUses(["short", "long", "any"]);
+    restoreAllSpellSlots();
+    if (data.deathSaves) { data.deathSaves.successes = 0; data.deathSaves.failures = 0; }
+    restState.message = "Продолжительный отдых завершён: хиты, кости хитов, умения и ячейки заклинаний восстановлены.";
+    doSave();
+    render();
+    refreshRestModal();
+  }
+  // Arcane Recovery / Natural Recovery's own slot-selection prompt -- a
+  // second modal on top of (replacing) the rest one. Confirming or skipping
+  // both fall through to finishShortRest() to complete the rest itself.
+  function openArcaneRecoveryModal(recovery) {
+    const classLevel = (data.classes || []).find((c) => c.id === recovery.classId)?.level || totalLevel(data);
+    const budget = Math.max(1, Math.ceil(classLevel / 2));
+    const sc = data.spellcasting || {};
+    const levels = [1, 2, 3, 4, 5].filter((lvl) => Number((sc.slots || {})[lvl]) > 0);
+    const spentByLevel = {};
+    levels.forEach((lvl) => { spentByLevel[lvl] = spellSlotsArrayFor(sc, lvl).filter((f) => !f).length; });
+    const html = `
+      <h3 style="margin-top:0;">${escapeHtml(recovery.feature.name)}</h3>
+      <p class="muted" style="font-size:0.85rem;">Выберите, какие ячейки заклинаний восстановить: суммарный уровень восстановленных ячеек не может превышать ${budget} (половина уровня ${recovery.classLabel}, округляя в большую сторону), и ни одна ячейка не может быть 6-го уровня или выше.</p>
+      ${
+        levels.some((lvl) => spentByLevel[lvl] > 0)
+          ? `<div class="grid cols-2" style="gap:8px;">
+        ${levels
+          .filter((lvl) => spentByLevel[lvl] > 0)
+          .map(
+            (lvl) => `
+          <div class="col">
+            <label>${lvl}-й круг (потрачено: ${spentByLevel[lvl]})</label>
+            <input type="number" min="0" max="${spentByLevel[lvl]}" value="0" data-arcane-level="${lvl}" />
+          </div>`
+          )
+          .join("")}
+      </div>
+      <p class="muted" style="font-size:0.8rem;margin-top:10px;" data-arcane-budget>Использовано: 0 из ${budget}</p>`
+          : `<p class="muted">Нет потраченных ячеек заклинаний, восстанавливать нечего.</p>`
+      }
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px;">
+        <button type="button" class="small" data-action="skip-arcane-recovery">Пропустить</button>
+        <button type="button" class="primary" data-action="confirm-arcane-recovery" ${levels.some((lvl) => spentByLevel[lvl] > 0) ? "" : "disabled"}>Восстановить</button>
+      </div>`;
+    const modal = openModal(html);
+    const updateBudget = () => {
+      let used = 0;
+      levels.forEach((lvl) => {
+        const el = modal.querySelector(`[data-arcane-level="${lvl}"]`);
+        used += lvl * Math.max(0, Number(el?.value) || 0);
+      });
+      const disp = modal.querySelector("[data-arcane-budget]");
+      if (disp) disp.textContent = `Использовано: ${used} из ${budget}`;
+      const confirmBtn = modal.querySelector("[data-action=confirm-arcane-recovery]");
+      if (confirmBtn) confirmBtn.disabled = used > budget || used === 0;
+    };
+    updateBudget();
+    on(modal, "input", "[data-arcane-level]", updateBudget);
+    on(modal, "click", "[data-action=skip-arcane-recovery]", () => {
+      restModalEl = openModal(restModalBodyHtml());
+      wireRestModal(restModalEl);
+      finishShortRest();
+    });
+    on(modal, "click", "[data-action=confirm-arcane-recovery]", () => {
+      let used = 0;
+      const chosen = {};
+      levels.forEach((lvl) => {
+        const el = modal.querySelector(`[data-arcane-level="${lvl}"]`);
+        const n = Math.max(0, Math.min(spentByLevel[lvl], Number(el?.value) || 0));
+        chosen[lvl] = n;
+        used += lvl * n;
+      });
+      if (used > budget) return;
+      if (!sc.slotsFilled) sc.slotsFilled = {};
+      levels.forEach((lvl) => {
+        let remaining = chosen[lvl];
+        if (remaining <= 0) return;
+        const arr = spellSlotsArrayFor(sc, lvl);
+        for (let i = 0; i < arr.length && remaining > 0; i++) {
+          if (!arr[i]) { arr[i] = true; remaining--; }
+        }
+        sc.slotsFilled[lvl] = arr;
+      });
+      const featureUses = usesArrayFor(recovery.feature, recovery.uses.max);
+      const idx = featureUses.findIndex(Boolean);
+      if (idx !== -1) featureUses[idx] = false;
+      recovery.feature.usesState = featureUses;
+      restModalEl = openModal(restModalBodyHtml());
+      wireRestModal(restModalEl);
+      finishShortRest();
+    });
+  }
+  // Wires the rest modal's delegated handlers once, on the modal root --
+  // since on() delegates from that root, these survive refreshRestModal()
+  // replacing the modal's innerHTML on every tab switch / roll / rest.
+  function wireRestModal(modal) {
+    on(modal, "click", "[data-rest-tab]", (e, el) => {
+      restState.tab = el.dataset.restTab;
+      restState.message = "";
+      refreshRestModal();
+    });
+    on(modal, "click", "[data-action=spend-hit-dice]", () => {
+      const hd = hitDiceInfo();
+      const input = modal.querySelector("[data-rest-dice-count]");
+      const count = Math.max(0, Math.min(hd.current, Number(input?.value) || 0));
+      if (count <= 0) return;
+      const conMod = getAbilityMod(data, "con");
+      const rolls = rollDice(count, hd.die);
+      const healTotal = Math.max(0, rolls.reduce((a, b) => a + b, 0) + count * conMod);
+      data.hitDice.current = hd.current - count;
+      const max = Number(data.hp.max) || 0;
+      data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + healTotal);
+      showRollResult({ label: `Кости хитов (${count}×к${hd.die})`, detail: `${rolls.join("+")} ${formatModifier(conMod * count)}`, total: healTotal });
+      restState.message = "";
+      doSave();
+      render();
+      refreshRestModal();
+    });
+    on(modal, "click", "[data-action=do-short-rest]", () => {
+      const recovery = findArcaneRecovery();
+      if (recovery) { openArcaneRecoveryModal(recovery); return; }
+      finishShortRest();
+    });
+    on(modal, "click", "[data-action=do-long-rest]", () => {
+      performLongRest();
+    });
+  }
+  function openRestModal() {
+    restState = { tab: "short", message: "" };
+    restModalEl = openModal(restModalBodyHtml());
+    wireRestModal(restModalEl);
+  }
+
+  // ---- Level up -----------------------------------------------------
+  // Only a class whose CLASSES entry has real level-by-level data (just
+  // Воин 2 уровень today -- see cls.features[N]/cls.classFeatureText) gets
+  // its features filled in automatically; any other class/level still lets
+  // the player take the level (HP increase included) but shows a note to
+  // add its features by hand on the "Умения" tab, rather than blocking the
+  // whole mechanic on every class being modeled first.
+  let levelUpModalEl = null;
+  let levelUpState = null; // { classIndex, hpMethod: "roll"|"average", rolledAmount: number|null, asi: {...} | null }
+
+  function levelUpEligibleClasses() {
+    return (data.classes || []).filter((c) => c.id && (c.level || 1) < 20);
+  }
+  // Turns a class's raw cls.features[newLevel] (short blurbs, e.g. "Всплеск
+  // действий (доп. действие в ход, 1/короткий отдых)") into the same
+  // {name, desc} shape doFinish() in wizard.js builds feature cards from at
+  // character creation -- splitFeatureText() pulls the name out of the short
+  // blurb, and cls.classFeatureText's full writeup is preferred over it when
+  // on file.
+  function levelUpFeaturesFor(cls, newLevel) {
+    const raw = cls && cls.features && cls.features[newLevel];
+    if (!raw) return [];
+    return raw.map((f) => {
+      const split = splitFeatureText(f);
+      const fullText = cls.classFeatureText && cls.classFeatureText[split.name];
+      return { name: split.name, desc: fullText || split.desc };
+    });
+  }
+  function levelUpAverageHp(cls) {
+    return Math.floor(((cls && cls.hitDie) || 8) / 2) + 1;
+  }
+  // "Черта или увеличение характеристик" (Воин 4/6/8/12/14/16/19-й уровень,
+  // and the same choice under other names for most other classes) isn't a
+  // plain feature card -- it's an actual mechanical choice between a feat
+  // (reusing the "Черты" tab's own add-feat logic) and raising ability
+  // scores, so it gets pulled out of the generic feature list below and
+  // given its own chooser UI instead.
+  const ASI_FEATURE_NAME = /увеличение характеристик/i;
+  function levelHasAsiChoice(cls, newLevel) {
+    const raw = cls && cls.features && cls.features[newLevel];
+    return !!(raw || []).some((f) => ASI_FEATURE_NAME.test(f));
+  }
+  function freshAsiState() {
+    return { mode: "asi", singleAbility: true, abilities: ["str", ""], featId: "", featAbility: "", featSkills: [] };
+  }
+  // "Боевой архетип" (Воин 3-й уровень, and the same idea under other names
+  // for most other classes -- Rogue's "Архетип плута", Barbarian's "Путь",
+  // etc.) isn't a plain feature card either: it's the character's subclass
+  // pick, so it gets its own chooser UI (subclassChoicePanelHtml below) the
+  // same way the ASI/feat choice does, instead of a bare card with a
+  // "go pick it from the dropdown" note. Only the exact classes/levels with
+  // real subclass data on file (just Воин today) actually trigger it --
+  // levelHasSubclassChoice() checks the class's OWN raw feature text for
+  // this level rather than hardcoding "level 3", so it generalizes to
+  // whichever level a future class's data uses for the same choice.
+  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип/i;
+  // "Умение архетипа" (Воин 7-й/10-й уровень) is a placeholder marker in
+  // cls.features -- the ACTUAL feature at that level comes from whichever
+  // subclass the character already picked (see subclassFeaturesAtLevel()),
+  // so this text itself is never shown as a card.
+  const ARCHETYPE_FEATURE_MARKER = "Умение архетипа";
+  function levelHasSubclassChoice(c, cls, newLevel) {
+    if (!c || c.subclass) return false;
+    if (!cls || !cls.subclasses || !cls.subclasses.length) return false;
+    const raw = (cls.features && cls.features[newLevel]) || [];
+    return raw.some((f) => SUBCLASS_CHOICE_FEATURE_NAME.test(f));
+  }
+  function freshSubclassChoiceState() {
+    return { name: "", maneuverIds: [], cantripIds: [], spellIds: [] };
+  }
+  // Champion's "Дополнительный боевой стиль" (10th level: pick a SECOND
+  // fighting style) is, in the data, just another subclass feature card
+  // resolved through the "Умение архетипа" marker like any other -- this
+  // turns it into an actual pick in the level-up modal instead of plain
+  // descriptive text, the same way levelHasSubclassChoice() above turns the
+  // level-3 archetype marker into the subclass picker. Matched by exact
+  // feature name (this exact wording only exists on Champion today) rather
+  // than a level number, so it keeps working if another subclass later gets
+  // its own second-style feature at a different level.
+  const SECOND_FIGHTING_STYLE_FEATURE_NAME = "Дополнительный боевой стиль";
+  function levelHasFightingStyleChoice(c, cls, newLevel) {
+    if (!c || !c.subclass || !cls.level1Choice || cls.level1Choice.type !== "fightingStyle") return false;
+    const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === c.subclass.toLowerCase());
+    if (!sub) return false;
+    return (sub.features || []).some((sf) => sf.name === SECOND_FIGHTING_STYLE_FEATURE_NAME && sf.level === newLevel);
+  }
+  function freshFightingStyleChoiceState() {
+    return { name: "" };
+  }
+  function fightingStyleChoicePanelHtml(cls) {
+    const sc = levelUpState.fightingStyleChoice;
+    const current = currentFightingStyleName(cls);
+    const options = (cls.level1Choice.options || []).filter((o) => o.name !== current);
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${escapeHtml(SECOND_FIGHTING_STYLE_FEATURE_NAME)}</h4>
+        <div class="grid cols-2">
+          ${options
+            .map(
+              (o) => `
+            <label class="card selectable ${sc.name === o.name ? "selected" : ""}" style="cursor:pointer;">
+              <input type="radio" name="level-up-fighting-style" data-level-up-fighting-style="${escapeHtml(o.name)}" ${sc.name === o.name ? "checked" : ""} style="margin-right:6px;" />
+              <strong>${escapeHtml(o.name)}</strong><br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(o.desc)}</span>
+            </label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+  function fightingStyleChoiceIncomplete() {
+    return !!(levelUpState.fightingStyleChoice && !levelUpState.fightingStyleChoice.name);
+  }
+  // Мастер боевых искусств's "Ученик войны" (3rd level) grants a
+  // craftsman's-tool proficiency of the player's choice -- like the second
+  // fighting style above, this turns a plain text card into an actual pick
+  // in the level-up modal. Matched by exact feature name for the same
+  // reason as SECOND_FIGHTING_STYLE_FEATURE_NAME.
+  const CRAFT_TOOL_CHOICE_FEATURE_NAME = "Ученик войны";
+  function levelHasCraftToolChoice(cls, subName, newLevel) {
+    if (!subName) return false;
+    return subclassFeaturesAtLevel(cls, subName, newLevel).some((f) => f.name === CRAFT_TOOL_CHOICE_FEATURE_NAME);
+  }
+  function freshToolChoiceState() {
+    return { name: "" };
+  }
+  function craftToolChoicePanelHtml() {
+    const tc = levelUpState.toolChoice;
+    const craftTools = (TOOL_GROUPS.find((g) => g.label === "Ремесленные инструменты") || {}).items || [];
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${escapeHtml(CRAFT_TOOL_CHOICE_FEATURE_NAME)}: выбор инструмента</h4>
+        <select data-level-up-tool-choice>
+          <option value="">Выберите инструмент…</option>
+          ${craftTools.map((t) => `<option value="${escapeHtml(t)}" ${tc.name === t ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
+        </select>
+      </div>`;
+  }
+  function toolChoiceIncomplete() {
+    return !!(levelUpState.toolChoice && !levelUpState.toolChoice.name);
+  }
+  // The chosen (or, at level 3, still-being-picked) subclass's own features
+  // that land at exactly this level -- e.g. Мастер боевых искусств's
+  // "Боевое превосходство"+"Ученик войны" at 3, "Познай своего врага" at 7.
+  function subclassFeaturesAtLevel(cls, subName, level) {
+    const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === String(subName || "").toLowerCase());
+    if (!sub) return [];
+    return (sub.features || [])
+      .filter((sf) => sf.name && sf.level === level)
+      .map((sf) => ({ name: sf.name, desc: (sf.desc || []).join("\n\n") }));
+  }
+  function refreshLevelUpModal() {
+    if (levelUpModalEl) levelUpModalEl.innerHTML = levelUpModalBodyHtml();
+  }
+  function asiChooserHtml() {
+    const asi = levelUpState.asi;
+    const feat = FEATS.find((f) => f.id === asi.featId) || null;
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Черта или увеличение характеристик</h4>
+        <label class="row" style="gap:8px;align-items:center;">
+          <input type="radio" name="asi-mode" data-asi-mode="asi" ${asi.mode === "asi" ? "checked" : ""} />
+          <span>Увеличить характеристики</span>
+        </label>
+        ${
+          asi.mode === "asi"
+            ? `<div style="margin:6px 0 10px 26px;">
+          <label class="row" style="gap:8px;align-items:center;">
+            <input type="radio" name="asi-split" data-asi-split="single" ${asi.singleAbility ? "checked" : ""} />
+            <span>Одна характеристика +2</span>
+          </label>
+          <label class="row" style="gap:8px;align-items:center;margin-top:2px;">
+            <input type="radio" name="asi-split" data-asi-split="double" ${!asi.singleAbility ? "checked" : ""} />
+            <span>Две характеристики +1 каждая</span>
+          </label>
+          <div class="row" style="gap:8px;margin-top:6px;">
+            <select data-asi-ability="0">
+              ${ABILITIES.map((a) => `<option value="${a.id}" ${asi.abilities[0] === a.id ? "selected" : ""}>${escapeHtml(a.label)} (${data.abilities[a.id] ?? 10} → ${Math.min(20, (Number(data.abilities[a.id]) || 10) + (asi.singleAbility ? 2 : 1))})</option>`).join("")}
+            </select>
+            ${
+              asi.singleAbility
+                ? ""
+                : `<select data-asi-ability="1">
+              <option value="">—</option>
+              ${ABILITIES.filter((a) => a.id !== asi.abilities[0]).map((a) => `<option value="${a.id}" ${asi.abilities[1] === a.id ? "selected" : ""}>${escapeHtml(a.label)} (${data.abilities[a.id] ?? 10} → ${Math.min(20, (Number(data.abilities[a.id]) || 10) + 1)})</option>`).join("")}
+            </select>`
+            }
+          </div>
+        </div>`
+            : ""
+        }
+        <label class="row" style="gap:8px;align-items:center;margin-top:6px;">
+          <input type="radio" name="asi-mode" data-asi-mode="feat" ${asi.mode === "feat" ? "checked" : ""} />
+          <span>Взять черту</span>
+        </label>
+        ${
+          asi.mode === "feat"
+            ? `<div style="margin:6px 0 0 26px;">
+          <select data-asi-feat style="width:auto;min-width:220px;">
+            <option value="">Выберите черту…</option>
+            ${FEATS.map((f) => `<option value="${f.id}" ${asi.featId === f.id ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
+          </select>
+          ${
+            feat
+              ? `<p style="margin:8px 0 0;">${escapeHtml(feat.desc)}</p>
+            ${
+              feat.abilityIncrease && feat.abilityIncrease.choices.length > 1
+                ? `<div class="row" style="align-items:center;margin-top:6px;">
+              <label style="margin-right:8px;">Повысить характеристику:</label>
+              <select data-asi-feat-ability>
+                ${feat.abilityIncrease.choices.map((a) => `<option value="${a}" ${a === asi.featAbility ? "selected" : ""}>${ABILITIES.find((x) => x.id === a)?.label || a}</option>`).join("")}
+              </select>
+            </div>`
+                : ""
+            }
+            ${
+              feat.skillChoice
+                ? `<p class="muted" style="margin:8px 0 2px;">Выберите ${feat.skillChoice.count} навыка(ов):</p>
+              <div class="grid cols-3">
+                ${SKILLS.filter((s) => !(data.proficiencies.skills || []).includes(s.id)).map((s) => `<label style="font-weight:normal;"><input type="checkbox" data-asi-feat-skill value="${s.id}" ${asi.featSkills.includes(s.id) ? "checked" : ""} /> ${escapeHtml(s.label)}</label>`).join("")}
+              </div>`
+                : ""
+            }`
+              : ""
+          }
+        </div>`
+            : ""
+        }
+      </div>`;
+  }
+  // Disables "Повысить уровень" until the ASI/feat choice (when this level
+  // has one) is actually complete -- otherwise applyLevelUp() would have
+  // nothing to apply.
+  function asiChoiceIncomplete() {
+    if (!levelUpState.asi) return false;
+    const asi = levelUpState.asi;
+    if (asi.mode === "feat") return !asi.featId;
+    return !asi.abilities[0] || (!asi.singleAbility && !asi.abilities[1]);
+  }
+  // Мастер боевых искусств picks 3 приёма (maneuvers) the moment the
+  // archetype itself is chosen -- MANEUVERS is the full PHB set of 16.
+  function maneuverChooserHtml(sc) {
+    return `
+      <div style="margin-top:10px;">
+        <p class="muted">Приёмы (${sc.maneuverIds.length}/3):</p>
+        <div class="grid cols-2">
+          ${MANEUVERS.map(
+            (m) => `
+            <label class="row" style="gap:6px;align-items:flex-start;">
+              <input type="checkbox" data-level-up-maneuver="${m.id}" ${sc.maneuverIds.includes(m.id) ? "checked" : ""}
+                ${!sc.maneuverIds.includes(m.id) && sc.maneuverIds.length >= 3 ? "disabled" : ""} />
+              <span><strong>${escapeHtml(m.name)}</strong><br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(m.desc)}</span></span>
+            </label>`
+          ).join("")}
+        </div>
+      </div>`;
+  }
+  // Мистический рыцарь's "Использование заклинаний": 2 wizard cantrips + 3
+  // wizard 1st-level spells (RAW: at least 2 of the 3 from Воплощение/
+  // Ограждение) -- the spell catalog has no "school" field to filter or
+  // enforce that restriction by, so this offers the full wizard 1st-level
+  // list with a text reminder instead of a hard filter.
+  function eldritchKnightChooserHtml(sc) {
+    const cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes("wizard"));
+    const spells1 = SPELLS.filter((s) => s.level === 1 && s.classes.includes("wizard"));
+    return `
+      <div style="margin-top:10px;">
+        <p class="muted">Заговоры волшебника (${sc.cantripIds.length}/2):</p>
+        <div class="grid cols-2">
+          ${cantrips
+            .map(
+              (s) => `
+            <label class="row" style="gap:6px;">
+              <input type="checkbox" data-level-up-ek-cantrip="${s.id}" ${sc.cantripIds.includes(s.id) ? "checked" : ""}
+                ${!sc.cantripIds.includes(s.id) && sc.cantripIds.length >= 2 ? "disabled" : ""} />
+              ${spellHoverNameHtml(s)}
+            </label>`
+            )
+            .join("")}
+        </div>
+        <p class="muted" style="margin-top:8px;">Заклинания 1-го уровня (${sc.spellIds.length}/3) — минимум два должны быть школы Воплощения или Ограждения:</p>
+        <div class="grid cols-2">
+          ${spells1
+            .map(
+              (s) => `
+            <label class="row" style="gap:6px;">
+              <input type="checkbox" data-level-up-ek-spell="${s.id}" ${sc.spellIds.includes(s.id) ? "checked" : ""}
+                ${!sc.spellIds.includes(s.id) && sc.spellIds.length >= 3 ? "disabled" : ""} />
+              ${spellHoverNameHtml(s)}
+            </label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+  // The subclass picker shown in place of a bare "Боевой архетип" card --
+  // pick a subclass card, see its own this-level feature text right below
+  // it, and (for the two archetypes with a level-3 sub-choice of their own)
+  // the maneuver/spell chooser under that.
+  function subclassChoicePanelHtml(cls) {
+    const sc = levelUpState.subclassChoice;
+    const picked = (cls.subclasses || []).find((s) => s.name === sc.name);
+    let html = `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Боевой архетип</h4>
+        <div class="grid cols-2">
+          ${cls.subclasses
+            .map(
+              (s) => `
+            <label class="card selectable ${sc.name === s.name ? "selected" : ""}" style="cursor:pointer;">
+              <input type="radio" name="level-up-subclass" data-level-up-subclass="${escapeHtml(s.name)}" ${sc.name === s.name ? "checked" : ""} style="margin-right:6px;" />
+              <strong>${escapeHtml(s.name)}</strong>
+            </label>`
+            )
+            .join("")}
+        </div>`;
+    if (picked) {
+      // No feature-text preview here any more -- the picked subclass's
+      // level-3 features already show up in the "Умения N уровня" panel
+      // above (via levelUpModalBodyHtml's archetypeFeatures, which reads
+      // straight off levelUpState.subclassChoice.name the moment a card is
+      // picked here), so repeating them in this panel too just duplicated
+      // every card.
+      if (picked.slug === "battlemaster") html += maneuverChooserHtml(sc);
+      else if (picked.slug === "eldritch-knigh") html += eldritchKnightChooserHtml(sc);
+    }
+    html += `</div>`;
+    return html;
+  }
+  function subclassChoiceIncomplete(cls) {
+    const sc = levelUpState.subclassChoice;
+    if (!sc) return false;
+    if (!sc.name) return true;
+    const sub = (cls.subclasses || []).find((s) => s.name === sc.name);
+    if (sub && sub.slug === "battlemaster" && sc.maneuverIds.length < 3) return true;
+    if (sub && sub.slug === "eldritch-knigh" && (sc.cantripIds.length < 2 || sc.spellIds.length < 3)) return true;
+    return false;
+  }
+  function levelUpModalBodyHtml() {
+    const classes = levelUpEligibleClasses();
+    const c = classes[levelUpState.classIndex];
+    const cls = c && getClass(c.id);
+    if (!c || !cls) return `<p class="muted">Нет класса, который можно повысить.</p>`;
+    const newLevel = (c.level || 1) + 1;
+    const conMod = getAbilityMod(data, "con");
+    const avg = levelUpAverageHp(cls);
+    const features = levelUpFeaturesFor(cls, newLevel).filter(
+      (f) => !ASI_FEATURE_NAME.test(f.name) && !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) && f.name !== ARCHETYPE_FEATURE_MARKER
+    );
+    // Once a subclass is chosen (already, or right here in subclassChoice),
+    // its own features at this exact level replace the "Умение архетипа"
+    // placeholder that was just filtered out above.
+    const archetypeFeaturesRaw = c.subclass
+      ? subclassFeaturesAtLevel(cls, c.subclass, newLevel)
+      : levelUpState.subclassChoice && levelUpState.subclassChoice.name
+        ? subclassFeaturesAtLevel(cls, levelUpState.subclassChoice.name, newLevel)
+        : [];
+    // Дополнительный боевой стиль gets its own picker below instead of
+    // this plain descriptive card, whenever that picker is on offer.
+    const archetypeFeatures = archetypeFeaturesRaw.filter((f) => !(levelUpState.fightingStyleChoice && f.name === SECOND_FIGHTING_STYLE_FEATURE_NAME));
+    const allFeatures = [...features, ...archetypeFeatures];
+    const missingSubclassForArchetypeLevel = !c.subclass && !levelUpState.subclassChoice && (cls.features?.[newLevel] || []).some((f) => f === ARCHETYPE_FEATURE_MARKER);
+    const hpGain = Math.max(1, (levelUpState.hpMethod === "roll" ? levelUpState.rolledAmount ?? 0 : avg) + conMod);
+    return `
+      <h3 style="margin-top:0;">Повышение уровня</h3>
+      ${
+        classes.length > 1
+          ? `<div class="col" style="margin-bottom:10px;">
+        <label>Класс</label>
+        <select data-level-up-class>
+          ${classes.map((cc, i) => `<option value="${i}" ${i === levelUpState.classIndex ? "selected" : ""}>${escapeHtml(getClass(cc.id)?.name || cc.id)} (${cc.level || 1} → ${(cc.level || 1) + 1})</option>`).join("")}
+        </select>
+      </div>`
+          : ""
+      }
+      <p><strong>${escapeHtml(cls.name)}</strong>: ${c.level || 1} → <strong class="num">${newLevel}</strong> уровень</p>
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Хиты</h4>
+        <p class="muted" style="font-size:0.82rem;">Кость хитов: к${cls.hitDie} · модификатор Телосложения: ${formatModifier(conMod)}</p>
+        <label class="row" style="gap:8px;align-items:center;">
+          <input type="radio" name="hp-method" data-level-up-hp-method="roll" ${levelUpState.hpMethod === "roll" ? "checked" : ""} />
+          <span>Бросок к${cls.hitDie}${levelUpState.rolledAmount !== null ? ` (выпало ${levelUpState.rolledAmount})` : ""} ${formatModifier(conMod)}</span>
+          <button type="button" class="small" data-action="level-up-roll-hp">🎲 Бросить</button>
+        </label>
+        <label class="row" style="gap:8px;align-items:center;margin-top:4px;">
+          <input type="radio" name="hp-method" data-level-up-hp-method="average" ${levelUpState.hpMethod === "average" ? "checked" : ""} />
+          <span>Среднее (${avg}) ${formatModifier(conMod)}</span>
+        </label>
+        <p style="margin:8px 0 0;">Хиты увеличатся на: <strong class="num">${hpGain}</strong></p>
+      </div>
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Умения ${newLevel} уровня</h4>
+        ${
+          allFeatures.length
+            ? allFeatures.map((f) => `<p><strong>${escapeHtml(f.name)}:</strong> ${escapeHtml(f.desc || "")}</p>`).join("")
+            : levelUpState.asi || levelUpState.subclassChoice
+              ? `<p class="muted">На этом уровне только выбор ниже — новых карточек умений нет.</p>`
+              : missingSubclassForArchetypeLevel
+                ? `<p class="muted">У этого персонажа ещё не выбран архетип (боевой архетип выбирается на 3-м уровне) — повысьте сначала до 3-го уровня, чтобы выбрать его, тогда умения архетипа появятся и здесь.</p>`
+                : `<p class="muted">Нет данных об умениях класса «${escapeHtml(cls.name)}» на ${newLevel} уровне в базе — добавьте их вручную на вкладке «Умения» после повышения.</p>`
+        }
+      </div>
+      ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
+      ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
+      ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
+      ${levelUpState.asi ? asiChooserHtml() : ""}
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px;">
+        <button type="button" data-action="close-modal">Отмена</button>
+        <button type="button" class="primary" ${(levelUpState.hpMethod === "roll" && levelUpState.rolledAmount === null) || asiChoiceIncomplete() || subclassChoiceIncomplete(cls) || fightingStyleChoiceIncomplete() || toolChoiceIncomplete() ? "disabled" : ""} data-action="confirm-level-up">Повысить уровень</button>
+      </div>`;
+  }
+  function wireLevelUpModal(modal) {
+    on(modal, "click", "[data-action=close-modal]", closeModal);
+    on(modal, "click", "[data-action=level-up-roll-hp]", () => {
+      const c = levelUpEligibleClasses()[levelUpState.classIndex];
+      const cls = c && getClass(c.id);
+      if (!cls) return;
+      levelUpState.rolledAmount = rollDice(1, cls.hitDie)[0];
+      levelUpState.hpMethod = "roll";
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-hp-method]", (e, el) => {
+      levelUpState.hpMethod = el.dataset.levelUpHpMethod;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-class]", (e, el) => {
+      levelUpState.classIndex = Number(el.value);
+      levelUpState.hpMethod = "average";
+      levelUpState.rolledAmount = null;
+      const cc = levelUpEligibleClasses()[levelUpState.classIndex];
+      const ccls = cc && getClass(cc.id);
+      levelUpState.asi = ccls && levelHasAsiChoice(ccls, (cc.level || 1) + 1) ? freshAsiState() : null;
+      levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, (cc.level || 1) + 1) ? freshSubclassChoiceState() : null;
+      levelUpState.fightingStyleChoice = ccls && levelHasFightingStyleChoice(cc, ccls, (cc.level || 1) + 1) ? freshFightingStyleChoiceState() : null;
+      levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, (cc.level || 1) + 1) ? freshToolChoiceState() : null;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-subclass]", (e, el) => {
+      levelUpState.subclassChoice.name = el.dataset.levelUpSubclass;
+      levelUpState.subclassChoice.maneuverIds = [];
+      levelUpState.subclassChoice.cantripIds = [];
+      levelUpState.subclassChoice.spellIds = [];
+      const c = levelUpEligibleClasses()[levelUpState.classIndex];
+      const cls = c && getClass(c.id);
+      const newLevel = (c.level || 1) + 1;
+      levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState() : null;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-tool-choice]", (e, el) => {
+      levelUpState.toolChoice.name = el.value;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-fighting-style]", (e, el) => {
+      levelUpState.fightingStyleChoice.name = el.dataset.levelUpFightingStyle;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-maneuver]", (e, el) => {
+      const id = el.dataset.levelUpManeuver;
+      const sc = levelUpState.subclassChoice;
+      if (el.checked) { if (!sc.maneuverIds.includes(id)) sc.maneuverIds.push(id); }
+      else sc.maneuverIds = sc.maneuverIds.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-ek-cantrip]", (e, el) => {
+      const id = el.dataset.levelUpEkCantrip;
+      const sc = levelUpState.subclassChoice;
+      if (el.checked) { if (!sc.cantripIds.includes(id)) sc.cantripIds.push(id); }
+      else sc.cantripIds = sc.cantripIds.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-ek-spell]", (e, el) => {
+      const id = el.dataset.levelUpEkSpell;
+      const sc = levelUpState.subclassChoice;
+      if (el.checked) { if (!sc.spellIds.includes(id)) sc.spellIds.push(id); }
+      else sc.spellIds = sc.spellIds.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-asi-mode]", (e, el) => {
+      levelUpState.asi.mode = el.dataset.asiMode;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-asi-split]", (e, el) => {
+      levelUpState.asi.singleAbility = el.dataset.asiSplit === "single";
+      levelUpState.asi.abilities = [levelUpState.asi.abilities[0], ""];
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-asi-ability]", (e, el) => {
+      levelUpState.asi.abilities[Number(el.dataset.asiAbility)] = el.value;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-asi-feat]", (e, el) => {
+      levelUpState.asi.featId = el.value;
+      const feat = FEATS.find((f) => f.id === el.value);
+      levelUpState.asi.featAbility = feat && feat.abilityIncrease ? feat.abilityIncrease.choices[0] : "";
+      levelUpState.asi.featSkills = [];
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-asi-feat-ability]", (e, el) => {
+      levelUpState.asi.featAbility = el.value;
+    });
+    on(modal, "change", "[data-asi-feat-skill]", (e, el) => {
+      const v = el.value;
+      if (el.checked) {
+        if (!levelUpState.asi.featSkills.includes(v)) levelUpState.asi.featSkills.push(v);
+      } else {
+        levelUpState.asi.featSkills = levelUpState.asi.featSkills.filter((s) => s !== v);
+      }
+    });
+    on(modal, "click", "[data-action=confirm-level-up]", () => {
+      applyLevelUp();
+      closeModal();
+    });
+  }
+  // A Constitution increase (from an ASI or a feat, wherever it happens --
+  // the level-up modal's own ASI choice, or the "Черты" tab's add-feat
+  // handler below) doesn't just raise HP going forward: every level already
+  // gained rolled/averaged its HP using the OLD Con modifier, so raising Con
+  // should retroactively add the modifier's increase once per level already
+  // held (PHB: your max HP goes up by that amount "for each level you've
+  // gained" -- see e.g. the errata note on ability-score increases). Called
+  // with the Con modifier from just before and just after the change;
+  // totalLevel(data) already reflects any level gained THIS SAME level-up
+  // (c.level is bumped before applyAsiChoice runs), which is correct: that
+  // level's own HP gain above used the OLD modifier, so it needs the
+  // retroactive top-up too, same as every earlier level.
+  function applyConHpRetroactive(conModBefore, conModAfter) {
+    const delta = conModAfter - conModBefore;
+    if (!delta) return;
+    const gain = delta * totalLevel(data);
+    data.hp.max = Math.max(1, (Number(data.hp.max) || 0) + gain);
+    data.hp.current = Math.max(0, (Number(data.hp.current) || 0) + gain);
+  }
+  // Applies the ASI/feat choice made in asiChooserHtml() above -- mirrors
+  // the "Черты" tab's own add-feat handler for the feat branch (same
+  // data.feats entry shape, same ability/skill-grant bookkeeping) so a feat
+  // taken here looks identical to one added from that tab.
+  function applyAsiChoice(asi) {
+    const conModBefore = getAbilityMod(data, "con");
+    if (asi.mode === "asi") {
+      const gains = asi.singleAbility ? [[asi.abilities[0], 2]] : [[asi.abilities[0], 1], [asi.abilities[1], 1]];
+      gains.forEach(([ability, amount]) => {
+        if (!ability) return;
+        data.abilities[ability] = Math.min(20, (Number(data.abilities[ability]) || 10) + amount);
+      });
+      applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
+      return;
+    }
+    const feat = FEATS.find((f) => f.id === asi.featId);
+    if (!feat) return;
+    if ((data.feats || []).some((f) => f.id === feat.id)) return;
+    const entry = { id: feat.id, name: feat.name, desc: feat.desc, prereq: feat.prereq || "" };
+    if (feat.abilityIncrease) {
+      const ability = feat.abilityIncrease.choices.length > 1 ? asi.featAbility : feat.abilityIncrease.choices[0];
+      const amount = feat.abilityIncrease.amount;
+      if (ability) {
+        data.abilities[ability] = Math.min(20, (Number(data.abilities[ability]) || 10) + amount);
+        data.abilityBonuses = data.abilityBonuses || [];
+        data.abilityBonuses.push({ source: `Черта (${feat.name})`, ability, amount });
+        entry.grantedAbility = ability;
+        entry.grantedAmount = amount;
+      }
+      if (feat.grantsSaveProficiency && ability) {
+        data.proficiencies.savingThrows = data.proficiencies.savingThrows || [];
+        if (!data.proficiencies.savingThrows.includes(ability)) data.proficiencies.savingThrows.push(ability);
+      }
+    }
+    if (feat.skillChoice) {
+      const skills = asi.featSkills.slice(0, feat.skillChoice.count);
+      data.proficiencies.skills = data.proficiencies.skills || [];
+      skills.forEach((s) => { if (!data.proficiencies.skills.includes(s)) data.proficiencies.skills.push(s); });
+      entry.grantedSkills = skills;
+    }
+    data.feats = data.feats || [];
+    data.feats.push(entry);
+    applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
+  }
+  // Snapshot of the ENTIRE character taken right before a level-up is
+  // applied, so "Откатить уровень" can restore it wholesale -- a level-up
+  // touches too many independent things (level, HP, feature cards, ability
+  // scores, feats, proficiencies, spellcasting) to undo piecemeal, and this
+  // character's data is small enough that a full deep clone per level-up is
+  // cheap. Every level-up pushes its own snapshot onto a stack (rather than
+  // overwriting a single slot) so several consecutive level-ups can each be
+  // undone in turn, one at a time, back down toward (but never past) level
+  // 1 -- the button simply disappears once the stack empties out. Each
+  // snapshot excludes the stack itself (see the replacer below), so the
+  // stack stays a flat list instead of nesting a copy of itself inside
+  // every entry.
+  function applyLevelUp() {
+    const classes = levelUpEligibleClasses();
+    const c = classes[levelUpState.classIndex];
+    const cls = c && getClass(c.id);
+    if (!c || !cls) return;
+    const preLevelUpSnapshot = JSON.parse(JSON.stringify(data, (k, v) => (k === "_levelUpUndoStack" ? undefined : v)));
+    if (!Array.isArray(data._levelUpUndoStack)) data._levelUpUndoStack = [];
+    data._levelUpUndoStack.push(preLevelUpSnapshot);
+    const conMod = getAbilityMod(data, "con");
+    const avg = levelUpAverageHp(cls);
+    const hpGain = Math.max(1, (levelUpState.hpMethod === "roll" ? levelUpState.rolledAmount ?? avg : avg) + conMod);
+    const newLevel = (c.level || 1) + 1;
+    c.level = newLevel;
+    data.hp.max = (Number(data.hp.max) || 0) + hpGain;
+    data.hp.current = (Number(data.hp.current) || 0) + hpGain;
+    // Level-dependent feature TEXT (e.g. Второе дыхание's "1к10 + ваш
+    // уровень воина") already reads the class's current level live rather
+    // than baking a number in, and its 🎲 roll amount is likewise resolved
+    // from the live level (see SECOND_WIND_FEATURE_NAME below) -- so simply
+    // bumping c.level here is enough for those to "recalculate themselves";
+    // nothing stored on the feature card itself needs updating.
+    levelUpFeaturesFor(cls, newLevel)
+      .filter((f) => !ASI_FEATURE_NAME.test(f.name) && !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) && f.name !== ARCHETYPE_FEATURE_MARKER)
+      .forEach((f) => {
+        if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) return;
+        data.features.push({ name: f.name, source: cls.name, desc: f.desc || "" });
+        applyFeatureProficiencyGrants(f.name, f.desc || "");
+      });
+    if (levelUpState.asi) applyAsiChoice(levelUpState.asi);
+    if (levelUpState.subclassChoice && levelUpState.subclassChoice.name) {
+      // First-ever pick, made right here (levelHasSubclassChoice() only
+      // creates this state when c.subclass was still empty) -- sets the
+      // subclass and adds its intro card plus every feature it grants at
+      // this level (usually just level 3, the level this choice happens on).
+      const sub = (cls.subclasses || []).find((s) => s.name === levelUpState.subclassChoice.name);
+      if (sub) {
+        c.subclass = sub.name;
+        applySubclassFeaturesAtLevel(cls, sub, newLevel, { withIntro: true });
+        if (sub.slug === "battlemaster") {
+          // Same source string subclassFeatureSource()/removeSubclassFeatures()
+          // use for every other subclass-granted card, so switching away from
+          // Battlemaster later via the classesEditor dropdown cleans these up
+          // along with everything else instead of leaving them orphaned.
+          const source = subclassFeatureSource(cls, sub.name);
+          levelUpState.subclassChoice.maneuverIds.forEach((id) => {
+            const m = MANEUVERS.find((mm) => mm.id === id);
+            if (!m) return;
+            if ((data.features || []).some((f) => f.name === m.name && f.source === source)) return;
+            data.features.push({ name: m.name, source, desc: m.desc });
+          });
+        } else if (sub.slug === "eldritch-knigh") {
+          // blankCharacter() always pre-populates data.spellcasting (with
+          // ability:null and empty arrays/slots) so every new character has
+          // somewhere for the Заклинания tab's fields to bind to -- so
+          // `!data.spellcasting` here was never true for a plain Fighter,
+          // and the base ability + first spell slot silently stayed unset.
+          // Filling in each piece only when it's still missing/blank (never
+          // overwriting a caster who already has real spellcasting from
+          // another class) fixes that without disturbing multiclassing.
+          if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+          if (!data.spellcasting.ability) data.spellcasting.ability = "int";
+          if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+          if (!data.spellcasting.known) data.spellcasting.known = [];
+          if (!data.spellcasting.prepared) data.spellcasting.prepared = [];
+          if (!data.spellcasting.slots) data.spellcasting.slots = {};
+          if (!data.spellcasting.slots[1]) data.spellcasting.slots[1] = 2;
+          levelUpState.subclassChoice.cantripIds.forEach((id) => {
+            if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
+          });
+          levelUpState.subclassChoice.spellIds.forEach((id) => {
+            if (!data.spellcasting.known.includes(id)) data.spellcasting.known.push(id);
+          });
+        }
+      }
+    } else if (c.subclass) {
+      // Subclass was already chosen at an earlier level-up (or from the
+      // sheet's own subclass dropdown) -- just add whatever it grants at
+      // THIS exact level, if anything (e.g. Воин 7/10, marked "Умение
+      // архетипа" in cls.features so the generic loop above skips it).
+      const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === c.subclass.toLowerCase());
+      if (sub) {
+        applySubclassFeaturesAtLevel(cls, sub, newLevel, {
+          withIntro: false,
+          // Дополнительный боевой стиль gets its own real style card below
+          // instead of this plain descriptive one, when the picker fired.
+          excludeNames: levelUpState.fightingStyleChoice ? [SECOND_FIGHTING_STYLE_FEATURE_NAME] : [],
+        });
+        if (levelUpState.fightingStyleChoice && levelUpState.fightingStyleChoice.name) {
+          const opt = (cls.level1Choice.options || []).find((o) => o.name === levelUpState.fightingStyleChoice.name);
+          if (opt) {
+            data.features.push({ name: `${SECOND_FIGHTING_STYLE_FEATURE_NAME}: ${opt.name}`, source: subclassFeatureSource(cls, sub.name), desc: opt.desc });
+          }
+        }
+      }
+    }
+    if (levelUpState.toolChoice && levelUpState.toolChoice.name) {
+      if (!data.proficiencies.tools.includes(levelUpState.toolChoice.name)) data.proficiencies.tools.push(levelUpState.toolChoice.name);
+    }
+    doSave();
+    render();
+  }
+  function openLevelUpModal() {
+    const classes = levelUpEligibleClasses();
+    if (!classes.length) {
+      alert("Нет класса, который можно повысить (уровень уже 20, или класс ещё не выбран).");
+      return;
+    }
+    const c = classes[0];
+    const cls = c && getClass(c.id);
+    levelUpState = {
+      classIndex: 0,
+      hpMethod: "average",
+      rolledAmount: null,
+      asi: cls && levelHasAsiChoice(cls, (c.level || 1) + 1) ? freshAsiState() : null,
+      subclassChoice: cls && levelHasSubclassChoice(c, cls, (c.level || 1) + 1) ? freshSubclassChoiceState() : null,
+      fightingStyleChoice: cls && levelHasFightingStyleChoice(c, cls, (c.level || 1) + 1) ? freshFightingStyleChoiceState() : null,
+      toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, (c.level || 1) + 1) ? freshToolChoiceState() : null,
+    };
+    levelUpModalEl = openModal(levelUpModalBodyHtml());
+    wireLevelUpModal(levelUpModalEl);
+  }
+
+  // Portrait box, top-left of the sheet: click to upload, stored as a
+  // resized data URL on the character so it travels with the JSON blob.
+  function portraitBox() {
+    const src = data.portraitDataUrl || "";
+    return `
+      <div class="portrait-box" data-action="pick-portrait" title="Изображение персонажа" style="flex:none;width:128px;height:128px;border:1px solid var(--gold-dim);border-radius:6px;cursor:pointer;overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);">
+        ${src ? `<img src="${src}" alt="Портрет" style="width:100%;height:100%;object-fit:cover;" />` : `<span class="muted" style="font-size:0.72rem;text-align:center;padding:2px;">+ фото</span>`}
+        <input type="file" accept="image/*" data-portrait-input style="display:none;" />
+      </div>`;
+  }
+
+  function classesEditor() {
+    const classes = data.classes || [];
+    // XP lives in its own column, in line with "Подкласс" (the row
+    // where a player's eye is already resting), rather than floating in a
+    // separate header row above the table -- it's shown once, on the first
+    // class row, since it's a property of the character as a whole, not of
+    // any one class entry.
+    return `
+      <div>
+        <table class="sheet-table">
+          <thead><tr><th style="width:170px;">Класс</th><th style="width:92px;">Уровень</th><th style="width:100px;">Подкласс</th><th style="width:110px;">Опыт (ОП)</th></tr></thead>
+          <tbody>
+            ${
+              classes.length
+                ? classes
+                    .map((c, i) => {
+                      const cls = getClass(c.id);
+                      const subclasses = (cls && cls.subclasses) || [];
+                      // A dropdown when the class's subclass catalog is on
+                      // file (all 13 classes have one) -- picking a different
+                      // option swaps the character's features and available
+                      // subclass spells for it (see the dedicated "change"
+                      // listener below). Falls back to the old free-text box
+                      // only if a class somehow has no catalog entries.
+                      const subclassField = subclasses.length
+                        ? `<select data-class-field="subclass" data-class-index="${i}">
+                             <option value="">—</option>
+                             ${subclasses.map((s) => `<option value="${escapeHtml(s.name)}" ${(c.subclass || "").toLowerCase() === s.name.toLowerCase() ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
+                           </select>`
+                        : `<input type="text" data-class-field="subclass" data-class-index="${i}" value="${escapeHtml(c.subclass || "")}" placeholder="—" />`;
+                      return `
+              <tr>
+                <td>
+                  <select data-class-field="id" data-class-index="${i}">
+                    <option value="">—</option>
+                    ${CLASSES.map((cl) => `<option value="${cl.id}" ${c.id === cl.id ? "selected" : ""}>${cl.name}</option>`).join("")}
+                  </select>
+                </td>
+                <td><input type="number" min="1" max="20" data-class-field="level" data-class-index="${i}" value="${c.level || 1}" /></td>
+                <td>${subclassField}</td>
+                <td>${i === 0 ? `<input type="number" min="0" data-bind="xp" value="${data.xp ?? 0}" />` : ""}</td>
+              </tr>`;
+                    })
+                    .join("")
+                : `<tr><td colspan="3" class="muted">Класс пока не выбран.</td><td><input type="number" min="0" data-bind="xp" value="${data.xp ?? 0}" /></td></tr>`
+            }
+          </tbody>
+        </table>
+        <button class="small" data-action="add-class" style="margin-top:4px;">+ Добавить класс</button>
+      </div>`;
+  }
+
+  // -- Subclass switcher (dropdown in classesEditor above) --------------
+  // Swapping a class's subclass pick removes every feature the OLD
+  // subclass granted and adds every feature the NEW one grants, up to the
+  // character's current level in that class -- generalizing the "one
+  // feature card per named subclass feature" convention doFinish() in
+  // wizard.js already uses at character creation (source "<class> —
+  // <subclass>"), so it also covers classes that pick their subclass at
+  // 3rd level or later (creation only ever seeds the level-1 casters:
+  // Cleric/Sorcerer/Warlock).
+  function subclassFeatureSource(cls, subName) {
+    return `${cls.name} — ${subName}`;
+  }
+  // The level-1 "intro" card doFinish() files under the class's own name
+  // uses "<label>: <subclass>" for Cleric/Sorcerer/Warlock (their
+  // level1Choice label, e.g. "Божественный домен: Домен войны"); every
+  // other class gets a plain "<subclass name>" intro card here, since it
+  // never had an existing convention to match.
+  function subclassIntroName(cls, subName) {
+    return cls.level1Choice && cls.level1Choice.type === "subclass" ? `${cls.level1Choice.label}: ${subName}` : subName;
+  }
+  function applyFeatureProficiencyGrants(name, desc) {
+    data.proficiencies = data.proficiencies || {};
+    if (!Array.isArray(data.proficiencies.skills)) data.proficiencies.skills = [];
+    if (!Array.isArray(data.proficiencies.armor)) data.proficiencies.armor = [];
+    if (!Array.isArray(data.proficiencies.weapons)) data.proficiencies.weapons = [];
+    const skillMatch = /Владение\s+навык(?:ом|ами)\s+([^.]+)\.?/i.exec(desc || "");
+    if (skillMatch) {
+      skillMatch[1]
+        .split(/,| и /i)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((nm) => {
+          const skill = SKILLS.find((s) => s.label.toLowerCase() === nm.toLowerCase());
+          if (skill && !data.proficiencies.skills.includes(skill.id)) data.proficiencies.skills.push(skill.id);
+        });
+    }
+    const namedWeapons = TRAIT_NAMED_WEAPON_GRANTS[name];
+    if (namedWeapons) {
+      namedWeapons.forEach((w) => {
+        if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w);
+      });
+    } else {
+      const grants = parseProficiencyGrantsFromText(desc);
+      grants.weapons.forEach((w) => {
+        if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w);
+      });
+      grants.armor.forEach((a) => {
+        if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a);
+      });
+    }
+  }
+  // -- Fighting-style switcher (dropdown in classesEditor above) --------
+  // A level-1 "pick one and it's yours for good" combat style
+  // (level1Choice.type "fightingStyle", e.g. Fighter's Боевой стиль) is
+  // stored the same way doFinish() in wizard.js files it at creation: one
+  // feature card named "<label>: <style name>" (e.g. "Боевой стиль:
+  // Дуэлянт"), source = the class's own name. Swapping it here removes
+  // that card and adds the new one, same idea as the subclass switcher
+  // above but for a choice that isn't a subclass at all.
+  // A character who skipped the choice at creation (or was created before
+  // the wizard offered one) has a bare "Боевой стиль" placeholder card
+  // instead -- no colon, empty desc (see the class's raw features list vs.
+  // LEVEL1_CHOICE_PLACEHOLDER handling in wizard.js's doFinish()). Both that
+  // placeholder and the real "<label>: <style>" card occupy the same
+  // "slot", so both are recognized here and replaced as one when the player
+  // finally picks (or changes) a style from the sheet.
+  function isFightingStyleCard(cls, f) {
+    if (f.source !== cls.name) return false;
+    const label = cls.level1Choice.label.toLowerCase();
+    const name = (f.name || "").toLowerCase();
+    return name === label || name.startsWith(`${label}:`);
+  }
+  function currentFightingStyleName(cls) {
+    const prefix = `${cls.level1Choice.label}:`.toLowerCase();
+    const f = (data.features || []).find((f) => isFightingStyleCard(cls, f) && (f.name || "").toLowerCase().startsWith(prefix));
+    return f ? f.name.slice(prefix.length).trim() : "";
+  }
+  function applyFightingStyleChange(cls, newStyleName) {
+    data.features = (data.features || []).filter((f) => !isFightingStyleCard(cls, f));
+    if (!newStyleName) return;
+    const opt = (cls.level1Choice.options || []).find((o) => o.name === newStyleName);
+    if (!opt) return;
+    data.features.push({ name: `${cls.level1Choice.label}: ${opt.name}`, source: cls.name, desc: opt.desc });
+  }
+  function removeSubclassFeatures(cls, subName) {
+    if (!subName) return;
+    const source = subclassFeatureSource(cls, subName);
+    const introName = subclassIntroName(cls, subName);
+    data.features = (data.features || []).filter((f) => f.source !== source && !(f.source === cls.name && f.name === introName));
+  }
+  function applySubclassFeatures(cls, sub, uptoLevel) {
+    if (!sub) return;
+    data.features.push({ name: subclassIntroName(cls, sub.name), source: cls.name, desc: sub.intro || "" });
+    const source = subclassFeatureSource(cls, sub.name);
+    (sub.features || []).forEach((sf) => {
+      if (!sf.name) return;
+      if (sf.level !== null && sf.level !== undefined && sf.level > uptoLevel) return;
+      const desc = (sf.desc || []).join("\n\n");
+      data.features.push({ name: sf.name, source, desc });
+      applyFeatureProficiencyGrants(sf.name, desc);
+    });
+  }
+  // Level-up-specific sibling of applySubclassFeatures() above: that one is
+  // built for the classesEditor dropdown (wholesale swap — remove everything
+  // the old subclass granted, add everything the new one grants up to the
+  // current level), which would re-add every earlier level's cards (and a
+  // duplicate intro card) if it were reused for an incremental level-up.
+  // This instead adds only the features at exactly `level`, with the same
+  // dedup guard the plain class-feature loop in applyLevelUp() uses, and
+  // only pushes the intro card when explicitly asked to (the first time the
+  // player picks this subclass, at whichever level that happens to be).
+  function applySubclassFeaturesAtLevel(cls, sub, level, { withIntro, excludeNames } = {}) {
+    if (!sub) return;
+    const introName = subclassIntroName(cls, sub.name);
+    if (withIntro && !(data.features || []).some((f) => f.source === cls.name && f.name === introName)) {
+      data.features.push({ name: introName, source: cls.name, desc: sub.intro || "" });
+    }
+    const source = subclassFeatureSource(cls, sub.name);
+    (sub.features || []).forEach((sf) => {
+      if (!sf.name || sf.level !== level) return;
+      if (excludeNames && excludeNames.includes(sf.name)) return;
+      if ((data.features || []).some((f) => f.source === source && f.name === sf.name)) return;
+      const desc = (sf.desc || []).join("\n\n");
+      data.features.push({ name: sf.name, source, desc });
+      applyFeatureProficiencyGrants(sf.name, desc);
+    });
+  }
+  // A subclass can widen the pool of pickable spells beyond its class's own
+  // list (characterExpandedSpellIds() below reads this live off
+  // data.classes[i].subclass, so newly-widened picks need no extra code
+  // here) -- but a spell the player already added to Известные/Подготовленные
+  // *because* the old subclass expanded the pool, and that isn't covered by
+  // the class's own list or the new subclass, would otherwise be left
+  // stranded on the sheet with no source granting it anymore. Drop those;
+  // leave anything the class itself grants, or that the new subclass still
+  // covers, alone.
+  function pruneStaleSubclassSpells(oldSub, newSub) {
+    const oldIds = new Set(oldSub && oldSub.expandedSpells || []);
+    if (!oldIds.size) return;
+    const newIds = new Set(newSub && newSub.expandedSpells || []);
+    const classIds = new Set((data.classes || []).map((c) => c.id).filter(Boolean));
+    const stillGranted = (id) => {
+      if (newIds.has(id)) return true;
+      const sp = SPELLS.find((s) => s.id === id);
+      return !!(sp && sp.classes.some((cid) => classIds.has(cid)));
+    };
+    const sc = data.spellcasting || {};
+    ["cantrips", "known", "prepared"].forEach((key) => {
+      if (Array.isArray(sc[key])) sc[key] = sc[key].filter((id) => !oldIds.has(id) || stillGranted(id));
+    });
+  }
+
+  // Number of times per day a Bard can grant Bardic Inspiration -- Charisma
+  // modifier, minimum one (2014 PHB). Not level-dependent (only the die size
+  // scales with level, via inspiration.bardDie). Used by the "Бардовское
+  // вдохновение" feature card's own uses tracker (featureResourceHtml
+  // below), NOT by this widget -- this widget tracks a die this character
+  // was personally GIVEN by a bard (any class can receive one), which is a
+  // different resource entirely.
+  function maxBardInspirationUses() {
+    return Math.max(1, getAbilityMod(data, "cha"));
+  }
+  // Top-of-sheet inspiration row: DM inspiration (0-5 stars, any character)
+  // and a single "Вдохновение барда" die this character is currently
+  // holding after a bard granted it to them -- die size to match what was
+  // received, a star marking it as unused, and a roll button once it is.
+  function inspirationWidget() {
+    const insp = data.inspiration || { dmStars: 0, bardDie: "d6", bardStar: false, heroic: false };
+    const stars = [0, 1, 2, 3, 4]
+      .map((i) => `<span class="insp-star ${i < (insp.dmStars || 0) ? "filled" : ""}" data-action="toggle-dm-star" data-index="${i}" title="Вдохновение мастера">${i < (insp.dmStars || 0) ? "★" : "☆"}</span>`)
+      .join("");
+    return `
+      <div class="row" style="gap:18px;flex-wrap:wrap;align-items:center;">
+        <div class="row" style="gap:4px;align-items:center;">
+          <span class="muted" style="font-size:0.78rem;">Вдохновение мастера</span>
+          <span class="row" style="gap:1px;">${stars}</span>
+        </div>
+        <div class="row" style="gap:6px;align-items:center;">
+          <span class="muted" style="font-size:0.78rem;">Вдохновение барда</span>
+          <select data-bind="inspiration.bardDie" style="width:60px;padding:2px 4px;">
+            <option value="d6" ${insp.bardDie === "d6" ? "selected" : ""}>к6</option>
+            <option value="d8" ${insp.bardDie === "d8" ? "selected" : ""}>к8</option>
+            <option value="d10" ${insp.bardDie === "d10" ? "selected" : ""}>к10</option>
+            <option value="d12" ${insp.bardDie === "d12" ? "selected" : ""}>к12</option>
+          </select>
+          <span class="insp-star ${insp.bardStar ? "filled" : ""}" data-action="toggle-bard-star" title="Получена кость вдохновения барда, ещё не потрачена">${insp.bardStar ? "★" : "☆"}</span>
+          <button type="button" class="small" data-action="roll-bard-inspiration" ${insp.bardStar ? "" : "disabled"}>🎲 Бросить</button>
+        </div>
+        <button type="button" class="small primary" data-action="open-level-up-modal">⬆ Повысить уровень</button>
+        ${Array.isArray(data._levelUpUndoStack) && data._levelUpUndoStack.length ? `<button type="button" class="small" data-action="revert-level-up" title="Отменить последнее повышение уровня">↺ Откатить уровень</button>` : ""}
+        ${data.edition === "2024" ? `
+        <label class="row" style="gap:6px;align-items:center;">
+          <input type="checkbox" data-bind-checkbox="inspiration.heroic" ${insp.heroic ? "checked" : ""} />
+          <span class="muted" style="font-size:0.78rem;">Героическое вдохновение</span>
+        </label>` : ""}
+      </div>`;
+  }
+
+  function customArmorFields() {
+    const c = data.customArmor || {};
+    return `
+      <div class="panel" style="margin-top:8px;background:var(--bg-panel-2);">
+        <p class="muted" style="font-size:0.8rem;margin-top:0;">Своя броня — для особых или магических доспехов.</p>
+        <div class="grid cols-2">
+          <div class="col">
+            <label>Название</label>
+            <input type="text" data-bind="customArmor.name" value="${escapeHtml(c.name || "")}" placeholder="напр. Доспех +1" />
+          </div>
+          <div class="col">
+            <label>Базовый КД</label>
+            <input type="number" data-bind="customArmor.baseAC" value="${c.baseAC ?? 10}" />
+          </div>
+        </div>
+        <div class="grid cols-2" style="margin-top:8px;">
+          <div class="col">
+            <label>Модификатор Ловкости</label>
+            <select data-bind="customArmor.dexMode">
+              <option value="full" ${c.dexMode === "full" ? "selected" : ""}>Полностью (как лёгкая)</option>
+              <option value="capped" ${c.dexMode === "capped" ? "selected" : ""}>Ограничен (как средняя)</option>
+              <option value="none" ${c.dexMode === "none" ? "selected" : ""}>Не действует (как тяжёлая)</option>
+            </select>
+          </div>
+          <div class="col">
+            <label>Максимум Ловкости</label>
+            <input type="number" data-bind="customArmor.dexCap" value="${c.dexCap ?? 2}" />
+          </div>
+        </div>
+        <div class="col" style="margin-top:8px;">
+          <label>Особые свойства</label>
+          <textarea data-bind="customArmor.note" rows="2" placeholder="напр. +1, сопротивление урону огнём">${escapeHtml(c.note || "")}</textarea>
+        </div>
+      </div>`;
+  }
+
+  function mainTab() {
+    return `
+      <div class="grid cols-2">
+        <div>
+          <div class="panel panel-tight">
+            <h2>Характеристики</h2>
+            <div class="grid cols-3 abilities-grid">
+              ${ABILITIES.map((a) => abilityBox(a)).join("")}
+            </div>
+            ${abilityBonusSourcesBox()}
+          </div>
+          <div class="panel panel-tight">
+            <h2>Спасброски</h2>
+            <div class="saves-compact">
+              ${ABILITIES.map((a) => saveRow(a)).join("")}
+            </div>
+          </div>
+          <div class="panel panel-tight">
+            <h2>Навыки</h2>
+            <div class="skills-grid">
+              ${SKILLS.map((s) => skillRow(s)).join("")}
+            </div>
+            <p class="row" style="margin-top:8px;align-items:center;gap:6px;">
+              <span class="prof-dot prof" style="cursor:default;"></span> владение
+              &nbsp;
+              <span class="prof-dot expert" style="cursor:default;"></span> компетентность
+            </p>
+          </div>
+          <div class="panel panel-tight">
+            <h2>Пассивные чувства</h2>
+            <div class="passive-grid">
+              <div class="passive-item"><span class="name">Восприятие</span><span class="bonus">${passivePerception(data)}</span></div>
+              <div class="passive-item"><span class="name">Анализ</span><span class="bonus">${passiveInvestigation(data)}</span></div>
+              <div class="passive-item"><span class="name">Проницательность</span><span class="bonus">${passiveInsight(data)}</span></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="panel">
+            <h2>Боевые параметры</h2>
+            <div class="grid cols-3 combat-stats">
+              <div class="stat-box"><div class="value" data-derived="ac">${armorClass(data)}</div><div class="label">КД</div></div>
+              <div class="stat-box" data-action="roll-initiative" style="cursor:pointer;"><div class="value" data-derived="initiative">${formatModifier(initiativeBonus(data))}</div><div class="label">Инициатива</div></div>
+              <div class="stat-box"><input class="value" style="width:100%;text-align:center;background:transparent;border:none;" type="number" data-bind="speed" value="${data.speed}" /><div class="label">Скорость, фт</div></div>
+            </div>
+            <div class="grid" style="grid-template-columns: 3fr 1fr; gap:10px; margin-top:8px;">
+              <div class="col">
+                <label>Броня</label>
+                <select data-bind="armorId">
+                  <option value="">Без брони</option>
+                  ${ARMORS.map((a) => `<option value="${a.id}" ${data.armorId === a.id ? "selected" : ""}>${escapeHtml(a.name)} (КД ${a.baseAC}${a.dexMode === "full" ? "+Лов" : a.dexMode === "capped" ? `+Лов, макс ${a.dexCap}` : ""})</option>`).join("")}
+                  <option value="custom" ${data.armorId === "custom" ? "selected" : ""}>Своя броня…</option>
+                </select>
+              </div>
+              <div class="col">
+                <label>Щит, +КД</label>
+                <input type="number" style="width:100%;" data-bind="shieldACBonus" value="${data.shieldACBonus ?? 2}" />
+              </div>
+            </div>
+            ${data.armorId === "custom" ? customArmorFields() : ""}
+            <div class="row" style="margin-top:8px;">
+              <button class="${data.armorId && data.armorEquipped ? "primary" : ""}" data-action="toggle-armor" ${!data.armorId ? "disabled" : ""}>
+                ${data.armorId && data.armorEquipped ? "🛡️ Броня: надета" : "Броня: снята"}
+              </button>
+              <button class="${data.shieldEquipped ? "primary" : ""}" data-action="toggle-shield">
+                ${data.shieldEquipped ? "🛡️ Щит: надет" : "Щит: снят"}
+              </button>
+            </div>
+            <div class="grid cols-3" style="margin-top:10px;">
+              <div class="col">
+                <label>Хиты максимум</label>
+                <input type="number" data-bind="hp.max" value="${data.hp.max}" />
+              </div>
+              <div class="col">
+                <label>Хиты текущие</label>
+                <input type="number" data-bind="hp.current" value="${data.hp.current}" />
+              </div>
+              <div class="col">
+                <label>Временные хиты</label>
+                <input type="number" data-bind="hp.temp" value="${data.hp.temp}" />
+              </div>
+            </div>
+            <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
+              <input type="number" min="0" data-hp-delta-input style="width:64px;" value="1" />
+              <button class="small danger" data-action="apply-damage">− Урон</button>
+              <button class="small primary" data-action="apply-heal">+ Лечение</button>
+            </div>
+            ${Number(data.hp.current) === 0 ? `<div class="death-banner">Вы находитесь при смерти, в свой ход бросайте спасброски от смерти</div>` : ""}
+            ${healingPotionsPanel()}
+            <div class="grid cols-2" style="margin-top:10px;">
+              <div class="col">
+                <label>Кости хитов (напр. 3к8)</label>
+                <div class="row">
+                  <input type="number" style="width:60px;" data-bind="hitDice.current" value="${data.hitDice.current}" />
+                  <span>из</span>
+                  <input type="number" style="width:60px;" data-bind="hitDice.total" value="${data.hitDice.total}" />
+                  <span>к</span>
+                  <input type="number" style="width:60px;" data-bind="hitDice.die" value="${data.hitDice.die}" />
+                </div>
+              </div>
+              <div class="row" style="align-items:center;gap:10px;">
+                <div class="col" style="flex:1;gap:5px;">
+                  <label style="margin:0;">Спасброски от смерти</label>
+                  <div class="row">
+                    <span class="muted">Успех</span>
+                    <div class="dot-track">${[0, 1, 2].map((i) => `<div class="circle ${i < data.deathSaves.successes ? "filled" : ""}" data-action="death-success" data-index="${i}"></div>`).join("")}</div>
+                  </div>
+                  <div class="row">
+                    <span class="muted">Провал</span>
+                    <div class="dot-track">${[0, 1, 2].map((i) => `<div class="circle ${i < data.deathSaves.failures ? "filled" : ""}" data-action="death-failure" data-index="${i}"></div>`).join("")}</div>
+                  </div>
+                </div>
+                ${d20Icon()}
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="row between"><h2 style="margin:0;">Кубики</h2></div>
+            <div class="dice-panel-body">
+              <div class="dice-panel-icon" title="к20">
+                ${d20VectorSvg(56, "dice-panel-spinner")}
+              </div>
+              <div class="col" style="flex:1;gap:6px;">
+                <div class="row" style="gap:6px;flex-wrap:nowrap;">
+                  <select data-pool-die style="flex:1;">
+                    ${[4, 6, 8, 10, 12, 20, 100].map((d) => `<option value="${d}" ${d === 20 ? "selected" : ""}>к${d}</option>`).join("")}
+                  </select>
+                  <span class="muted">×</span>
+                  <input type="number" data-pool-count min="1" max="99" value="1" style="width:52px;text-align:center;flex:none;" title="Количество кубиков" />
+                  <button class="small" data-action="add-to-pool" style="flex:none;">+ Добавить</button>
+                </div>
+              </div>
+            </div>
+            <div class="dice-pool-list">
+              ${
+                dicePool.length
+                  ? dicePool.map((p, i) => `<span class="dice-pool-chip">${p.count}к${p.sides}<button data-action="remove-pool-die" data-index="${i}" title="Убрать">✕</button></span>`).join("")
+                  : '<p class="muted" style="margin:6px 0;">Кубики пока не добавлены.</p>'
+              }
+            </div>
+            <button data-action="roll-pool" class="primary" style="width:100%;margin-top:8px;" ${dicePool.length ? "" : "disabled"}>Бросить${dicePool.length ? ` (${dicePool.reduce((s, p) => s + p.count, 0)})` : ""}</button>
+            <div class="dice-panel-log">
+              <div class="row between" style="margin-top:10px;">
+                <h3 style="margin:0;font-size:0.9rem;">Журнал бросков</h3>
+                <button class="small" data-action="clear-log" title="Очистить журнал">Очистить</button>
+              </div>
+              <div class="roll-log roll-log-inline" data-roll-log>${rollLogEntriesHtml()}</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Renders the roll-log entries markup shared by the inline panel on the
+  // main tab; kept as its own function so it can be re-rendered in place
+  // (via the dnd5e:roll-logged event) without re-rendering the whole page,
+  // which would disrupt whatever the player is doing elsewhere on screen.
+  function rollLogEntriesHtml() {
+    const log = getRollLog();
+    if (!log.length) return '<p class="muted" style="margin:6px 0;">Пока пусто — сделайте бросок.</p>';
+    return log
+      .map(
+        (e) => `
+      <div class="entry">
+        <div>
+          <div>${escapeHtml(e.label)}</div>
+          <div class="muted">${escapeHtml(e.detail || "")}</div>
+        </div>
+        <div class="total ${e.isCrit ? "crit" : ""} ${e.isFumble ? "fumble" : ""}">${e.total}</div>
+      </div>`
+      )
+      .join("");
+  }
+
+  function d20Icon() {
+    return `<img class="d20-icon" src="assets/icons/d20-red.png" data-action="roll-death-save" width="90" height="90" alt="к20" title="Бросить спасбросок от смерти (к20)" />`;
+  }
+
+  function potionIcon(tierId) {
+    const shapes = {
+      common: `<path d="M10 2h6v4l4 7a7 7 0 1 1-14 0l4-7V2z" fill="#c0392b" stroke="#7a2015" stroke-width="1.2"/><rect x="9" y="1" width="8" height="2.2" rx="0.6" fill="#7a2015"/>`,
+      greater: `<path d="M11 2h4v6c2 1 5 4 5 8a7 7 0 0 1-14 0c0-4 3-7 5-8V2z" fill="#c0392b" stroke="#7a2015" stroke-width="1.2"/><rect x="10" y="1" width="6" height="2.2" rx="0.6" fill="#7a2015"/><ellipse cx="13" cy="15" rx="2" ry="1.4" fill="#e0574a" opacity="0.8"/>`,
+      superior: `<path d="M10 2h6v5l6 11a2.2 2.2 0 0 1-2 3.2H6a2.2 2.2 0 0 1-2-3.2l6-11V2z" fill="#c0392b" stroke="#7a2015" stroke-width="1.2"/><rect x="9" y="1" width="8" height="2.2" rx="0.6" fill="#7a2015"/>`,
+      supreme: `<rect x="10" y="2" width="6" height="18" rx="3" fill="none" stroke="#7a2015" stroke-width="1.4"/><path d="M10.7 12a2.3 2.3 0 0 0 4.6 0v7a2.3 2.3 0 0 1-4.6 0v-7z" fill="#c0392b"/>`,
+    };
+    return `<svg class="potion-svg-icon" viewBox="0 0 26 26" width="28" height="28">${shapes[tierId] || shapes.common}</svg>`;
+  }
+
+  function healingPotionsPanel() {
+    const potions = data.healingPotions || {};
+    return `
+      <div class="panel" style="margin-top:10px;background:var(--bg-panel-2);">
+        <h3 style="margin-top:0;">Зелья лечения</h3>
+        <div class="potion-list">
+          ${HEALING_POTIONS.map((tier) => {
+            const count = potions[tier.id] || 0;
+            return `
+            <div class="potion-row">
+              ${potionIcon(tier.id)}
+              <div class="potion-info">
+                <div class="potion-name">${escapeHtml(tier.name)}</div>
+                <div class="potion-dice muted">${tier.dice} хитов</div>
+              </div>
+              <div class="potion-controls">
+                <button class="small" data-action="remove-potion" data-tier="${tier.id}" ${!count ? "disabled" : ""}>−</button>
+                <span class="num">${count}</span>
+                <button class="small" data-action="add-potion" data-tier="${tier.id}">+</button>
+                <button class="small primary" data-action="drink-potion" data-tier="${tier.id}" ${!count ? "disabled" : ""}>Выпить</button>
+              </div>
+            </div>`;
+          }).join("")}
+        </div>
+      </div>`;
+  }
+
+  const AMMO_TYPES = [
+    { id: "arrows", name: "Стрелы" },
+    { id: "bolts", name: "Болты" },
+    { id: "javelins", name: "Мет. копья" },
+    { id: "darts", name: "Дротики" },
+  ];
+
+  function ammoPanel() {
+    const ammo = data.ammo || {};
+    return `
+      <div class="panel panel-tight ammo-panel">
+        <h2 style="font-size:1.05rem;">Боеприпасы</h2>
+        <div class="money-row" style="gap:8px;">
+          ${AMMO_TYPES.map((t) => `
+            <div class="money-box" style="width:68px;gap:1px;">
+              <label style="white-space:nowrap;">${t.name}</label>
+              <input type="number" min="0" data-bind="ammo.${t.id}" value="${ammo[t.id] || 0}" />
+            </div>`).join("")}
+        </div>
+        <p class="muted" style="font-size:0.82rem;margin-top:4px;margin-bottom:0;">Тратятся автоматически при броске дальнобойной атаки: лук → стрелы, арбалет → болты, метательное копьё → копья, дротик → дротики.</p>
+      </div>`;
+  }
+
+  // Maps a weapon/attack name to the ammo type it consumes on a ranged
+  // attack roll (лук → стрелы, арбалет → болты, копьё → копья, дротик → дротики).
+  function ammoTypeForWeapon(name) {
+    const n = (name || "").toLowerCase();
+    if (n.includes("арбалет")) return "bolts";
+    if (n.includes("лук")) return "arrows";
+    if (n.includes("дротик")) return "darts";
+    if (n.includes("копь")) return "javelins";
+    return null;
+  }
+
+  function attacksTab() {
+    return `
+      <div class="panel attacks-panel">
+        <div class="row between"><h2 style="margin:0;">Атаки</h2><button class="small" data-action="add-attack">+ Атака</button></div>
+        <p class="muted" style="font-size:0.85rem;margin:-6px 0 10px;">Дальнобойное оружие всегда атакует от ловкости, ближнего боя — от силы, кроме метательного и фехтовального.</p>
+        <table class="sheet-table attacks-table">
+          <thead><tr><th style="width:96px;">Название</th><th style="width:64px;">Хар-ка</th><th style="width:38px;">Бонус</th><th style="width:76px;">Урон/тип</th><th style="width:86px;">Дальность</th><th style="width:16%;">Особые свойства</th><th style="width:150px;"></th></tr></thead>
+          <tbody>
+            ${(data.attacks || [])
+              .map(
+                (a, i) => `
+              <tr>
+                <td><input type="text" data-attack-field="name" data-attack-index="${i}" value="${escapeHtml(a.name)}" /></td>
+                <td>
+                  <select data-attack-ability data-attack-index="${i}">
+                    <option value="">—</option>
+                    ${ABILITIES.map((ab) => `<option value="${ab.id}" ${a.ability === ab.id ? "selected" : ""}>${ab.short || ab.label}</option>`).join("")}
+                  </select>
+                </td>
+                <td><input type="text" data-attack-field="bonus" data-attack-index="${i}" value="${escapeHtml(a.bonus ?? "")}" placeholder="+5" ${a.ability ? "readonly title=\"Считается автоматически по выбранной характеристике\"" : ""} /></td>
+                <td><input type="text" data-attack-field="damage" data-attack-index="${i}" value="${escapeHtml(a.damage ?? "")}" placeholder="1к8+3 рубящий" /></td>
+                <td>
+                  <select data-attack-range-type data-attack-index="${i}" title="Ближний бой / дальнобойное / метательное — используется боевыми стилями (напр. «Стрельба из лука», «Дуэлянт»)">
+                    <option value="">—</option>
+                    ${Object.entries(WEAPON_RANGE_TYPE_LABELS).map(([id, label]) => `<option value="${id}" ${a.rangeType === id ? "selected" : ""}>${label}</option>`).join("")}
+                  </select>
+                </td>
+                <td><input type="text" data-attack-field="special" data-attack-index="${i}" value="${escapeHtml(a.special ?? "")}" placeholder="напр. +1к6 огонь" /></td>
+                <td class="row attack-actions" style="gap:3px;">
+                  <button class="small" data-action="roll-attack" data-index="${i}" title="Бросок атаки">🎲 Атака</button>
+                  <button class="small" data-action="roll-attack-damage" data-index="${i}" title="Бросок урона">🎲 Урон</button>
+                  <button class="small" data-action="roll-attack-crit" data-index="${i}" title="Критический успех: все кубы урона удваиваются">💥 Крит</button>
+                  <button class="small danger" data-action="remove-attack" data-index="${i}">✕</button>
+                </td>
+              </tr>`
+              )
+              .join("")}
+          </tbody>
+        </table>
+        ${(data.attacks || []).length === 0 ? '<p class="muted">Атак пока нет — добавьте первую.</p>' : ""}
+      </div>`;
+  }
+
+  // Extracts the first dice expression from free text (supports both "к" and
+  // "d" die notation), for auto-including a weapon's "особые свойства" bonus
+  // dice in damage rolls, and for rolling a weapon's base damage.
+  function parseDiceFromText(text) {
+    if (!text) return null;
+    const m = String(text).match(/(\d*)\s*[dк](\d+)\s*([+-]\s*\d+)?/i);
+    if (!m) return null;
+    const count = m[1] || "1";
+    const sides = m[2];
+    const mod = m[3] ? m[3].replace(/\s+/g, "") : "";
+    return { expr: `${count}d${sides}${mod}`, raw: m[0].trim() };
+  }
+
+  // A "универсальное (1кX)" weapon can be swung one- or two-handed, each
+  // with its own damage die (e.g. Секира: 1к8 one-handed, 1к10 two-handed
+  // via "универсальное"). Attacks don't store the weapon's own `properties`
+  // text the way inventory weapons do (see WEAPONS catalog), so this looks
+  // the attack's own name up against the catalog by name to find it --
+  // works for the common case of an attack added via "→ Атаки" from a
+  // matching inventory weapon, or just named the same as a catalog weapon.
+  function versatileDieSidesForAttack(a) {
+    if (!a || !a.name) return null;
+    const w = WEAPONS.find((w) => w.name.toLowerCase() === a.name.trim().toLowerCase());
+    const props = w && w.properties;
+    if (!props) return null;
+    const m = /универсальное\s*\(\s*\d*к(\d+)\s*\)/i.exec(props);
+    return m ? m[1] : null;
+  }
+  // Swaps only the die SIDES in an already-parsed dice expression (keeping
+  // the die count and any flat modifier untouched) -- used to turn a
+  // versatile weapon's one-handed base damage into its two-handed one right
+  // before the usual crit-doubling/Savage-Attacks/etc. logic runs on it.
+  function applyVersatileDie(base, sides) {
+    return {
+      expr: base.expr.replace(/^(\d*)d\d+/i, `$1d${sides}`),
+      raw: base.raw.replace(/(\d*)\s*[dк]\d+/i, (m, count) => `${count}к${sides}`),
+    };
+  }
+
+  // Characters created before a given data-file fix keep whatever short (or
+  // even empty) description was baked in at creation time -- new characters
+  // get the full text, but existing ones don't retroactively change. This
+  // looks up the current canonical text for a feature by name, so an
+  // already-created character can pull in whatever fuller text is now on
+  // file for a feature of that name.
+  //
+  // `source` (the feature card's own "Источник" field, e.g. "Дварф",
+  // "Воин", or "Жрец — Домен войны" for a subclass feature -- see
+  // addFeatureOrFold()/applySubclassFeatures() and subclassFeatureSource())
+  // is used FIRST to scope the search to the one race/class/subclass that
+  // actually granted this feature. Several unrelated entries across the
+  // whole data file can share the exact same feature name -- e.g. every
+  // Artificer subclass has its own level-3 "Владение инструментами" with
+  // completely different text -- so a bare name-only search (the old
+  // behaviour, still used below as a last-resort fallback for source-less
+  // or edited data) can silently offer to overwrite a card with some
+  // unrelated entity's text of the same name.
+  function findKnownFeatureText(name, source) {
+    if (!name) return null;
+    const n = name.trim().toLowerCase();
+    const src = (source || "").trim().toLowerCase();
+    if (src) {
+      const dashIdx = src.indexOf(" — ");
+      if (dashIdx !== -1) {
+        // "<Class> — <Subclass>": an actual subclass feature card.
+        const clsPart = src.slice(0, dashIdx);
+        const subPart = src.slice(dashIdx + 3);
+        const cls = CLASSES.find((c) => c.name.toLowerCase() === clsPart);
+        const sub = cls && (cls.subclasses || []).find((s) => s.name.toLowerCase() === subPart);
+        const sf = sub && (sub.features || []).find((f) => (f.name || "").toLowerCase() === n);
+        if (sf) return (sf.desc || []).join("\n\n");
+      } else {
+        // Source is a bare class name: either that class's own
+        // classFeatureText, or the "intro" card for one of its subclasses
+        // (filed under the class's name, not "<Class> — <Subclass>" --
+        // see applySubclassFeatures()/doFinish()).
+        const cls = CLASSES.find((c) => c.name.toLowerCase() === src);
+        if (cls) {
+          if (cls.classFeatureText) {
+            const key = Object.keys(cls.classFeatureText).find((k) => k.toLowerCase() === n);
+            if (key) return cls.classFeatureText[key];
+          }
+          const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === n || n.endsWith(`: ${s.name.toLowerCase()}`));
+          if (sub && sub.intro) return sub.intro;
+        } else {
+          // Source is a race or subrace name.
+          for (const race of RACES) {
+            if (race.name.toLowerCase() === src) {
+              const t = (race.traits || []).find((t) => (t.name || "").toLowerCase() === n);
+              if (t && t.desc) return t.desc;
+            }
+            const subrace = (race.subraces || []).find((s) => s.name.toLowerCase() === src);
+            if (subrace) {
+              const st = (subrace.traits || []).find((t) => (t.name || "").toLowerCase() === n);
+              if (st && st.desc) return st.desc;
+            }
+          }
+        }
+      }
+    }
+    // Fallback: no source on file, or the scoped search above found
+    // nothing under it (e.g. a hand-edited source) -- best-effort global
+    // search by name alone, same as before this function took a source.
+    for (const cls of CLASSES) {
+      if (cls.classFeatureText) {
+        const key = Object.keys(cls.classFeatureText).find((k) => k.toLowerCase() === n);
+        if (key) return cls.classFeatureText[key];
+      }
+      for (const sub of cls.subclasses || []) {
+        if ((sub.name || "").toLowerCase() === n && sub.intro) return sub.intro;
+        const sf = (sub.features || []).find((f) => (f.name || "").toLowerCase() === n);
+        if (sf) return (sf.desc || []).join("\n\n");
+      }
+    }
+    for (const race of RACES) {
+      const t = (race.traits || []).find((t) => (t.name || "").toLowerCase() === n);
+      if (t && t.desc) return t.desc;
+      // Most of a race's actual trait text lives on its subraces (e.g. a
+      // Gnome's "Умелец" is only on rock-gnome, never on the base Gnome) --
+      // without this, "↻ Обновить описание из базы" never finds anything
+      // for a subrace trait, no matter how much fuller the data-file text is.
+      for (const sub of race.subraces || []) {
+        const st = (sub.traits || []).find((t) => (t.name || "").toLowerCase() === n);
+        if (st && st.desc) return st.desc;
+      }
+    }
+    return null;
+  }
+
+  // A handful of features roll a *variable* number of dice tied to the
+  // character's current proficiency bonus (e.g. the Mordenkainen Presents
+  // Aasimar's "Исцеляющие руки": "бросить количество к4, равное вашему
+  // бонусу мастерства" -- roll a number of d4s equal to proficiency bonus).
+  // plain parseDiceFromText would grab just the bare "к4" and silently roll
+  // only 1d4, dropping the scaling -- this catches that phrasing first and
+  // computes the real die count from the character's current level.
+  function parseProficiencyScaledDice(text) {
+    if (!text) return null;
+    const m = String(text).match(/количество\s+[dк](\d+)[^.]{0,40}?равн\S*\s+(?:вашему\s+)?бонусу мастерства/i);
+    if (!m) return null;
+    const pb = proficiencyBonus(data);
+    return { expr: `${pb}d${m[1]}`, raw: `${pb}к${m[1]} (бонус мастерства)` };
+  }
+  // The single entry point for "does this feature have a die roll, and what
+  // is it" -- used both to decide whether the 🎲 button shows on a feature
+  // card and to actually roll when it's clicked, so the two can't disagree.
+  function featureDiceInfo(desc) {
+    return parseProficiencyScaledDice(desc) || parseDiceFromText(desc);
+  }
+
+  // Many racial/class features that force a saving throw spell out their DC
+  // formula right in the description text -- always "8 + бонус мастерства +
+  // модификатор <характеристика>", but scraped from different sourcebooks in
+  // either order ("Сл = 8 + модификатор Телосложения + бонус мастерства)"
+  // for Дыхание дракона, "Сл 8 + ваш бонус мастерства + ваш модификатор
+  // Харизмы" elsewhere). Rather than hardcode this per feature, pull the
+  // ability out of whichever order it appears in and compute the DC live
+  // from the character's current stats, so it stays right next to the 🎲
+  // roll button instead of making the player do 8 + mod + PB by hand.
+  function featureSaveDCInfo(desc) {
+    if (!desc) return null;
+    const text = String(desc);
+    const abilityRe = "(Силы|Ловкости|Телосложения|Интеллекта|Мудрости|Харизмы)";
+    let m = text.match(new RegExp(`Сл[^.]{0,15}?8\\s*\\+[^.]{0,60}?модификатор[а-я]*\\s+${abilityRe}[^.]{0,40}?бонус мастерства`, "i"));
+    let abilityName = m && m[1];
+    if (!abilityName) {
+      m = text.match(new RegExp(`Сл[^.]{0,15}?8\\s*\\+[^.]{0,40}?бонус мастерства[^.]{0,60}?модификатор[а-я]*\\s+${abilityRe}`, "i"));
+      abilityName = m && m[1];
+    }
+    if (!abilityName) return null;
+    const abilityId = USES_ABILITY_WORDS[abilityName.toLowerCase()];
+    const dc = 8 + proficiencyBonus(data) + getAbilityMod(data, abilityId);
+    return { dc, abilityId };
+  }
+
+  // Some race/class features come with a limited number of uses that
+  // refresh on a rest -- either a flat number ("не более одного раза за
+  // короткий или продолжительный отдых") or a formula tied to an ability
+  // modifier ("количество раз, равное вашему модификатору Мудрости, минимум
+  // один"). Scanned straight from the feature's own description text (the
+  // scraped dnd.su wording), rather than a separate structured field, since
+  // that's the only place this information lives for now.
+  const USES_ABILITY_WORDS = { "силы": "str", "ловкости": "dex", "телосложения": "con", "интеллекта": "int", "мудрости": "wis", "харизмы": "cha" };
+  const RU_NUMBER_WORDS = { "один": 1, "одна": 1, "одно": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6 };
+  function ruNumberToInt(raw) {
+    const w = raw.toLowerCase();
+    return RU_NUMBER_WORDS[w] ?? parseInt(raw, 10);
+  }
+  function parseUsesFromText(desc) {
+    if (!desc) return null;
+    const text = String(desc);
+    // Recharge wording varies a lot across scraped trait text: "короткого
+    // отдыха" (short), "продолжительного отдыха" (long, PHB phrasing) but
+    // also "долгий отдых" / "длинный отдых" (long, shorthand phrasing used
+    // by several abridged supplement-book traits below).
+    const rechargeOf = (span) => {
+      const shortMatch = /коротк(ого|ий)/i.test(span);
+      const longMatch = /(продолжительн(ого|ый)|долг(ого|ий)|длинн(ого|ый))/i.test(span);
+      if (shortMatch && longMatch) return "any";
+      if (shortMatch) return "short";
+      if (longMatch) return "long";
+      return null;
+    };
+    // "...количество раз, равное вашему бонусу мастерства" (Fizban's
+    // Дыхание дракона, and any future feature phrased the same way).
+    const pbMatch = text.match(/равн[а-я]*\s+(?:ваш[а-я]*\s+)?бонус[а-я]*\s+мастерства/i);
+    if (pbMatch) {
+      return { max: Math.max(1, proficiencyBonus(data)), recharge: rechargeOf(text) };
+    }
+    // "...равное 1 + модификатор Харизмы" (Паладин: Чувство божественного)
+    const plusMatch = text.match(/равн[а-я]*\s+(\d+)\s*\+\s*модификатор[а-я]*\s+(Силы|Ловкости|Телосложения|Интеллекта|Мудрости|Харизмы)/i);
+    if (plusMatch) {
+      const abilityId = USES_ABILITY_WORDS[plusMatch[2].toLowerCase()];
+      const base = parseInt(plusMatch[1], 10);
+      const mod = getAbilityMod(data, abilityId);
+      return { max: Math.max(0, base + mod), recharge: rechargeOf(text) };
+    }
+    // "...модификатору Мудрости... минимум 1 раз" / "минимум один"
+    const modMatch = text.match(/модификатор[а-я]*\s+(Силы|Ловкости|Телосложения|Интеллекта|Мудрости|Харизмы)[^.]{0,60}?минимум\s+(\d+|один|одна|одно|два|три|четыре|пять)/i);
+    if (modMatch) {
+      const abilityId = USES_ABILITY_WORDS[modMatch[1].toLowerCase()];
+      const min = ruNumberToInt(modMatch[2]);
+      const mod = getAbilityMod(data, abilityId);
+      return { max: Math.max(min, mod), recharge: rechargeOf(text) };
+    }
+    // "N/короткий отдых" style shorthand
+    // \w doesn't match Cyrillic letters in JS regex, so the word endings
+    // ("...ий отдых" vs "...ого отдыха") are spelled out with a Cyrillic
+    // class instead of \w*.
+    const shorthand = text.match(/(\d+)\s*\/\s*(коротк[а-яё]*|продолжительн[а-яё]*|долг[а-яё]*|длинн[а-яё]*)\s*отдых/i);
+    if (shorthand) return { max: parseInt(shorthand[1], 10), recharge: rechargeOf(shorthand[2]) || "short" };
+    // "не более одного раза за короткий/продолжительный отдых" / "не можете
+    // использовать это умение снова, не завершив короткого...отдыха" / "не
+    // можете применить его снова, пока не завершите короткий или
+    // продолжительный отдых" (PHB Дыхание дракона phrasing) / "не можете
+    // использовать её снова, пока не закончите продолжительный отдых"
+    // (Aasimar phrasing -- "закончите" instead of "завершите") / "не
+    // сможете вновь воспользоваться этой способностью, пока не закончите
+    // продолжительный отдых" (Volo's Aasimar phrasing -- "сможете" instead
+    // of "можете", "воспользоваться" instead of "использовать/применить").
+    // The bit between the verb and the comma is left as a generic
+    // [^,.]* rather than an enumerated word list, since it varies with the
+    // grammatical case of whatever noun phrase names the feature.
+    if (
+      /не более (одного|1) раза за/i.test(text) ||
+      /не (можете|сможете)(\s+вновь)?\s+(использовать|применить|воспользоваться)[^,.]*,?\s*(не завершив|пока не (завершите|закончите))/i.test(text)
+    ) {
+      return { max: 1, recharge: rechargeOf(text) || "short" };
+    }
+    // Abridged/shorthand trait summaries (several supplement-book races are
+    // stored as a compressed one-liner rather than the full PHB-style
+    // paragraph): "раз за отдых", "раз в долгий отдых", "раз до короткого
+    // отдыха", "восстанавливается после отдыха", "перезарядка после отдыха".
+    // The recharge-word group is followed by \s* (not appended directly),
+    // since it's normally a declined adjective separated from "отдых" by a
+    // space ("короткого отдыха"), not a prefix glued onto it.
+    if (
+      /раз\s+(в|за|до)\s+(коротк[а-яё]*|продолжительн[а-яё]*|долг[а-яё]*|длинн[а-яё]*)?\s*отдых/i.test(text) ||
+      /(восстанавливается|перезарядка)\s+(после|за)\s+(коротк[а-яё]*|продолжительн[а-яё]*|долг[а-яё]*|длинн[а-яё]*)?\s*отдых/i.test(text)
+    ) {
+      return { max: 1, recharge: rechargeOf(text) || "any" };
+    }
+    // Catch-all: any feature whose text says, in whatever grammatical
+    // construction, that using it again requires a rest first ("...чтобы
+    // использовать его снова", "...прежде чем сможете использовать это
+    // умение снова", "...не можете сделать это снова, пока не закончите
+    // отдых", etc.) -- the specific patterns above only cover a handful of
+    // the many phrasings actually used across the data file (e.g. "Второе
+    // дыхание"'s own "Использовав это умение, вы должны закончить
+    // короткий или продолжительный отдых, чтобы использовать его снова"
+    // isn't "не можете...", so it slips past every earlier check). Every
+    // one-use-per-rest feature mentions both "отдых" and "снова" close
+    // together, regardless of exact wording, so this is a safe general
+    // fallback rather than a name-specific special case.
+    if (/(снова[^.]{0,100}отдых|отдых[а-яё]*[^.]{0,100}снова)/i.test(text)) {
+      return { max: 1, recharge: rechargeOf(text) || "any" };
+    }
+    return null;
+  }
+  // Renders the little pip row for a feature's uses, if its text describes
+  // any -- filled pip = an available use, empty = already spent. State is
+  // an array of booleans on the feature itself (data.features[i].usesState),
+  // resized on the fly to whatever the formula currently computes to (an
+  // ability-mod-based max can change as the sheet's abilities change).
+  function usesArrayFor(f, max) {
+    const arr = Array.isArray(f.usesState) ? f.usesState.slice(0, max) : [];
+    while (arr.length < max) arr.push(true);
+    return arr;
+  }
+  const RECHARGE_LABEL = { short: "восст.: короткий отдых", long: "восст.: продолжительный отдых", any: "восст.: отдых" };
+  // "Бардовское вдохновение"'s own text states its use count as "равное
+  // модификатору Харизмы (минимум раз в день)" -- no numeral for
+  // parseUsesFromText's "минимум N" pattern to catch (it's "минимум раз",
+  // not "минимум 1 раз"), so this feature gets an explicit forced count via
+  // maxBardInspirationUses() instead of relying on the generic text parser.
+  const BARD_INSPIRATION_FEATURE_NAME = /^Бардовское вдохновение/i;
+  // Rage's own text points at a level table ("смотрите колонку «ярость»
+  // таблицы «Варвар»") instead of spelling out a number, so parseUsesFromText
+  // has nothing to parse -- forced count by Barbarian level instead (PHB
+  // table: 2 at 1-2, 3 at 3-5, 4 at 6-11, 5 at 12-16, 6 at 17-19, unlimited
+  // at 20). Matched by exact name so "Ярость мелкого"/"Ярость шторма"/
+  // "Ярость превыше смерти" (other features that just start with the same
+  // word) aren't caught too.
+  const RAGE_FEATURE_NAME = /^Ярость$/i;
+  // Второе дыхание's own text spells out its scaling in words ("1к10 + ваш
+  // уровень воина") rather than a number parseDiceFromText/featureDiceInfo
+  // could pick up -- so its 🎲 button (wired below) adds the Fighter class's
+  // CURRENT level as a flat bonus on top of the parsed "1к10" itself,
+  // instead of baking a number in at creation time. That means it stays
+  // correct after a level-up with no extra bookkeeping (see applyLevelUp
+  // above), the same way Ярость's use count already does for level.
+  const SECOND_WIND_FEATURE_NAME = /^Второе дыхание/i;
+  function fighterLevel(data) {
+    const f = (data.classes || []).find((c) => c.id === "fighter");
+    return f && f.level ? f.level : 0;
+  }
+  function warlockLevel(data) {
+    const w = (data.classes || []).find((c) => c.id === "warlock");
+    return w && w.level ? w.level : 0;
+  }
+  // Genie patron's "Сосуд гения" card describes several sub-abilities in one
+  // block of prose, one of which ("Гнев гения") happens to say "...равный
+  // вашему бонусу мастерства" -- parseUsesFromText's generic "N = proficiency
+  // bonus" pattern latches onto THAT unrelated damage-bonus phrase and
+  // reports 2 uses/long rest, when the feature's actual limited resource
+  // ("Передышка на дне бутылки": can't re-enter the vessel again until a
+  // long rest) is a flat one-per-long-rest. Forced count, same as the
+  // Arcane Recovery-style special cases above.
+  const GENIE_VESSEL_FEATURE_NAME = /^Сосуд гения$/i;
+  // Celestial patron's "Лечащий свет": a pool of d6s (1 + warlock level, not
+  // a flat "1 use") spent in a player-chosen amount per use (up to the
+  // Charisma modifier) -- resolveFeatureUses() is bypassed for this one
+  // entirely in favour of the dedicated dice-pool tracker below (see
+  // featureResourceHtml), same idea as "Возложение рук"'s point pool.
+  const HEALING_LIGHT_FEATURE_NAME = /^Лечащий свет$/i;
+  function healingLightPoolMax(data) {
+    return 1 + warlockLevel(data);
+  }
+  function healingLightMaxDicePerUse(data) {
+    return Math.max(1, getAbilityMod(data, "cha"));
+  }
+  function maxRageUses(data) {
+    const barb = (data.classes || []).find((c) => c.id === "barbarian");
+    const lvl = barb && barb.level ? barb.level : totalLevel(data);
+    if (lvl >= 20) return Infinity;
+    if (lvl >= 17) return 6;
+    if (lvl >= 12) return 5;
+    if (lvl >= 6) return 4;
+    if (lvl >= 3) return 3;
+    return 2;
+  }
+  // Battle Master's superiority dice: "У вас есть четыре кости
+  // превосходства... Вы получаете ещё по одной кости превосходства на 7-м
+  // и 15-м уровнях" (count, tied to Fighter level, not parseable from a
+  // fixed number) and "Ваша кость превосходства увеличивается до к10. На
+  // 18-м уровне — до к12" (die size, a separate feature card entirely) --
+  // both forced from the live Fighter level rather than parsed, same as
+  // Ярость's count above.
+  const BATTLEMASTER_SUPERIORITY_FEATURE_NAME = /^Боевое превосходство$/i;
+  function hasBattlemaster() {
+    return (data.features || []).some((f) => BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || ""));
+  }
+  function superiorityDieSides(data) {
+    const lvl = fighterLevel(data);
+    if (lvl >= 18) return 12;
+    if (lvl >= 10) return 10;
+    return 8;
+  }
+  function superiorityDieMax(data) {
+    if (!hasBattlemaster()) return 0;
+    const lvl = fighterLevel(data);
+    let max = 4;
+    if (lvl >= 7) max += 1;
+    if (lvl >= 15) max += 1;
+    return max;
+  }
+  function superiorityFeatureIndex() {
+    return (data.features || []).findIndex((f) => BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || ""));
+  }
+  function superiorityDiceAvailable() {
+    const i = superiorityFeatureIndex();
+    if (i === -1) return 0;
+    const arr = usesArrayFor(data.features[i], superiorityDieMax(data));
+    return arr.filter(Boolean).length;
+  }
+  // Spends one superiority die from the pool -- used both by the pip row's
+  // own 🎲 roll button (below) and by the "добавить кость превосходства"
+  // checkbox on the attack-roll and damage-roll modals, so all three ways
+  // of using one stay in sync with the same pip state.
+  function consumeSuperiorityDie() {
+    const i = superiorityFeatureIndex();
+    if (i === -1) return false;
+    const arr = usesArrayFor(data.features[i], superiorityDieMax(data));
+    const idx = arr.findIndex(Boolean);
+    if (idx === -1) return false;
+    arr[idx] = false;
+    data.features[i].usesState = arr;
+    doSave();
+    return true;
+  }
+  function resolveFeatureUses(f) {
+    if (BARD_INSPIRATION_FEATURE_NAME.test(f.name || "")) return { max: maxBardInspirationUses(), recharge: "long" };
+    if (RAGE_FEATURE_NAME.test(f.name || "")) return { max: maxRageUses(data), recharge: "long" };
+    // Arcane/Natural Recovery's own text describes a once-a-day use spent
+    // during a short rest, phrased in a way parseUsesFromText's regexes
+    // don't catch -- forced count so it gets normal pip tracking and the
+    // rest modal can tell whether today's use is still available.
+    if (ARCANE_RECOVERY_FEATURES.some((entry) => entry.match.test(f.name || ""))) return { max: 1, recharge: "long" };
+    if (GENIE_VESSEL_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "long" };
+    if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
+    return parseUsesFromText(f.desc);
+  }
+  function featureUsesHtml(f, i) {
+    const uses = resolveFeatureUses(f);
+    if (!uses || uses.max <= 0) return "";
+    if (uses.max === Infinity) {
+      return `
+      <div class="feature-card-uses">
+        <span class="pip-label">Неограниченно (20 уровень)</span>
+      </div>`;
+    }
+    const arr = usesArrayFor(f, uses.max);
+    const pips = arr
+      .map((filled, j) => `<button type="button" class="pip ${filled ? "filled" : ""}" data-action="toggle-feature-use" data-index="${i}" data-use-index="${j}" title="${filled ? "Отметить как потраченное" : "Восстановить использование"}"></button>`)
+      .join("");
+    return `
+      <div class="feature-card-uses">
+        <span class="pip-label">${uses.recharge ? RECHARGE_LABEL[uses.recharge] : "Использ."}</span>
+        ${pips}
+      </div>`;
+  }
+
+  // "Возложение рук" (Lay on Hands) isn't a fixed number of discrete uses --
+  // it's a point pool (paladin level × 5) spent in variable amounts per
+  // touch, so it gets its own current/max tracker instead of the pip row.
+  const POOL_FEATURE_NAMES = /^(Возложение рук|Наложение рук)/i;
+  function layOnHandsPoolMax() {
+    const p = (data.classes || []).find((c) => c.id === "paladin");
+    return (p && p.level ? p.level : totalLevel(data)) * 5;
+  }
+  function featureResourceHtml(f, i) {
+    if (POOL_FEATURE_NAMES.test(f.name || "")) {
+      const max = layOnHandsPoolMax();
+      const current = Math.max(0, Math.min(typeof f.poolCurrent === "number" ? f.poolCurrent : max, max));
+      return `
+        <div class="feature-card-uses">
+          <span class="pip-label">Пул исцеления</span>
+          <input type="number" min="0" max="${max}" class="feature-pool-input" data-action="lay-on-hands-pool" data-index="${i}" value="${current}" style="width:52px;" />
+          <span class="pip-label">/ ${max}</span>
+          <button type="button" class="small" data-action="lay-on-hands-reset" data-index="${i}" title="Восстановить весь запас">↺</button>
+        </div>`;
+    }
+    if (HEALING_LIGHT_FEATURE_NAME.test(f.name || "")) {
+      const max = healingLightPoolMax(data);
+      const current = Math.max(0, Math.min(typeof f.poolCurrent === "number" ? f.poolCurrent : max, max));
+      const maxPerUse = Math.min(healingLightMaxDicePerUse(data), max || 1);
+      const spend = Math.max(1, Math.min(typeof f.healSpend === "number" ? f.healSpend : maxPerUse, maxPerUse));
+      return `
+        <div class="feature-card-uses">
+          <span class="pip-label">Кости к6</span>
+          <input type="number" min="0" max="${max}" class="feature-pool-input" data-action="healing-light-pool" data-index="${i}" value="${current}" style="width:52px;" />
+          <span class="pip-label">/ ${max}</span>
+          <button type="button" class="small" data-action="healing-light-reset" data-index="${i}" title="Восстановить весь запас">↺</button>
+        </div>
+        <div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">
+          <span class="pip-label">Потратить костей (макс ${maxPerUse}):</span>
+          <input type="number" min="1" max="${maxPerUse}" class="feature-pool-input" data-action="healing-light-spend" data-index="${i}" value="${spend}" style="width:46px;" />
+          <button type="button" class="small feature-card-roll" data-action="roll-healing-light" data-index="${i}" ${current > 0 ? "" : "disabled"}>🎲 Лечение</button>
+        </div>`;
+    }
+    return featureUsesHtml(f, i);
+  }
+
+  function abilityBox(a) {
+    const score = getAbilityScore(data, a.id);
+    const mod = getAbilityMod(data, a.id);
+    return `
+      <div class="ability-box" data-action="roll-ability" data-ability="${a.id}">
+        <div class="label">${a.label}</div>
+        <input type="number" class="score-input" data-ability-score="${a.id}" value="${score}" />
+        <div class="mod" data-derived="mod-${a.id}">${formatModifier(mod)}</div>
+      </div>`;
+  }
+
+  // Small box under Характеристики listing where each ability-score bonus
+  // came from (race, feats…) — data.abilityBonuses is a log of already-baked
+  // bonuses (see wizard.js finish() and the add-feat handler above).
+  function abilityBonusSourcesBox() {
+    const bonuses = data.abilityBonuses || [];
+    if (!bonuses.length) return "";
+    return `
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:0.8rem;">
+        <div class="muted" style="margin-bottom:4px;">Откуда бонусы к характеристикам:</div>
+        ${bonuses
+          .map(
+            (b) => `<div>${escapeHtml(b.source)}: +${b.amount} ${ABILITIES.find((a) => a.id === b.ability)?.label || b.ability}</div>`
+          )
+          .join("")}
+      </div>`;
+  }
+
+  function saveRow(a) {
+    const prof = isProficientSave(data, a.id);
+    const bonus = saveBonus(data, a.id);
+    return `
+      <div class="skill-row">
+        <div class="prof-dot ${prof ? "prof" : ""}" data-action="toggle-save-prof" data-ability="${a.id}"></div>
+        <div class="name">${a.label}</div>
+        <div class="bonus" data-derived="save-${a.id}" data-action="roll-save" data-ability="${a.id}">${formatModifier(bonus)}</div>
+      </div>`;
+  }
+
+  function skillRow(s) {
+    const prof = isProficientSkill(data, s.id);
+    const expert = isExpertSkill(data, s.id);
+    const bonus = skillBonus(data, s.id);
+    return `
+      <div class="skill-row">
+        <div class="prof-dot ${expert ? "expert" : prof ? "prof" : ""}" data-action="cycle-skill-prof" data-skill="${s.id}"></div>
+        <div class="ability-tag">${(ABILITIES.find((a) => a.id === s.ability) || {}).short || s.ability.toUpperCase()}</div>
+        <div class="name">${s.label}</div>
+        <div class="bonus" data-derived="skill-${s.id}" data-action="roll-skill" data-skill="${s.id}">${formatModifier(bonus)}</div>
+      </div>`;
+  }
+
+  // Classes whose players choose a limited number of spells to prepare each
+  // day on the sheet itself (Task #109), rather than treating every learned
+  // spell as simultaneously "active". Paladin is also a "prepared" caster by
+  // data.spellcasting.type but isn't part of this flow -- it keeps the
+  // older behavior of everything added being usable straight away.
+  const PREP_UI_CLASSES = new Set(["wizard", "druid", "cleric", "artificer"]);
+
+  // Cleric/Druid/Artificer prepare from their whole class spell list every
+  // day -- they have no personal "spellbook" to build up, so the pool to
+  // prepare from is just every level>0 spell their class grants. A Wizard
+  // instead only ever prepares from spells actually copied into their
+  // spellbook (sc.known, built via "+ Добавить в книгу заклинаний").
+  function spellPrepPool(cls, sc) {
+    if (cls.spellcasting.preparedFormula) {
+      return SPELLS.filter((sp) => sp.level > 0 && sp.classes.includes(cls.id));
+    }
+    // Characters created before this prepare/spellbook split had their
+    // starting spells written straight into "prepared" (the old bucket for
+    // a prepared caster) instead of "known" -- folding both in here keeps
+    // an existing wizard's spellbook showing up instead of looking empty
+    // until every spell is manually re-added.
+    const ids = new Set([...(sc.known || []), ...(sc.prepared || [])]);
+    return SPELLS.filter((sp) => sp.level > 0 && ids.has(sp.id));
+  }
+
+  // Rules-of-thumb daily prepared-spell count: spellcasting ability modifier
+  // + levels in the spellcasting class (minimum 1) -- for Artificer, half
+  // that class level instead (its slower "mod+halflevel" formula). Mirrors
+  // wizard.js's level1SpellLimit(), just driven by the character's current
+  // level rather than a fixed level-1 value.
+  function preparedSpellsMax(sc, cls) {
+    if (!cls || !cls.spellcasting) return 0;
+    const mod = getAbilityMod(data, sc.ability || cls.spellcasting.ability);
+    const clsEntry = (data.classes || []).find((c) => c.id === cls.id);
+    const lvl = clsEntry && clsEntry.level ? Number(clsEntry.level) : totalLevel(data);
+    if (cls.spellcasting.preparedFormula === "mod+halflevel") return Math.max(1, mod + Math.floor(lvl / 2));
+    return Math.max(1, mod + lvl);
+  }
+
+  function spellsTab() {
+    const sc = data.spellcasting || {};
+    const dc = spellSaveDC(data);
+    const atk = spellAttackBonus(data);
+    const slots = sc.slots || {};
+    const cls = sc.classFilter ? getClass(sc.classFilter) : null;
+    // Only spells the character's own class(es) grant are offered when
+    // browsing to add one; with no class chosen yet, fall back to the full
+    // list so an early-stage character can still pick something.
+    const classIds = (data.classes || []).map((c) => c.id).filter(Boolean);
+    const showPrepUI = !!(cls && PREP_UI_CLASSES.has(cls.id));
+    const cantripSpells = SPELLS.filter((sp) => (sc.cantrips || []).includes(sp.id));
+
+    let listSectionHtml;
+    if (showPrepUI) {
+      const isSpellbook = !cls.spellcasting.preparedFormula;
+      // Domain spells (Cleric) are always prepared for free and don't count
+      // against the prepared-spells cap, so they're folded into the shown
+      // pool/list here but tracked separately from sc.prepared -- see
+      // currentDomainSpellIds() and spellCardControlHtml()'s domainIds check.
+      const domainIds = currentDomainSpellIds(cls);
+      const basePool = spellPrepPool(cls, sc);
+      const pool = [...basePool, ...SPELLS.filter((sp) => domainIds.includes(sp.id) && !basePool.some((p) => p.id === sp.id))];
+      const preparedIds = new Set(sc.prepared || []);
+      const max = preparedSpellsMax(sc, cls);
+      const shown = [
+        ...cantripSpells,
+        ...(spellPrepMode ? pool : pool.filter((sp) => preparedIds.has(sp.id) || domainIds.includes(sp.id))),
+      ].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
+      const browseKnownIds = new Set([...(sc.cantrips || []), ...(sc.known || [])]);
+      listSectionHtml = `
+        <div class="panel">
+          <div class="row between" style="align-items:center;flex-wrap:wrap;gap:8px;">
+            <h3 style="margin:0;">Известные / подготовленные заклинания</h3>
+            <span class="muted">Подготовлено: ${preparedIds.size} / ${max}</span>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0 4px;">
+            <button class="small ${spellPrepMode ? "" : "primary"}" data-action="toggle-spell-prep-mode">${spellPrepMode ? "✕ Скрыть неподготовленные" : "Подготовить заклинания"}</button>
+            ${isSpellbook ? `<button class="small primary" data-action="toggle-spell-browse">${spellBrowseOpen ? "✕ Закрыть подбор" : "+ Добавить в книгу заклинаний"}</button>` : ""}
+          </div>
+          ${
+            shown.length
+              ? spellLevelSections(shown, sc, { preparedIds, max, spellbook: isSpellbook, editing: spellPrepMode, domainIds: new Set(domainIds) })
+              : isSpellbook
+                ? '<p class="muted">Пока нет заклинаний в книге заклинаний — нажмите «+ Добавить в книгу заклинаний», чтобы выбрать, затем подготовьте нужные кнопкой выше.</p>'
+                : '<p class="muted">Пока нет заговоров — выберите их при создании персонажа, затем подготовьте заклинания круга кнопкой выше.</p>'
+          }
+        </div>
+        ${isSpellbook && spellBrowseOpen ? spellBrowsePanelHtml(browseKnownIds, classIds) : ""}`;
+    } else {
+      const knownIds = new Set([...(sc.cantrips || []), ...(sc.known || []), ...(sc.prepared || [])]);
+      const knownSpells = SPELLS.filter((sp) => knownIds.has(sp.id)).sort(
+        (a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru")
+      );
+      listSectionHtml = `
+        <div class="panel">
+          <div class="row between" style="align-items:center;">
+            <h3 style="margin:0;">Известные / подготовленные заклинания</h3>
+            <button class="small primary" data-action="toggle-spell-browse">${spellBrowseOpen ? "✕ Закрыть подбор" : "+ Добавить заклинание"}</button>
+          </div>
+          ${
+            knownSpells.length
+              ? spellLevelSections(knownSpells, sc)
+              : '<p class="muted">Пока нет выбранных заклинаний — нажмите «+ Добавить заклинание», чтобы выбрать. Свои заклинания можно добавить как заметку в разделе «Черты».</p>'
+          }
+        </div>
+        ${spellBrowseOpen ? spellBrowsePanelHtml(knownIds, classIds) : ""}`;
+    }
+
+    return `
+      <div class="panel">
+        <h2>Заклинания</h2>
+        <div class="row" style="gap:16px;align-items:flex-end;flex-wrap:wrap;">
+          <div class="col" style="flex:1;min-width:180px;">
+            <label>Базовая характеристика</label>
+            <select data-bind="spellcasting.ability">
+              <option value="">— нет заклинаний —</option>
+              ${ABILITIES.map((a) => `<option value="${a.id}" ${sc.ability === a.id ? "selected" : ""}>${a.label}</option>`).join("")}
+            </select>
+          </div>
+          <div class="grid cols-2 combat-stats" style="flex:none;width:auto;">
+            <div class="stat-box"><div class="value">${dc ?? "—"}</div><div class="label">Слож. спасброска</div></div>
+            <div class="stat-box"><div class="value">${atk !== null ? formatModifier(atk) : "—"}</div><div class="label">Бонус атаки</div></div>
+          </div>
+        </div>
+        <div style="margin-top:14px;">
+          <h3 style="margin-bottom:8px;">Количество ячеек</h3>
+          <div class="spell-slots-grid">
+            ${[1, 2, 3, 4, 5, 6, 7, 8, 9]
+              .map(
+                (lvl) => `
+              <div class="col">
+                <label>${lvl}-й круг</label>
+                <input type="number" min="0" data-bind="spellcasting.slots.${lvl}" value="${slots[lvl] ?? ""}" />
+              </div>`
+              )
+              .join("")}
+          </div>
+        </div>
+      </div>
+      ${listSectionHtml}`;
+  }
+
+  // Known spells grouped into a section per circle (0 = заговоры, no
+  // slots), each headed by its circle name and -- for circles 1-9 -- a row
+  // of large slot-tracking circles (filled gold = still available; click
+  // to mark one spent, click again to restore it), separated from the
+  // spell cards below by a thin gold divider line.
+  function spellLevelSections(knownSpells, sc, prepCtx) {
+    const byLevel = new Map();
+    knownSpells.forEach((sp) => {
+      if (!byLevel.has(sp.level)) byLevel.set(sp.level, []);
+      byLevel.get(sp.level).push(sp);
+    });
+    return [...byLevel.keys()]
+      .sort((a, b) => a - b)
+      .map((lvl) => {
+        const spells = byLevel.get(lvl);
+        const header = lvl === 0 ? "Заговоры" : `${lvl}-й круг`;
+        return `
+        <div class="spell-level-section">
+          <div class="spell-level-header">
+            <h4>${header}</h4>
+            ${lvl > 0 ? spellSlotCirclesHtml(sc, lvl) : ""}
+          </div>
+          <div class="spell-level-divider"></div>
+          <div class="spell-cards">${spells
+            .map((sp) => spellCardHtml(sp, spellCardControlHtml(sp, prepCtx), { known: true }))
+            .join("")}</div>
+        </div>`;
+      })
+      .join("");
+  }
+
+  // Top-right control for a known/prepared spell card. Normally a plain
+  // remove button (toggle-spell). Inside a prepared caster's flow (prepCtx
+  // set, Task #109), a leveled spell shows a checkbox toggling whether it's
+  // prepared today -- capped at prepCtx.max -- but ONLY while prepCtx.editing
+  // (the "Подготовить заклинания" picker) is open. Outside of that editing
+  // mode the collapsed/default view shows every card in this list because it
+  // IS prepared, so the checkbox would do nothing useful except invite an
+  // accidental misclick that silently unprepares a spell -- it's replaced by
+  // a plain non-interactive "✓ подготовлено" badge instead. When editing,
+  // a class with a personal spellbook (prepCtx.spellbook) also gets a small
+  // extra ✕ to strike the spell from the spellbook entirely. Cantrips are
+  // never rationed by preparation, so they always keep the plain remove
+  // button regardless of prepCtx.
+  function spellCardControlHtml(sp, prepCtx) {
+    if (!prepCtx || sp.level === 0) {
+      return `<button class="small danger" data-action="toggle-spell" data-spell="${sp.id}" title="Убрать из листа">✕</button>`;
+    }
+    // Domain spells are always prepared for free (don't cost a prepared
+    // slot and can't be unprepared), so they get a fixed badge instead of
+    // the normal checkbox/badge logic below, in both editing and non-editing
+    // views -- see currentDomainSpellIds().
+    if (prepCtx.domainIds && prepCtx.domainIds.has(sp.id)) {
+      return `<span class="spell-card-badge spell-card-badge-domain" title="Дар домена — подготовлено всегда, не занимает ячейку подготовленных заклинаний">дар домена</span>`;
+    }
+    if (!prepCtx.editing) {
+      return `<span class="spell-card-badge" title="Подготовлено на сегодня">✓</span>`;
+    }
+    const checked = prepCtx.preparedIds.has(sp.id);
+    const disabled = !checked && prepCtx.preparedIds.size >= prepCtx.max;
+    const title = checked ? "Подготовлено — нажмите, чтобы снять" : disabled ? "Лимит подготовленных заклинаний достигнут" : "Подготовить";
+    const checkbox = `<input type="checkbox" data-action="toggle-prepared" data-spell="${sp.id}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} title="${title}" />`;
+    if (!prepCtx.spellbook) return checkbox;
+    return `<span style="display:inline-flex;gap:6px;align-items:center;">${checkbox}<button class="small danger" data-action="toggle-spell" data-spell="${sp.id}" title="Убрать из книги заклинаний">✕</button></span>`;
+  }
+
+  // A circle-level's slot state, resized on the fly to however many slots
+  // that circle currently has (from "Количество ячеек" above) -- an array
+  // of booleans on data.spellcasting.slotsFilled[level], filled = still
+  // available. New characters get every slot filled (full, unspent).
+  function spellSlotsArrayFor(sc, lvl) {
+    const max = Number((sc.slots || {})[lvl]) || 0;
+    const stored = (sc.slotsFilled || {})[lvl];
+    const arr = Array.isArray(stored) ? stored.slice(0, max) : [];
+    while (arr.length < max) arr.push(true);
+    return arr;
+  }
+  function spellSlotCirclesHtml(sc, lvl) {
+    const arr = spellSlotsArrayFor(sc, lvl);
+    if (!arr.length) return "";
+    const circles = arr
+      .map((filled, j) => `<button type="button" class="spell-slot-circle ${filled ? "filled" : ""}" data-action="toggle-spell-slot" data-level="${lvl}" data-slot-index="${j}" title="${filled ? "Отметить ячейку как потраченную" : "Восстановить ячейку"}"></button>`)
+      .join("");
+    return `<div class="spell-slot-circles"><span class="pip-label">ячейки</span>${circles}</div>`;
+  }
+
+  // The "+ Добавить заклинание" panel: search + level filter over the
+  // spells the character's class(es) actually grant (or the full list, if
+  // no class is set yet), excluding ones already known/prepared.
+  // A chosen subclass (Колдун покровитель, etc.) can widen the pool of
+  // pickable spells beyond its class's own list -- e.g. a Warlock's
+  // Otherworldly Patron "Расширенный список заклинаний" -- looked up from
+  // data.classes[i].subclass (a plain name string) against that class's
+  // catalog of subclasses.
+  function characterExpandedSpellIds() {
+    const ids = new Set();
+    (data.classes || []).forEach((c) => {
+      if (!c.subclass) return;
+      const cls = getClass(c.id);
+      const sub = (cls?.subclasses || []).find((s) => s.name.toLowerCase() === c.subclass.toLowerCase());
+      (sub?.expandedSpells || []).forEach((id) => ids.add(id));
+    });
+    return ids;
+  }
+  // Cleric domain spells (and any future subclass with the same
+  // "domainSpells" shape): unlike expandedSpells above, these aren't just a
+  // widened pool to pick from -- the character always has them prepared,
+  // for free, from the moment their class level reaches that tier (1/3/5/7/9),
+  // no picking involved. Only the tiers whose level is <= the class's
+  // current level count, and only spells the catalog actually carries are
+  // returned -- the 5th/7th/9th-level tiers name spells (Revivify, Death
+  // Ward, Raise Dead...) the catalog doesn't have yet, so those tiers simply
+  // contribute nothing for now instead of showing a broken card.
+  function currentDomainSpellIds(cls) {
+    if (!cls) return [];
+    const entry = (data.classes || []).find((c) => c.id === cls.id);
+    if (!entry || !entry.subclass) return [];
+    const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === entry.subclass.toLowerCase());
+    if (!sub || !sub.domainSpells) return [];
+    const lvl = Number(entry.level) || 1;
+    const ids = new Set();
+    sub.domainSpells.forEach((tier) => {
+      if (tier.level <= lvl) tier.spells.forEach((id) => ids.add(id));
+    });
+    return [...ids].filter((id) => SPELLS.some((sp) => sp.id === id));
+  }
+  function spellBrowsePanelHtml(knownIds, classIds) {
+    const q = spellSearch.trim().toLowerCase();
+    const expandedIds = characterExpandedSpellIds();
+    const pool = SPELLS.filter((sp) => !knownIds.has(sp.id) && (expandedIds.has(sp.id) || !classIds.length || sp.classes.some((id) => classIds.includes(id))));
+    const filtered = pool.filter((sp) => {
+      if (spellLevelFilter !== "all" && String(sp.level) !== spellLevelFilter) return false;
+      if (q && !sp.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+    return `
+      <div class="panel">
+        <h3>Выбор заклинания</h3>
+        <p class="muted">${classIds.length ? "Показаны заклинания, доступные классу персонажа." : "Класс персонажа не задан — показаны все заклинания."}</p>
+        <div class="row spell-filters" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+          <input type="text" data-spell-search placeholder="Поиск по названию…" value="${escapeHtml(spellSearch)}" style="flex:1;min-width:160px;" />
+          <select data-spell-level-filter style="flex:none;width:auto;">
+            <option value="all" ${spellLevelFilter === "all" ? "selected" : ""}>Все уровни</option>
+            <option value="0" ${spellLevelFilter === "0" ? "selected" : ""}>Заговоры</option>
+            <option value="1" ${spellLevelFilter === "1" ? "selected" : ""}>1-й круг</option>
+          </select>
+        </div>
+        ${
+          filtered.length
+            ? `<div class="spell-cards">${filtered
+                .map((sp) => spellCardHtml(sp, `<button class="small primary" data-action="toggle-spell" data-spell="${sp.id}" title="Добавить в лист">+ Добавить</button>`))
+                .join("")}</div>`
+            : '<p class="muted">Ничего не найдено — измените фильтры.</p>'
+        }
+      </div>`;
+  }
+
+  function inventoryTab() {
+    const weapons = data.weapons || [];
+    // Wrapped in .inventory-panels so its four panels (Деньги/Оружие/
+    // Боеприпасы/Прочее снаряжение) can sit closer together than panels
+    // elsewhere in the app -- see the tighter margin-bottom override for
+    // that class in style.css.
+    return `
+      <div class="inventory-panels">
+      <div class="panel">
+        <h2>Деньги</h2>
+        <div class="money-row">
+          ${[["cp", "ММ"], ["sp", "СМ"], ["gp", "ЗМ"], ["pp", "ПМ"]].map(([coin, label]) => `
+            <div class="money-box">
+              <label>${label}</label>
+              <input type="number" data-bind="money.${coin}" value="${data.money[coin] || 0}" />
+            </div>`).join("")}
+        </div>
+      </div>
+      <div class="panel">
+        <div class="row between"><h2 style="margin:0;">Оружие</h2></div>
+        <div class="row" style="margin-bottom:10px;">
+          <select data-weapon-select style="flex:1;min-width:200px;">
+            <option value="">Выберите оружие…</option>
+            ${WEAPONS.map((w) => `<option value="${w.id}">${escapeHtml(w.name)}</option>`).join("")}
+          </select>
+          <button class="small primary" data-action="add-weapon">+ Добавить</button>
+        </div>
+        ${
+          weapons.length === 0
+            ? '<p class="muted">Оружия пока нет — выберите из списка выше или добавьте своё.</p>'
+            : `<table class="sheet-table weapons-table-compact">
+          <thead><tr><th style="width:150px;">Название</th><th style="width:55px;">Урон</th><th style="width:70px;">Тип</th><th style="width:95px;">Дальность</th><th style="width:130px;">Свойства</th><th>Особые свойства</th><th></th></tr></thead>
+          <tbody>
+            ${weapons
+              .map((w, i) => {
+                // "Already in Атаки" is inferred by name match against the
+                // attacks list -- there's no separate id linking a weapon
+                // row to the attack it spawned, but the button already
+                // copies the weapon's exact name into a new attack, so a
+                // name match is a reliable enough signal for this badge.
+                const alreadyAdded = (data.attacks || []).some((a) => (a.name || "").trim().toLowerCase() === (w.name || "").trim().toLowerCase() && w.name);
+                return `
+              <tr>
+                <td><input type="text" data-weapon-field="name" data-weapon-index="${i}" value="${escapeHtml(w.name)}" /></td>
+                <td><input type="text" data-weapon-field="damage" data-weapon-index="${i}" value="${escapeHtml(w.damage || "")}" /></td>
+                <td><input type="text" data-weapon-field="type" data-weapon-index="${i}" value="${escapeHtml(w.type || "")}" /></td>
+                <td>
+                  <select data-weapon-range-type data-weapon-index="${i}" title="Ближний бой / дальнобойное / метательное — используется боевыми стилями (напр. «Стрельба из лука»)">
+                    <option value="">—</option>
+                    ${Object.entries(WEAPON_RANGE_TYPE_LABELS).map(([id, label]) => `<option value="${id}" ${w.rangeType === id ? "selected" : ""}>${label}</option>`).join("")}
+                  </select>
+                </td>
+                <td><input type="text" data-weapon-field="properties" data-weapon-index="${i}" value="${escapeHtml(w.properties || "")}" title="${escapeHtml(w.properties || "")}" /></td>
+                <td><input type="text" data-weapon-field="special" data-weapon-index="${i}" value="${escapeHtml(w.special || "")}" title="${escapeHtml(w.special || "")}" placeholder="напр. +1к6 огонь" /></td>
+                <td class="row" style="gap:4px;flex-wrap:nowrap;align-items:center;">
+                  <button class="small ${w.equipped !== false ? "primary" : ""}" data-action="toggle-weapon-equipped" data-index="${i}" title="Надето/снято">
+                    ${w.equipped !== false ? "⚔️ надето" : "снято"}
+                  </button>
+                  <button class="small" data-action="add-weapon-to-attacks" data-index="${i}" title="Добавить в атаки">→ Атаки</button>
+                  ${alreadyAdded ? '<span class="badge" style="color:var(--green);border-color:var(--green);white-space:nowrap;">✓ добавлено</span>' : ""}
+                  <button class="small danger" data-action="remove-weapon" data-index="${i}">✕</button>
+                </td>
+              </tr>`;
+              })
+              .join("")}
+          </tbody>
+        </table>`
+        }
+      </div>
+      ${ammoPanel()}
+      <div class="panel">
+        <h2>Прочее снаряжение</h2>
+        <p class="muted">Выберите предмет из списка снаряжения — он добавится строкой ниже с ценой и весом. Также можно дописывать вручную.</p>
+        <div class="row" style="margin-bottom:10px;">
+          <select data-gear-select style="flex:1;min-width:200px;">
+            <option value="">Выберите снаряжение…</option>
+            ${GEAR.map((g) => `<option value="${g.id}">${escapeHtml(g.name)} (${escapeHtml(g.cost)}${g.weight ? `, ${g.weight} фнт.` : ""})</option>`).join("")}
+          </select>
+          <button class="small primary" data-action="add-gear">+ Добавить</button>
+        </div>
+        <textarea data-bind="equipmentText" rows="12" style="width:100%;" placeholder="напр.:&#10;Рюкзак&#10;Верёвка, 50 фт&#10;Комплект для выживания&#10;Зелье лечения ×2">${escapeHtml(data.equipmentText || "")}</textarea>
+      </div>
+      </div>`;
+  }
+
+  function featsTab() {
+    const feats = data.feats || [];
+    const preview = FEATS.find((f) => f.id === featPreviewId) || null;
+    return `
+      <div class="panel">
+        <div class="row between"><h2 style="margin:0;">Черты</h2></div>
+        <p class="muted">Полный список Player's Handbook, перенесён с <a href="https://dnd.su/feats/" target="_blank" rel="noopener">dnd.su/feats</a>. Черты берутся вместо повышения характеристик на определённых уровнях.</p>
+        <div class="row" style="margin-bottom:10px;">
+          <select data-feat-select style="flex:1;min-width:200px;">
+            <option value="">Выберите черту…</option>
+            ${FEATS.map((f) => `<option value="${f.id}" ${f.id === featPreviewId ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
+          </select>
+          <button class="small primary" data-action="add-feat" ${preview ? "" : "disabled"}>+ Добавить</button>
+        </div>
+        ${
+          preview
+            ? `
+          <div class="card" style="margin-bottom:10px;border-color:var(--gold-dim);">
+            <h4 style="margin:0 0 4px;">${escapeHtml(preview.name)}</h4>
+            ${preview.prereq ? `<p class="muted" style="margin:0 0 4px;">Требование: ${escapeHtml(preview.prereq)}</p>` : ""}
+            <p style="margin:0 0 8px;">${escapeHtml(preview.desc)}</p>
+            ${
+              preview.abilityIncrease && preview.abilityIncrease.choices.length > 1
+                ? `
+              <div class="row" style="align-items:center;">
+                <label style="margin-right:8px;">Повысить характеристику:</label>
+                <select data-feat-ability-choice>
+                  ${preview.abilityIncrease.choices.map((a) => `<option value="${a}" ${a === featChosenAbility ? "selected" : ""}>${ABILITIES.find((x) => x.id === a)?.label || a}</option>`).join("")}
+                </select>
+              </div>`
+                : ""
+            }
+            ${
+              preview.skillChoice
+                ? `
+              <p class="muted" style="margin:6px 0 2px;">Выберите ${preview.skillChoice.count} навыка(ов):</p>
+              <div class="grid cols-3">
+                ${SKILLS.filter((s) => !(data.proficiencies.skills || []).includes(s.id)).map(
+                  (s) => `
+                  <label style="font-weight:normal;"><input type="checkbox" data-feat-skill-choice value="${s.id}" ${featChosenSkills.includes(s.id) ? "checked" : ""} /> ${escapeHtml(s.label)}</label>`
+                ).join("")}
+              </div>`
+                : ""
+            }
+          </div>`
+            : ""
+        }
+        ${
+          feats.length === 0
+            ? '<p class="muted">Черт пока нет.</p>'
+            : feats
+                .map(
+                  (f, i) => `
+          <div class="card" style="margin-bottom:8px;">
+            <div class="row between">
+              <h4 style="margin:0;">${escapeHtml(f.name)}</h4>
+              <button class="small danger" data-action="remove-feat" data-index="${i}">✕</button>
+            </div>
+            ${f.prereq ? `<p class="muted" style="margin:2px 0;">Требование: ${escapeHtml(f.prereq)}</p>` : ""}
+            <p>${escapeHtml(f.desc || "")}</p>
+            ${f.grantedAbility ? `<p class="muted" style="margin:2px 0;">Характеристика: +${f.grantedAmount} ${ABILITIES.find((a) => a.id === f.grantedAbility)?.label || f.grantedAbility}</p>` : ""}
+            ${f.grantedSkills && f.grantedSkills.length ? `<p class="muted" style="margin:2px 0;">Навыки: ${f.grantedSkills.map((s) => SKILLS.find((x) => x.id === s)?.label || s).join(", ")}</p>` : ""}
+          </div>`
+                )
+                .join("")
+        }
+      </div>`;
+  }
+
+  function traitsTab() {
+    const prof = data.proficiencies || {};
+    const listField = (key, label) => `
+      <div class="col" style="margin-bottom:6px;">
+        <label>${label}</label>
+        <textarea rows="2" data-bind-list="proficiencies.${key}" placeholder="через запятую" style="font-size:0.86rem;resize:vertical;">${escapeHtml((prof[key] || []).join(", "))}</textarea>
+      </div>`;
+    return `
+      <div class="panel">
+        <h2>Владения и языки</h2>
+        <div class="grid cols-2">
+          ${listField("armor", "Броня")}
+          ${listField("weapons", "Оружие")}
+          ${listField("tools", "Инструменты")}
+          ${listField("languages", "Языки")}
+        </div>
+      </div>
+      <div class="panel">
+        <div class="row between"><h2 style="margin:0;">Умения</h2><button class="small" data-action="add-feature">+ Умение</button></div>
+        <p class="muted">Расовые и классовые умения, особенности предыстории — всё, что не является чертой со вкладки «Черты».</p>
+        <div class="feature-cards-grid">
+          ${(data.features || [])
+            .map(
+              (f, i) => `
+            <div class="feature-card">
+              <button class="feature-card-remove" data-action="remove-feature" data-index="${i}" title="Удалить">✕</button>
+              <div class="feature-card-header">
+                <div class="feature-card-icon">${featureIcon(f.name)}</div>
+                <textarea class="feature-card-title" data-feature-field="name" data-feature-index="${i}" rows="1" placeholder="Название">${escapeHtml(f.name)}</textarea>
+              </div>
+              <div class="feature-card-divider"></div>
+              <label class="feature-card-source">
+                <span class="feature-card-source-icon">👤</span>
+                <input type="text" data-feature-field="source" data-feature-index="${i}" value="${escapeHtml(f.source || "")}" placeholder="Источник (класс/раса/предыстория)" />
+              </label>
+              ${
+                (() => {
+                  const known = findKnownFeatureText(f.name, f.source);
+                  return known && known.length > (f.desc || "").length
+                    ? `<button type="button" class="small feature-card-refresh" data-action="refresh-feature-desc" data-index="${i}" title="Подставить полный текст из базы">↻ Обновить описание из базы</button>`
+                    : "";
+                })()
+              }
+              <label class="feature-card-desc">
+                <textarea data-feature-field="desc" data-feature-index="${i}" rows="1" placeholder="Описание">${escapeHtml(f.desc || "")}</textarea>
+              </label>
+              ${featureResourceHtml(f, i)}
+              ${
+                (() => {
+                  // Скрытая атака doesn't get its own roll button here: its
+                  // die count scales with Rogue level rather than the flat
+                  // "1к6" in its stored text, and it's only ever added onto
+                  // a weapon's damage roll (see startDamageRoll), never
+                  // rolled by itself. Бардовское вдохновение's "к6" is the
+                  // die the RECIPIENT rolls later, not something the bard
+                  // rolls here -- so it gets no roll button either.
+                  // Проклятие ведьмовского клинка and Ужасающий облик each
+                  // mention a bare "«19» или «20» на к20"/"1к10" in passing
+                  // (a crit-range note, a temp-HP amount) rather than
+                  // something meant to be rolled from this card -- so
+                  // featureDiceInfo's generic "к20"/"к10" match is
+                  // suppressed for both, same treatment as Скрытая атака.
+                  const noRollButton =
+                    /^Скрытая атака\b/i.test(f.name || "") ||
+                    BARD_INSPIRATION_FEATURE_NAME.test(f.name || "") ||
+                    /^Проклятие ведьмовского клинка$/i.test(f.name || "") ||
+                    /^Ужасающий облик$/i.test(f.name || "") ||
+                    // Лечащий свет already gets its own dice-count-adjustable
+                    // roll button from featureResourceHtml's pool tracker above --
+                    // this would otherwise add a second, fixed "🎲 Бросить к6".
+                    HEALING_LIGHT_FEATURE_NAME.test(f.name || "") ||
+                    // Боевое превосходство's own roll button (below) spends a
+                    // pip from the pool -- the generic button would otherwise
+                    // add a second, non-spending "🎲 Бросить к8" from the die
+                    // size mentioned in the same card's text.
+                    BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "");
+                  const dice = noRollButton ? null : featureDiceInfo(f.desc);
+                  const dc = featureSaveDCInfo(f.desc);
+                  // Бездонный патрона's "Щупальце из глубин" is a melee
+                  // spell attack -- the generic dice button already covers
+                  // its cold-damage roll, this adds the missing attack roll
+                  // (spell attack bonus) right alongside it.
+                  const isTentacle = /^Щупальце из глубин$/i.test(f.name || "");
+                  const attackBonus = isTentacle ? spellAttackBonus(data) : null;
+                  const isSuperiority = BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "");
+                  if (!dice && !dc && attackBonus === null && !isSuperiority) return "";
+                  const dcSpan = dc
+                    ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
+                    : "";
+                  const attackBtn = attackBonus !== null
+                    ? `<button class="small feature-card-roll" data-action="roll-feature-attack" data-index="${i}">🎲 Атака ${formatModifier(attackBonus)}</button>`
+                    : "";
+                  const superiorityBtn = isSuperiority
+                    ? `<button class="small feature-card-roll" data-action="roll-superiority-die" data-index="${i}" ${superiorityDiceAvailable() > 0 ? "" : "disabled"}>🎲 Кость превосходства (к${superiorityDieSides(data)})</button>`
+                    : "";
+                  const rollBtn = dice
+                    ? `<button class="small feature-card-roll" data-action="roll-feature" data-index="${i}">🎲 Бросить ${escapeHtml(dice.raw)}</button>`
+                    : "";
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${attackBtn}${superiorityBtn}${rollBtn}${dcSpan}</div>`;
+                })()
+              }
+            </div>`
+            )
+            .join("")}
+        </div>
+        ${(data.features || []).length === 0 ? '<p class="muted">Умений пока нет — добавьте первое.</p>' : ""}
+      </div>`;
+  }
+
+  // Picks a small thematic glyph for a feature card's icon circle from a
+  // few common keywords in its name (темное зрение → eye, сопротивление →
+  // shield, etc.); falls back to a plain star when nothing matches, since
+  // free-form features have no dedicated icon field of their own.
+  function featureIcon(name) {
+    const n = (name || "").toLowerCase();
+    if (/зрени|виде/.test(n)) return "👁";
+    if (/сопротивлен|защит|броня|щит/.test(n)) return "🛡";
+    if (/скорост|бег|прыж/.test(n)) return "💨";
+    if (/яд|отрав/.test(n)) return "☠";
+    if (/огон|пламя|огнен/.test(n)) return "🔥";
+    if (/лед|холод|мороз/.test(n)) return "❄";
+    if (/магн|заклинан|волшеб/.test(n)) return "✨";
+    if (/удач|везен/.test(n)) return "🍀";
+    if (/сил|мощь|атлет/.test(n)) return "💪";
+    if (/чувств|нюх|слух|обонян/.test(n)) return "👃";
+    return "✦";
+  }
+
+  function personalityTab() {
+    const p = data.personality || {};
+    const field = (key, label, rows = 2) => `
+      <div class="col" style="margin-bottom:8px;">
+        <label>${label}</label>
+        <textarea data-bind="personality.${key}" rows="${rows}">${escapeHtml(p[key] || "")}</textarea>
+      </div>`;
+    return `
+      <div class="panel">
+        <h2>Личность и предыстория</h2>
+        ${field("traits", "Черты характера")}
+        ${field("ideals", "Идеалы")}
+        ${field("bonds", "Привязанности")}
+        ${field("flaws", "Слабости")}
+        ${field("backstory", "История персонажа", 6)}
+      </div>
+      <div class="panel">
+        <h2>Заметки</h2>
+        <textarea data-bind="notes" rows="6">${escapeHtml(data.notes || "")}</textarea>
+      </div>`;
+  }
+
+  function petsTab() {
+    return `
+      <div class="panel">
+        <div class="row between"><h2 style="margin:0;">Спутники и питомцы</h2><button class="small" data-action="add-pet">+ Спутник</button></div>
+        ${(data.pets || [])
+          .map(
+            (p, i) => `
+          <div class="card" style="margin-bottom:8px;">
+            <div class="row between">
+              <input type="text" data-pet-field="name" data-pet-index="${i}" value="${escapeHtml(p.name)}" placeholder="Имя" style="font-weight:bold;flex:1;" />
+              <button class="small danger" data-action="remove-pet" data-index="${i}">✕</button>
+            </div>
+            <textarea data-pet-field="desc" data-pet-index="${i}" rows="2" placeholder="Статы/описание">${escapeHtml(p.desc || "")}</textarea>
+          </div>`
+          )
+          .join("")}
+      </div>`;
+  }
+
+  // ---------- wiring (delegated on #app, attached once) ----------
+  const app = document.getElementById("app");
+
+  if (rollLogRefreshHandler) document.removeEventListener("dnd5e:roll-logged", rollLogRefreshHandler);
+  rollLogRefreshHandler = () => {
+    const logEl = $("[data-roll-log]", app);
+    if (logEl) logEl.innerHTML = rollLogEntriesHtml();
+  };
+  document.addEventListener("dnd5e:roll-logged", rollLogRefreshHandler);
+
+  on(app, "click", "[data-tab]", (e, el) => {
+    activeTab = el.dataset.tab;
+    render();
+  });
+
+  const bindHandler = (e, el) => {
+    const path = el.dataset.bind;
+    let value = el.value;
+    if (el.type === "number") value = value === "" ? null : Number(value);
+    set(data, path, value);
+    if (path === "armorId") data.armorEquipped = !!value;
+    doSave();
+    recomputeIfNeeded(path);
+    if (path === "spellcasting.ability" || path === "edition" || path === "armorId") render();
+  };
+  on(app, "input", "[data-bind]", bindHandler);
+  on(app, "change", "select[data-bind]", bindHandler);
+  on(app, "change", "[data-bind-checkbox]", (e, el) => {
+    set(data, el.dataset.bindCheckbox, el.checked);
+    doSave();
+  });
+  on(app, "input", "[data-bind-list]", (e, el) => {
+    const list = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+    set(data, el.dataset.bindList, list);
+    doSave();
+  });
+
+  on(app, "input", "[data-ability-score]", (e, el) => {
+    const ab = el.dataset.abilityScore;
+    set(data, `abilities.${ab}`, el.value === "" ? 10 : Number(el.value));
+    doSave();
+    recomputeAll();
+  });
+
+  on(app, "click", "[data-action=toggle-save-prof]", (e, el) => {
+    const ab = el.dataset.ability;
+    const list = data.proficiencies.savingThrows;
+    const idx = list.indexOf(ab);
+    if (idx >= 0) list.splice(idx, 1);
+    else list.push(ab);
+    doSave();
+    render();
+  });
+
+  on(app, "click", "[data-action=cycle-skill-prof]", (e, el) => {
+    const sk = el.dataset.skill;
+    const profList = data.proficiencies.skills;
+    const expList = data.proficiencies.expertise;
+    const isProf = profList.includes(sk);
+    const isExp = expList.includes(sk);
+    if (!isProf && !isExp) {
+      profList.push(sk);
+    } else if (isProf && !isExp) {
+      expList.push(sk);
+    } else {
+      set(data, "proficiencies.skills", profList.filter((x) => x !== sk));
+      set(data, "proficiencies.expertise", expList.filter((x) => x !== sk));
+    }
+    doSave();
+    render();
+  });
+
+  // classes
+  on(app, "click", "[data-action=add-class]", () => {
+    data.classes.push({ id: "", name: "", level: 1, subclass: "" });
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-class]", (e, el) => {
+    data.classes.splice(Number(el.dataset.index), 1);
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-class-field]", (e, el) => {
+    const i = Number(el.dataset.classIndex);
+    const field = el.dataset.classField;
+    // The subclass dropdown is handled by the dedicated "change" listener
+    // below (it has to rebuild feature cards and prune spells, not just
+    // store the new value), and the free-text fallback for a class with no
+    // catalog entries has nothing else to rebuild, so plain assignment there
+    // is still fine -- but skip the dropdown case here entirely so the two
+    // listeners don't fight over the same field on the same event.
+    if (field === "subclass" && el.tagName === "SELECT") return;
+    let val = el.value;
+    if (field === "level") val = Math.max(1, Math.min(20, Number(val) || 1));
+    if (field === "id") {
+      const cls = CLASSES.find((c) => c.id === val);
+      data.classes[i].name = cls ? cls.name : "";
+    }
+    data.classes[i][field] = val;
+    doSave();
+    if (field !== "subclass") render();
+  });
+  // Changing the subclass dropdown swaps every feature card and prunes any
+  // stranded expanded-list spell (see applySubclassFeatures/
+  // pruneStaleSubclassSpells above) instead of just overwriting the label.
+  on(app, "change", "select[data-class-field=subclass]", (e, el) => {
+    const i = Number(el.dataset.classIndex);
+    const c = data.classes[i];
+    if (!c) return;
+    const cls = getClass(c.id);
+    if (!cls) return;
+    const oldSubName = c.subclass || "";
+    const newSubName = el.value || "";
+    if (oldSubName.toLowerCase() === newSubName.toLowerCase()) return;
+    const findSub = (name) => (cls.subclasses || []).find((s) => s.name.toLowerCase() === name.toLowerCase()) || null;
+    const oldSub = oldSubName ? findSub(oldSubName) : null;
+    const newSub = newSubName ? findSub(newSubName) : null;
+    removeSubclassFeatures(cls, oldSubName);
+    pruneStaleSubclassSpells(oldSub, newSub);
+    c.subclass = newSubName;
+    applySubclassFeatures(cls, newSub, Number(c.level) || 1);
+    doSave();
+    render();
+  });
+  // Changing the fighting-style dropdown swaps that one feature card (see
+  // applyFightingStyleChange above) -- a completely separate choice from
+  // the subclass dropdown handled just above, even though both live in the
+  // same class row.
+  on(app, "change", "[data-class-fighting-style]", (e, el) => {
+    const i = Number(el.dataset.classIndex);
+    const c = data.classes[i];
+    if (!c) return;
+    const cls = getClass(c.id);
+    if (!cls || !cls.level1Choice || cls.level1Choice.type !== "fightingStyle") return;
+    applyFightingStyleChange(cls, el.value || "");
+    doSave();
+    render();
+  });
+
+  // attacks
+  on(app, "click", "[data-action=add-attack]", () => {
+    data.attacks.push({ name: "", bonus: "", damage: "", special: "", useSpecial: false, rangeType: "" });
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-attack]", (e, el) => {
+    data.attacks.splice(Number(el.dataset.index), 1);
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-attack-field]", (e, el) => {
+    const i = Number(el.dataset.attackIndex);
+    data.attacks[i][el.dataset.attackField] = el.value;
+    doSave();
+  });
+  on(app, "change", "[data-attack-range-type]", (e, el) => {
+    const i = Number(el.dataset.attackIndex);
+    data.attacks[i].rangeType = el.value;
+    doSave();
+  });
+  // Attack bonus auto-calc: picking an ability here sets bonus = ability
+  // modifier + proficiency bonus and keeps the bonus field read-only while
+  // an ability stays selected. Choosing "—" hands the field back for manual entry.
+  on(app, "change", "[data-attack-ability]", (e, el) => {
+    const i = Number(el.dataset.attackIndex);
+    const ability = el.value;
+    data.attacks[i].ability = ability;
+    if (ability) {
+      const total = getAbilityMod(data, ability) + proficiencyBonus(data);
+      data.attacks[i].bonus = formatModifier(total);
+    }
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=roll-attack]", (e, el) => {
+    const a = data.attacks[Number(el.dataset.index)];
+    let bonus = parseInt(String(a.bonus).replace(/[^-\d]/g, ""), 10) || 0;
+    // Боевой стиль «Стрельба из лука»: +2 к броскам атаки, but only for a
+    // weapon actually classified Дальнобойное -- a thrown Ближний бой
+    // weapon (dagger, handaxe...) doesn't qualify even at range, per how
+    // the PHB weapon table itself splits Melee vs Ranged (see
+    // weaponRangeType() in dnd5e-data.js).
+    const archeryBonus = a.rangeType === "ranged" && hasFightingStyle("Стрельба из лука") ? 2 : 0;
+    bonus += archeryBonus;
+    openD20RollModal({
+      label: `Атака: ${a.name || "без названия"}${archeryBonus ? " (+2 Стрельба из лука)" : ""}`,
+      modifier: bonus,
+      critMin: attackCritRange(),
+      superiorityDie: hasBattlemaster()
+        ? { sides: superiorityDieSides(data), available: superiorityDiceAvailable(), onUse: () => { const used = consumeSuperiorityDie(); if (used) render(); return used; } }
+        : null,
+    });
+    const ammoType = ammoTypeForWeapon(a.name);
+    if (ammoType) {
+      if (!data.ammo) data.ammo = { arrows: 0, bolts: 0, javelins: 0, darts: 0 };
+      if ((data.ammo[ammoType] || 0) > 0) {
+        data.ammo[ammoType] -= 1;
+        doSave();
+        render();
+      }
+    }
+  });
+  // Скрытая атака (Sneak Attack) no longer gets its own 🎲 button on the
+  // feature card (see traitsTab/featureDiceInfo below) -- a flat "roll 1к6"
+  // button there was misleading anyway, since the die count actually scales
+  // with Rogue level (1к6 at 1st, +1к6 every 2 levels, up to 10к6 at 20th)
+  // and it's only ever added ONTO a weapon's damage roll, never rolled on
+  // its own. Instead it's offered as a checkbox alongside the weapon's own
+  // "special properties" bonus dice in startDamageRoll below.
+  function sneakAttackDice() {
+    const rogue = (data.classes || []).find((c) => c.id === "rogue");
+    const lvl = rogue ? Number(rogue.level) || 0 : 0;
+    if (lvl < 1) return null;
+    const count = Math.min(10, Math.ceil(lvl / 2));
+    return { expr: `${count}d6`, raw: `${count}к6` };
+  }
+  // A fighting-style feature card is always named "<Боевой стиль label>:
+  // <style name>" (e.g. "Боевой стиль: Дуэлянт") -- see doFinish() in
+  // wizard.js and applyFightingStyleChange() below, which both use this
+  // same naming convention when creating/switching the card. Matching on
+  // that suffix (rather than a hardcoded class check) means this keeps
+  // working for any class that grants a fighting style this way (Воин at
+  // creation now, Паладин/Следопыт once they reach the level that grants
+  // one and a player records it the same way).
+  function hasFightingStyle(styleName) {
+    const re = new RegExp(`боевой стиль\\s*:\\s*${styleName}\\s*$`, "i");
+    return (data.features || []).some((f) => re.test(f.name || ""));
+  }
+  // Half-orc's "Свирепые атаки": on a critical hit, one extra weapon damage
+  // die (on top of the normal crit doubling) is merged straight into the
+  // base weapon die count -- unlike Скрытая атака this is automatic on
+  // every crit, not situational, so it needs no checkbox. Per the user's
+  // correction, this must NOT show up as a separate roll+segment with
+  // explanatory text -- it has to be part of the single combined base-die
+  // expression from the start (e.g. a 1к6 weapon on a crit becomes 3к6:
+  // 2 dice from crit-doubling + 1 from Свирепые атаки, all rolled and
+  // displayed as one pool), with no "(свирепые атаки)" text anywhere in
+  // the output.
+  function hasSavageAttacks() {
+    return (data.features || []).some((f) => /свирепые атаки/i.test(f.name || ""));
+  }
+  // Champion's crit-range widening (see item 3, sheet.js's roll-attack
+  // handler below) -- "Превосходные критические попадания" (15th level,
+  // 18-20) supersedes "Улучшенные критические попадания" (3rd level,
+  // 19-20), same feature-name-match convention as hasSavageAttacks above.
+  function attackCritRange() {
+    if ((data.features || []).some((f) => /^Превосходные критические попадания$/i.test(f.name || ""))) return 18;
+    if ((data.features || []).some((f) => /^Улучшенные критические попадания$/i.test(f.name || ""))) return 19;
+    return 20;
+  }
+  // Rolls an attack's damage: weapon die + the ability modifier its Хар-ка
+  // dropdown selects (not whatever flat number the free-text "Урон/тип"
+  // field happens to carry -- that could double-count the ability mod),
+  // plus the special-properties bonus dice when useSpecial is true, plus
+  // Скрытая атака's dice when useSneak is true. On a crit, every damage DIE
+  // (base + bonus + sneak) is doubled in count -- modifiers (ability mod,
+  // any flat +K in the expression) are left exactly as-is, per 5e crit
+  // rules.
+  function doubleDiceCount(expr) {
+    const m = String(expr).match(/^(\d*)d(\d+)([+-]\s*\d+)?$/i);
+    if (!m) return expr;
+    const count = (m[1] ? parseInt(m[1], 10) : 1) * 2;
+    return `${count}d${m[2]}${m[3] || ""}`;
+  }
+  // Adds Свирепые атаки's one extra die directly onto a dice expression's
+  // count (2к6 -> 3к6), rather than rolling/displaying it separately.
+  function addSavageAttacksDie(expr) {
+    const m = String(expr).match(/^(\d*)d(\d+)([+-]\s*\d+)?$/i);
+    if (!m) return expr;
+    const count = (m[1] ? parseInt(m[1], 10) : 1) + 1;
+    return `${count}d${m[2]}${m[3] || ""}`;
+  }
+  // Every dice-formula segment shown to the player must use Cyrillic "к",
+  // never Latin "d" -- some formulas are built from whatever the user
+  // literally typed into a free-text field (parseDiceFromText's "raw"),
+  // which could be "d" either way, and downstream formula-parsing elsewhere
+  // in the app expects "к" consistently. This replaces every "NdM" run in
+  // an expression (not just an anchored one at the very start), so it's
+  // safe regardless of how the count is written.
+  function toCyrillicDice(expr) {
+    return String(expr).replace(/(\d*)d(\d+)/gi, (mm, n, sides) => `${n || "1"}к${sides}`);
+  }
+  // Splits a combined base-weapon roll's individual dice into "оружие" vs
+  // "свирепые атаки" for the breakdown log -- addSavageAttacksDie() always
+  // appends exactly one extra die onto the END of the count before rolling
+  // (see doRollAttackDamage below), so the last rolled die is the Свирепые
+  // атаки one and everything before it is the weapon's own dice.
+  function pushBaseRollBreakdown(breakdown, rolls, isSavage) {
+    const savageCount = isSavage ? 1 : 0;
+    const weaponRolls = rolls.slice(0, rolls.length - savageCount);
+    const savageRolls = savageCount ? rolls.slice(-savageCount) : [];
+    weaponRolls.forEach((v) => breakdown.push({ value: v, label: "оружие" }));
+    savageRolls.forEach((v) => breakdown.push({ value: v, label: "свирепые атаки" }));
+  }
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority) {
+    let base = parseDiceFromText(a.damage);
+    if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
+    if (useVersatile) {
+      const sides = versatileDieSidesForAttack(a);
+      if (sides) base = applyVersatileDie(base, sides);
+    }
+    const isSavage = isCrit && hasSavageAttacks();
+    const parts = [];
+    const breakdown = [];
+    let total = 0;
+    if (a.ability) {
+      let dieOnly = base.expr.replace(/[+-]\s*\d+$/, "");
+      if (isCrit) dieOnly = doubleDiceCount(dieOnly);
+      if (isSavage) dieOnly = addSavageAttacksDie(dieOnly);
+      const rBase = rollExpr(dieOnly);
+      const abilityMod = getAbilityMod(data, a.ability);
+      total += rBase.total + abilityMod;
+      // Just the number, not the ability's name -- the modifier is already
+      // implied by this being a damage roll for that attack.
+      parts.push(`${toCyrillicDice(dieOnly)} = ${rBase.rolls.join("+")}${abilityMod ? formatModifier(abilityMod) : ""}`);
+      pushBaseRollBreakdown(breakdown, rBase.rolls, isSavage);
+      if (abilityMod) {
+        const abilityInfo = ABILITIES.find((ab) => ab.id === a.ability);
+        breakdown.push({ value: abilityMod, label: `модификатор ${(abilityInfo && abilityInfo.label) || a.ability}` });
+      }
+    } else {
+      let expr = isCrit ? doubleDiceCount(base.expr) : base.expr;
+      if (isSavage) expr = addSavageAttacksDie(expr);
+      const rBase = rollExpr(expr);
+      total += rBase.total;
+      // formatModifier always signs its number ("+0" for a zero modifier),
+      // which reads as a bogus "+0" tacked onto the roll when the dice
+      // expression had no flat modifier at all -- only show it when nonzero.
+      parts.push(`${toCyrillicDice(isCrit || isSavage ? expr : base.raw)} = ${rBase.rolls.join("+")}${rBase.modifier ? formatModifier(rBase.modifier) : ""}`);
+      pushBaseRollBreakdown(breakdown, rBase.rolls, isSavage);
+      if (rBase.modifier) breakdown.push({ value: rBase.modifier, label: "модификатор" });
+    }
+    if (useSpecial) {
+      const bonusDice = parseDiceFromText(a.special);
+      if (bonusDice) {
+        const bonusExpr = isCrit ? doubleDiceCount(bonusDice.expr) : bonusDice.expr;
+        const rBonus = rollExpr(bonusExpr);
+        total += rBonus.total;
+        parts.push(`${toCyrillicDice(isCrit ? bonusExpr : bonusDice.raw)} = ${rBonus.rolls.join("+")}${rBonus.modifier ? formatModifier(rBonus.modifier) : ""}`);
+        rBonus.rolls.forEach((v) => breakdown.push({ value: v, label: "особые свойства" }));
+        if (rBonus.modifier) breakdown.push({ value: rBonus.modifier, label: "модификатор (особые свойства)" });
+      }
+    }
+    if (useSneak) {
+      const sneak = sneakAttackDice();
+      if (sneak) {
+        const sneakExpr = isCrit ? doubleDiceCount(sneak.expr) : sneak.expr;
+        const rSneak = rollExpr(sneakExpr);
+        total += rSneak.total;
+        parts.push(`${toCyrillicDice(isCrit ? sneakExpr : sneak.raw)} = ${rSneak.rolls.join("+")}`);
+        rSneak.rolls.forEach((v) => breakdown.push({ value: v, label: "скрытая атака" }));
+      }
+    }
+    // Боевой стиль «Дуэлянт»: +2 flat damage, but only while wielding a
+    // Ближний бой weapon alone in that hand (no second weapon) -- situational
+    // like Скрытая атака, so it's offered as a checkbox in startDamageRoll
+    // below rather than applied automatically.
+    if (useDuelist) {
+      total += 2;
+      parts.push(`2 (Дуэлянт)`);
+      breakdown.push({ value: 2, label: "боевой стиль: Дуэлянт" });
+    }
+    // Мастер боевых искусств: adding a superiority die spends one from the
+    // "Боевое превосходство" card's own pip pool -- checked here (rather
+    // than trusting the checkbox alone) so a pool that ran out between
+    // opening the modal and confirming can't be spent twice.
+    if (useSuperiority && consumeSuperiorityDie()) {
+      const sides = superiorityDieSides(data);
+      const rSup = rollDice(1, sides)[0];
+      total += rSup;
+      parts.push(`к${sides}: [${rSup}] (превосходство)`);
+      breakdown.push({ value: rSup, label: "кость превосходства" });
+    }
+    showRollResult({ label: `Урон${isCrit ? " (крит!)" : ""}: ${a.name || "атака"}`, detail: parts.join(" + "), total, breakdown });
+    if (useSuperiority) render();
+  }
+  // Both the plain-damage and crit buttons funnel through this: roll right
+  // away when there's no bonus-dice choice to make, otherwise ask first --
+  // a Rogue with Скрытая атака always gets asked (даже без "особых
+  // свойств"), since sneak attack is situational (needs advantage or an
+  // ally in melee) rather than automatic on every hit.
+  function startDamageRoll(a, isCrit) {
+    const bonusDice = parseDiceFromText(a.special);
+    const sneak = sneakAttackDice();
+    // Дуэлянт only applies to a Ближний бой weapon (see hasFightingStyle
+    // above and weaponRangeType() in dnd5e-data.js) -- offered as a checkbox
+    // like Скрытая атака since "no weapon in the other hand" is a table
+    // fact the app has no way to verify on its own.
+    const duelist = a.rangeType === "melee" && hasFightingStyle("Дуэлянт");
+    const versatileSides = versatileDieSidesForAttack(a);
+    const superiorityAvailable = hasBattlemaster() && superiorityDiceAvailable() > 0;
+    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable) {
+      doRollAttackDamage(a, false, isCrit, false, false, false, false);
+      return;
+    }
+    const oneHandedRaw = parseDiceFromText(a.damage);
+    const html = `
+      <h3>Урон${isCrit ? " (крит!)" : ""}: ${escapeHtml(a.name || "атака")}</h3>
+      ${
+        versatileSides
+          ? `<label class="row" style="gap:8px;align-items:center;">
+        <input type="checkbox" data-use-versatile />
+        универсальное — взять двумя руками (${oneHandedRaw ? escapeHtml(oneHandedRaw.raw) : "?"} → ${escapeHtml(`1к${versatileSides}`)})
+      </label>`
+          : ""
+      }
+      ${
+        bonusDice
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides ? "6px" : "0"};">
+        <input type="checkbox" data-use-special ${a.useSpecial ? "checked" : ""} />
+        учитывать «${escapeHtml(a.special)}»
+      </label>`
+          : ""
+      }
+      ${
+        sneak
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice ? "6px" : "0"};">
+        <input type="checkbox" data-use-sneak />
+        добавить Скрытую атаку (${sneak.raw}) — нужно преимущество на атаку или союзник рядом с целью
+      </label>`
+          : ""
+      }
+      ${
+        duelist
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak ? "6px" : "0"};">
+        <input type="checkbox" data-use-duelist />
+        добавить Боевой стиль «Дуэлянт» (+2) — нужно оружие одной рукой без второго оружия в другой руке
+      </label>`
+          : ""
+      }
+      ${
+        superiorityAvailable
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist ? "6px" : "0"};">
+        <input type="checkbox" data-use-superiority />
+        добавить кость превосходства (к${superiorityDieSides(data)}) — осталось ${superiorityDiceAvailable()}
+      </label>`
+          : ""
+      }
+      <div class="row" style="justify-content:flex-end;margin-top:14px;">
+        <button data-action="confirm-roll-damage" class="primary">Бросить</button>
+      </div>`;
+    const modal = openModal(html);
+    on(modal, "click", "[data-action=confirm-roll-damage]", () => {
+      const useSpecial = bonusDice ? modal.querySelector("[data-use-special]").checked : false;
+      const useSneak = sneak ? modal.querySelector("[data-use-sneak]").checked : false;
+      const useDuelist = duelist ? modal.querySelector("[data-use-duelist]").checked : false;
+      const useVersatile = versatileSides ? modal.querySelector("[data-use-versatile]").checked : false;
+      const useSuperiority = superiorityAvailable ? modal.querySelector("[data-use-superiority]").checked : false;
+      a.useSpecial = useSpecial;
+      doSave();
+      closeModal();
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority);
+    });
+  }
+  on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
+    startDamageRoll(data.attacks[Number(el.dataset.index)], false);
+  });
+  on(app, "click", "[data-action=roll-attack-crit]", (e, el) => {
+    startDamageRoll(data.attacks[Number(el.dataset.index)], true);
+  });
+
+  // weapons (inventory)
+  on(app, "click", "[data-action=add-weapon]", () => {
+    const sel = $("[data-weapon-select]", app);
+    const id = sel && sel.value;
+    if (!id) return;
+    const preset = WEAPONS.find((w) => w.id === id);
+    if (!preset) return;
+    data.weapons.push(
+      id === "custom"
+        ? { name: "Новое оружие", damage: "", type: "", properties: "", special: "", equipped: true, rangeType: "" }
+        : { name: preset.name, damage: preset.damage, type: preset.type, properties: preset.properties, special: "", equipped: true, rangeType: weaponRangeType(preset) }
+    );
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-weapon-equipped]", (e, el) => {
+    const w = data.weapons[Number(el.dataset.index)];
+    if (!w) return;
+    w.equipped = w.equipped === false; // undefined/true (equipped) -> false; false -> true
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-weapon]", (e, el) => {
+    data.weapons.splice(Number(el.dataset.index), 1);
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-weapon-field]", (e, el) => {
+    const i = Number(el.dataset.weaponIndex);
+    data.weapons[i][el.dataset.weaponField] = el.value;
+    doSave();
+  });
+  on(app, "change", "[data-weapon-range-type]", (e, el) => {
+    const i = Number(el.dataset.weaponIndex);
+    data.weapons[i].rangeType = el.value;
+    doSave();
+  });
+  on(app, "click", "[data-action=add-weapon-to-attacks]", (e, el) => {
+    const w = data.weapons[Number(el.dataset.index)];
+    if (!w) return;
+    const typeNote = w.type ? ` ${w.type}` : "";
+    data.attacks.push({ name: w.name, bonus: "", damage: `${w.damage || ""}${typeNote}`.trim(), special: w.special || "", useSpecial: false, rangeType: w.rangeType || "" });
+    doSave();
+    render();
+  });
+
+  on(app, "click", "[data-action=add-gear]", () => {
+    const sel = $("[data-gear-select]", app);
+    const id = sel && sel.value;
+    if (!id) return;
+    const item = GEAR.find((g) => g.id === id);
+    if (!item) return;
+    // A "Набор ..." item (traveler's/burglar's/priest's/etc. pack) is a
+    // single GEAR line but stands for a whole bundle of gear — add that
+    // bundle's actual contents too, the same list the wizard expands from
+    // class starting-equipment text, instead of just the pack's own name.
+    const packContents = EQUIPMENT_PACK_DESCRIPTIONS[item.name.toLowerCase()];
+    const line = `${item.name} (${item.cost}${item.weight ? `, ${item.weight} фнт.` : ""})${packContents ? `: ${packContents}` : ""}`;
+    data.equipmentText = data.equipmentText ? `${data.equipmentText}\n${line}` : line;
+    doSave();
+    render();
+  });
+
+  // feats (Черты — picked from a fixed list, full PHB set imported from dnd.su)
+  on(app, "change", "[data-feat-select]", (e, el) => {
+    featPreviewId = el.value;
+    const feat = FEATS.find((f) => f.id === featPreviewId);
+    featChosenAbility = feat && feat.abilityIncrease ? feat.abilityIncrease.choices[0] : "";
+    featChosenSkills = [];
+    render();
+  });
+  on(app, "change", "[data-feat-ability-choice]", (e, el) => {
+    featChosenAbility = el.value;
+  });
+  on(app, "change", "[data-feat-skill-choice]", (e, el) => {
+    const v = el.value;
+    if (el.checked) {
+      if (!featChosenSkills.includes(v)) featChosenSkills.push(v);
+    } else {
+      featChosenSkills = featChosenSkills.filter((s) => s !== v);
+    }
+  });
+  on(app, "click", "[data-action=add-feat]", () => {
+    const feat = FEATS.find((f) => f.id === featPreviewId);
+    if (!feat) return;
+    if ((data.feats || []).some((f) => f.id === feat.id)) {
+      alert("Эта черта уже добавлена.");
+      return;
+    }
+    const conModBefore = getAbilityMod(data, "con");
+    const entry = { id: feat.id, name: feat.name, desc: feat.desc, prereq: feat.prereq || "" };
+    // Ability-increasing feats mechanically raise the chosen ability score,
+    // tracked in data.abilityBonuses so the "откуда бонус" box can show it.
+    if (feat.abilityIncrease) {
+      const ability = feat.abilityIncrease.choices.length > 1 ? featChosenAbility : feat.abilityIncrease.choices[0];
+      const amount = feat.abilityIncrease.amount;
+      if (ability) {
+        data.abilities[ability] = Math.min(20, (Number(data.abilities[ability]) || 10) + amount);
+        data.abilityBonuses = data.abilityBonuses || [];
+        data.abilityBonuses.push({ source: `Черта (${feat.name})`, ability, amount });
+        entry.grantedAbility = ability;
+        entry.grantedAmount = amount;
+      }
+      if (feat.grantsSaveProficiency && ability) {
+        data.proficiencies.savingThrows = data.proficiencies.savingThrows || [];
+        if (!data.proficiencies.savingThrows.includes(ability)) data.proficiencies.savingThrows.push(ability);
+      }
+    }
+    // Skill-granting feats (Одарённый) add proficiency in the chosen skills.
+    if (feat.skillChoice) {
+      const skills = featChosenSkills.slice(0, feat.skillChoice.count);
+      data.proficiencies.skills = data.proficiencies.skills || [];
+      skills.forEach((s) => { if (!data.proficiencies.skills.includes(s)) data.proficiencies.skills.push(s); });
+      entry.grantedSkills = skills;
+    }
+    data.feats.push(entry);
+    applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
+    featPreviewId = "";
+    featChosenAbility = "";
+    featChosenSkills = [];
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-feat]", (e, el) => {
+    const [feat] = data.feats.splice(Number(el.dataset.index), 1);
+    // Undo the mechanical effects this feat granted, if any.
+    if (feat && feat.grantedAbility) {
+      data.abilities[feat.grantedAbility] = Math.max(1, (Number(data.abilities[feat.grantedAbility]) || 10) - feat.grantedAmount);
+      data.abilityBonuses = (data.abilityBonuses || []).filter(
+        (b) => !(b.source === `Черта (${feat.name})` && b.ability === feat.grantedAbility)
+      );
+    }
+    if (feat && feat.grantedSkills) {
+      // Only drop skills not granted by another source we can't tell apart —
+      // simplest safe behaviour: leave proficiency as-is (player can uncheck
+      // manually in Владения если нужно), just clean up the bonus log entry.
+    }
+    doSave();
+    render();
+  });
+
+  // features (Умения — free-form race/class/background features)
+  on(app, "click", "[data-action=add-feature]", () => {
+    data.features.push({ name: "", source: "", desc: "" });
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-feature]", (e, el) => {
+    data.features.splice(Number(el.dataset.index), 1);
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-feature-field]", (e, el) => {
+    const i = Number(el.dataset.featureIndex);
+    data.features[i][el.dataset.featureField] = el.value;
+    if (el.tagName === "TEXTAREA" && el.dataset.featureField === "name") autoGrowTextarea(el);
+    doSave();
+  });
+  on(app, "click", "[data-action=toggle-feature-use]", (e, el) => {
+    const i = Number(el.dataset.index);
+    const j = Number(el.dataset.useIndex);
+    const f = data.features[i];
+    const uses = resolveFeatureUses(f);
+    if (!uses) return;
+    const arr = usesArrayFor(f, uses.max);
+    arr[j] = !arr[j];
+    f.usesState = arr;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=refresh-feature-desc]", (e, el) => {
+    const i = Number(el.dataset.index);
+    const f = data.features[i];
+    const known = findKnownFeatureText(f.name, f.source);
+    if (!known) return;
+    f.desc = known;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=roll-feature]", (e, el) => {
+    const f = data.features[Number(el.dataset.index)];
+    const dice = featureDiceInfo(f.desc);
+    if (!dice) return;
+    let expr = dice.expr;
+    if (SECOND_WIND_FEATURE_NAME.test(f.name || "")) {
+      const lvl = fighterLevel(data);
+      if (lvl) expr = `${expr}+${lvl}`;
+    }
+    const r = rollExpr(expr);
+    showRollResult({ label: f.name || "Умение", detail: `${toCyrillicDice(expr)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`, total: r.total });
+  });
+  on(app, "click", "[data-action=roll-feature-attack]", (e, el) => {
+    const f = data.features[Number(el.dataset.index)];
+    const bonus = spellAttackBonus(data);
+    if (bonus === null) return;
+    const r = rollD20({ modifier: bonus });
+    showRollResult({ label: `${f.name || "Умение"} — атака`, detail: `к20: [${r.first}] ${formatModifier(bonus)}`, total: r.total, isCrit: r.isCrit, isFumble: r.isFumble });
+  });
+  on(app, "click", "[data-action=roll-superiority-die]", () => {
+    const sides = superiorityDieSides(data);
+    if (!consumeSuperiorityDie()) return;
+    const r = rollDice(1, sides)[0];
+    showRollResult({ label: "Кость превосходства", detail: `к${sides}: [${r}]`, total: r });
+    render();
+  });
+  on(app, "input", "[data-action=lay-on-hands-pool]", (e, el) => {
+    const i = Number(el.dataset.index);
+    const max = layOnHandsPoolMax();
+    const v = Math.max(0, Math.min(Number(el.value) || 0, max));
+    data.features[i].poolCurrent = v;
+    doSave();
+  });
+  on(app, "click", "[data-action=lay-on-hands-reset]", (e, el) => {
+    const i = Number(el.dataset.index);
+    data.features[i].poolCurrent = layOnHandsPoolMax();
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-action=healing-light-pool]", (e, el) => {
+    const i = Number(el.dataset.index);
+    const max = healingLightPoolMax(data);
+    const v = Math.max(0, Math.min(Number(el.value) || 0, max));
+    data.features[i].poolCurrent = v;
+    doSave();
+  });
+  on(app, "input", "[data-action=healing-light-spend]", (e, el) => {
+    const i = Number(el.dataset.index);
+    const maxPerUse = healingLightMaxDicePerUse(data);
+    data.features[i].healSpend = Math.max(1, Math.min(maxPerUse, Number(el.value) || 1));
+    doSave();
+  });
+  on(app, "click", "[data-action=healing-light-reset]", (e, el) => {
+    const i = Number(el.dataset.index);
+    data.features[i].poolCurrent = healingLightPoolMax(data);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=roll-healing-light]", (e, el) => {
+    const i = Number(el.dataset.index);
+    const f = data.features[i];
+    const max = healingLightPoolMax(data);
+    const current = Math.max(0, Math.min(typeof f.poolCurrent === "number" ? f.poolCurrent : max, max));
+    if (current <= 0) return;
+    const maxPerUse = Math.min(healingLightMaxDicePerUse(data), current);
+    const spend = Math.max(1, Math.min(typeof f.healSpend === "number" ? f.healSpend : maxPerUse, maxPerUse));
+    const r = rollExpr(`${spend}d6`);
+    f.poolCurrent = current - spend;
+    doSave();
+    showRollResult({ label: f.name || "Лечащий свет", detail: `${spend}к6 = ${r.rolls.join("+")}`, total: r.total });
+    render();
+  });
+
+  // pets
+  on(app, "click", "[data-action=add-pet]", () => {
+    data.pets.push({ name: "", desc: "" });
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-pet]", (e, el) => {
+    data.pets.splice(Number(el.dataset.index), 1);
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-pet-field]", (e, el) => {
+    const i = Number(el.dataset.petIndex);
+    data.pets[i][el.dataset.petField] = el.value;
+    doSave();
+  });
+
+  // spells: a card moves between the "known" grid and the "add spell"
+  // browse grid on toggle, so (unlike a plain checkbox) this always needs a
+  // full re-render.
+  on(app, "click", "[data-action=toggle-spell]", (e, el) => {
+    const spellId = el.dataset.spell;
+    const spell = SPELLS.find((s) => s.id === spellId);
+    const sc = data.spellcasting;
+    if (spell.level === 0) {
+      const list = sc.cantrips || (sc.cantrips = []);
+      const idx = list.indexOf(spellId);
+      if (idx >= 0) list.splice(idx, 1);
+      else list.push(spellId);
+    } else {
+      // A leveled spell's card here always represents either "known" (a
+      // wizard's spellbook, or a known-caster's learned spells) or -- for
+      // legacy data from before Task #109's prepared/known split -- a
+      // spell sitting directly in "prepared". Removing checks both buckets
+      // so this stays correct for older characters instead of only ever
+      // checking "known" and, on a miss, silently re-adding the spell.
+      const known = sc.known || (sc.known = []);
+      const prepared = sc.prepared || (sc.prepared = []);
+      const ki = known.indexOf(spellId);
+      const pi = prepared.indexOf(spellId);
+      if (ki >= 0 || pi >= 0) {
+        if (ki >= 0) known.splice(ki, 1);
+        if (pi >= 0) prepared.splice(pi, 1);
+      } else {
+        known.push(spellId);
+      }
+    }
+    doSave();
+    render();
+  });
+  // Toggles whether a leveled spell is among today's prepared spells
+  // (Task #109), capped at the class's rules-formula limit -- clicking past
+  // the cap on an unprepared spell is a no-op rather than bumping it out.
+  on(app, "click", "[data-action=toggle-prepared]", (e, el) => {
+    const spellId = el.dataset.spell;
+    const sc = data.spellcasting || (data.spellcasting = {});
+    const cls = sc.classFilter ? getClass(sc.classFilter) : null;
+    const list = sc.prepared || (sc.prepared = []);
+    const idx = list.indexOf(spellId);
+    if (idx >= 0) {
+      list.splice(idx, 1);
+    } else {
+      const max = preparedSpellsMax(sc, cls);
+      if (list.length >= max) return;
+      list.push(spellId);
+    }
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-spell-prep-mode]", () => {
+    spellPrepMode = !spellPrepMode;
+    render();
+  });
+  on(app, "click", "[data-action=toggle-spell-browse]", () => {
+    spellBrowseOpen = !spellBrowseOpen;
+    render();
+  });
+  on(app, "click", "[data-action=toggle-spell-slot]", (e, el) => {
+    const lvl = el.dataset.level;
+    const j = Number(el.dataset.slotIndex);
+    const sc = data.spellcasting || (data.spellcasting = {});
+    const arr = spellSlotsArrayFor(sc, lvl);
+    arr[j] = !arr[j];
+    if (!sc.slotsFilled) sc.slotsFilled = {};
+    sc.slotsFilled[lvl] = arr;
+    doSave();
+    render();
+  });
+
+  // "+ Добавить заклинание" browse panel: search box + level filter, both
+  // rebuild the card grid since the result set changes. Search preserves
+  // focus/cursor across the re-render (mount() replaces the whole DOM).
+  on(app, "input", "[data-spell-search]", (e, el) => {
+    spellSearch = el.value;
+    const cursorPos = el.selectionStart;
+    render();
+    const newEl = $("[data-spell-search]", app);
+    if (newEl) {
+      newEl.focus();
+      newEl.setSelectionRange(cursorPos, cursorPos);
+    }
+  });
+  on(app, "change", "[data-spell-level-filter]", (e, el) => {
+    spellLevelFilter = el.value;
+    render();
+  });
+
+  // death saves
+  on(app, "click", "[data-action=death-success]", (e, el) => {
+    const i = Number(el.dataset.index);
+    data.deathSaves.successes = data.deathSaves.successes === i + 1 ? i : i + 1;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=death-failure]", (e, el) => {
+    const i = Number(el.dataset.index);
+    data.deathSaves.failures = data.deathSaves.failures === i + 1 ? i : i + 1;
+    doSave();
+    render();
+  });
+
+  // dice / rolls
+  on(app, "click", "[data-action=roll-ability]", (e, el) => {
+    if (e.target.matches("input")) return;
+    const ab = el.dataset.ability;
+    openD20RollModal({ label: `Проверка: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: abilityCheckBonus(data, ab) });
+  });
+  on(app, "click", "[data-action=roll-save]", (e, el) => {
+    const ab = el.dataset.ability;
+    openD20RollModal({ label: `Спасбросок: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: saveBonus(data, ab) });
+  });
+  on(app, "click", "[data-action=roll-skill]", (e, el) => {
+    const sk = el.dataset.skill;
+    openD20RollModal({ label: `Навык: ${SKILLS.find((s) => s.id === sk).label}`, modifier: skillBonus(data, sk) });
+  });
+  on(app, "click", "[data-action=roll-initiative]", () => {
+    openD20RollModal({ label: "Инициатива", modifier: initiativeBonus(data) });
+  });
+  // Dice-pool builder: queue up any mix of dice (e.g. 2к6 + 1к8), see what's
+  // queued, remove entries, then roll everything together at once. Clicking
+  // the die picture itself does nothing -- it's purely decorative.
+  on(app, "click", "[data-action=add-to-pool]", () => {
+    const sides = Number($("[data-pool-die]", app).value);
+    const countInput = $("[data-pool-count]", app);
+    const count = Math.max(1, Number(countInput ? countInput.value : 1) || 1);
+    const existing = dicePool.find((p) => p.sides === sides);
+    if (existing) existing.count += count;
+    else dicePool.push({ sides, count });
+    render();
+  });
+  on(app, "click", "[data-action=remove-pool-die]", (e, el) => {
+    dicePool.splice(Number(el.dataset.index), 1);
+    render();
+  });
+  on(app, "click", "[data-action=roll-pool]", () => {
+    if (!dicePool.length) return;
+    const rolls = dicePool.map((p) => ({ ...p, r: rollExpr(`${p.count}d${p.sides}`) }));
+    const total = rolls.reduce((sum, x) => sum + x.r.total, 0);
+    const detail = rolls.map((x) => `${x.count}к${x.sides}: [${x.r.rolls.join(", ")}]`).join(", ");
+    const diceCount = dicePool.reduce((s, p) => s + p.count, 0);
+    showRollResult({ label: `Бросок ${diceCount} ${pluralizeDice(diceCount)}`, detail, total });
+    dicePool = [];
+    render();
+  });
+  on(app, "click", "[data-action=clear-log]", () => {
+    clearRollLog();
+    const logEl = $("[data-roll-log]", app);
+    if (logEl) logEl.innerHTML = rollLogEntriesHtml();
+  });
+  on(app, "click", "[data-action=toggle-armor]", () => {
+    if (!data.armorId) return;
+    data.armorEquipped = !data.armorEquipped;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-shield]", () => {
+    data.shieldEquipped = !data.shieldEquipped;
+    doSave();
+    render();
+  });
+
+  // portrait (top-left image box) — click opens the hidden file input, then
+  // the chosen image is downscaled via canvas before being stored as a data
+  // URL, to avoid bloating the character's JSON blob in D1.
+  on(app, "click", "[data-action=pick-portrait]", (e, el) => {
+    const input = $("[data-portrait-input]", el);
+    if (input) input.click();
+  });
+  on(app, "change", "[data-portrait-input]", (e, el) => {
+    const file = el.files && el.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const size = 256;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const scale = Math.max(size / img.width, size / img.height);
+        const w = img.width * scale, h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        data.portraitDataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        doSave();
+        render();
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // inspiration
+  function ensureInspiration() {
+    if (!data.inspiration) data.inspiration = { dmStars: 0, bardDie: "d6", bardStar: false, heroic: false };
+  }
+  on(app, "click", "[data-action=toggle-dm-star]", (e, el) => {
+    const idx = Number(el.dataset.index);
+    ensureInspiration();
+    data.inspiration.dmStars = data.inspiration.dmStars === idx + 1 ? idx : idx + 1;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-bard-star]", (e, el) => {
+    ensureInspiration();
+    data.inspiration.bardStar = !data.inspiration.bardStar;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=roll-bard-inspiration]", (e, el) => {
+    ensureInspiration();
+    if (!data.inspiration.bardStar) return;
+    const die = data.inspiration.bardDie || "d6";
+    const r = rollExpr(`1${die}`);
+    showRollResult({ label: "Вдохновение барда", detail: `${toCyrillicDice(`1${die}`)} = ${r.rolls.join("+")}`, total: r.total });
+    // Spent the instant it's rolled -- the die is lost after one use.
+    data.inspiration.bardStar = false;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=open-rest-modal]", () => openRestModal());
+  on(app, "click", "[data-action=open-level-up-modal]", () => openLevelUpModal());
+  on(app, "click", "[data-action=revert-level-up]", () => {
+    const stack = data._levelUpUndoStack;
+    if (!Array.isArray(stack) || !stack.length) return;
+    if (!window.confirm("Откатить последнее повышение уровня? Все изменения этого уровня (хиты, умения, черта/характеристика, подкласс) будут отменены.")) return;
+    const snapshot = stack[stack.length - 1];
+    const remainingStack = stack.slice(0, -1);
+    Object.keys(data).forEach((k) => delete data[k]);
+    Object.assign(data, snapshot);
+    // The restored snapshot has no stack of its own (it was stripped out
+    // when taken -- see applyLevelUp), so the remaining, one-shorter stack
+    // is reattached here, letting the button keep working for further
+    // consecutive undos down to level 1.
+    data._levelUpUndoStack = remainingStack;
+    doSave();
+    render();
+  });
+
+  // hits: damage / heal / healing potions
+  function applyDamage(delta) {
+    let temp = Number(data.hp.temp) || 0;
+    let cur = Number(data.hp.current) || 0;
+    const absorbed = Math.min(temp, delta);
+    temp -= absorbed;
+    cur = Math.max(0, cur - (delta - absorbed));
+    data.hp.temp = temp;
+    data.hp.current = cur;
+    doSave();
+    render();
+  }
+  function applyHeal(delta) {
+    const max = Number(data.hp.max) || 0;
+    data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + delta);
+    doSave();
+    render();
+  }
+  on(app, "click", "[data-action=apply-damage]", () => {
+    const input = $("[data-hp-delta-input]", app);
+    applyDamage(Math.max(0, Number(input?.value) || 0));
+  });
+  on(app, "click", "[data-action=apply-heal]", () => {
+    const input = $("[data-hp-delta-input]", app);
+    applyHeal(Math.max(0, Number(input?.value) || 0));
+  });
+  function ensurePotionsObject() {
+    if (!data.healingPotions || typeof data.healingPotions !== "object") {
+      data.healingPotions = { common: 0, greater: 0, superior: 0, supreme: 0 };
+    }
+  }
+  on(app, "click", "[data-action=add-potion]", (e, el) => {
+    const tier = el.dataset.tier;
+    ensurePotionsObject();
+    data.healingPotions[tier] = (data.healingPotions[tier] || 0) + 1;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-potion]", (e, el) => {
+    const tier = el.dataset.tier;
+    ensurePotionsObject();
+    data.healingPotions[tier] = Math.max(0, (data.healingPotions[tier] || 0) - 1);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=drink-potion]", (e, el) => {
+    const tier = el.dataset.tier;
+    ensurePotionsObject();
+    if (!data.healingPotions[tier]) return;
+    const def = HEALING_POTIONS.find((t) => t.id === tier);
+    if (!def) return;
+    data.healingPotions[tier] -= 1;
+    const r = rollExpr(def.diceExpr);
+    applyHeal(r.total);
+    showRollResult({ label: def.name, detail: `${def.dice} = ${r.rolls.join("+")}${formatModifier(r.modifier)}`, total: r.total });
+    doSave();
+    render();
+  });
+
+  // death saves: d20 auto-roller
+  on(app, "click", "[data-action=roll-death-save]", () => {
+    const r = rollExpr("1d20");
+    const total = r.total;
+    if (total < 10) {
+      data.deathSaves.failures = Math.min(3, (data.deathSaves.failures || 0) + 1);
+    } else {
+      data.deathSaves.successes = Math.min(3, (data.deathSaves.successes || 0) + 1);
+    }
+    showRollResult({ label: "Спасбросок от смерти", detail: total < 10 ? "Провал (< 10)" : "Успех (≥ 10)", total });
+    doSave();
+    render();
+  });
+
+  function recomputeIfNeeded(path) {
+    const acPaths = ["armorId", "armorEquipped", "shieldEquipped", "shieldACBonus", "customArmor.baseAC", "customArmor.dexMode", "customArmor.dexCap"];
+    if (acPaths.includes(path)) {
+      const el = $('[data-derived="ac"]');
+      if (el) el.textContent = armorClass(data);
+    }
+  }
+
+  function recomputeAll() {
+    ABILITIES.forEach((a) => {
+      const el = $(`[data-derived="mod-${a.id}"]`);
+      if (el) el.textContent = formatModifier(getAbilityMod(data, a.id));
+      const saveEl = $(`[data-derived="save-${a.id}"]`);
+      if (saveEl) saveEl.textContent = formatModifier(saveBonus(data, a.id));
+    });
+    SKILLS.forEach((s) => {
+      const el = $(`[data-derived="skill-${s.id}"]`);
+      if (el) el.textContent = formatModifier(skillBonus(data, s.id));
+    });
+    const acEl = $('[data-derived="ac"]');
+    if (acEl) acEl.textContent = armorClass(data);
+    const initEl = $('[data-derived="initiative"]');
+    if (initEl) initEl.textContent = formatModifier(initiativeBonus(data));
+  }
+
+  render();
+}
