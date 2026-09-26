@@ -2355,6 +2355,22 @@ export async function renderSheet(id) {
     const f = (data.classes || []).find((c) => c.id === "fighter");
     return f && f.level ? f.level : 0;
   }
+  // Всплеск действий/Неутомимость scale with Fighter level (2 uses of
+  // Action Surge from 17, 2/3 uses of Indomitable from 13/17) but their own
+  // текст spells this out in words ("дважды", "смотрите уровень") rather
+  // than a bare numeral parseUsesFromText could catch -- forced count by
+  // level, same pattern as Ярость above.
+  const ACTION_SURGE_FEATURE_NAME = /^Всплеск действий$/i;
+  const INDOMITABLE_FEATURE_NAME = /^Неутомимость$/i;
+  function maxActionSurgeUses(data) {
+    return fighterLevel(data) >= 17 ? 2 : 1;
+  }
+  function maxIndomitableUses(data) {
+    const lvl = fighterLevel(data);
+    if (lvl >= 17) return 3;
+    if (lvl >= 13) return 2;
+    return 1;
+  }
   function warlockLevel(data) {
     const w = (data.classes || []).find((c) => c.id === "warlock");
     return w && w.level ? w.level : 0;
@@ -2442,6 +2458,8 @@ export async function renderSheet(id) {
   function resolveFeatureUses(f) {
     if (BARD_INSPIRATION_FEATURE_NAME.test(f.name || "")) return { max: maxBardInspirationUses(), recharge: "long" };
     if (RAGE_FEATURE_NAME.test(f.name || "")) return { max: maxRageUses(data), recharge: "long" };
+    if (ACTION_SURGE_FEATURE_NAME.test(f.name || "")) return { max: maxActionSurgeUses(data), recharge: "short" };
+    if (INDOMITABLE_FEATURE_NAME.test(f.name || "")) return { max: maxIndomitableUses(data), recharge: "long" };
     // Arcane/Natural Recovery's own text describes a once-a-day use spent
     // during a short rest, phrased in a way parseUsesFromText's regexes
     // don't catch -- forced count so it gets normal pip tracking and the
