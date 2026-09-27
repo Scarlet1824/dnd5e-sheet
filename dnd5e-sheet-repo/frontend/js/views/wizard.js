@@ -289,7 +289,7 @@ export function renderWizard() {
                 <h4>${escapeHtml(sr.name)}</h4>
                 ${state.edition === "2014" && sr.abilityBonuses ? `<p>Бонусы: ${raceBonusSummary(sr)}</p>` : ""}
                 ${sr.speed ? `<p>Скорость: ${sr.speed} фт</p>` : ""}
-                ${(sr.traits || []).map((t) => `<p><strong>${escapeHtml(t.name)}:</strong> ${escapeHtml(t.desc)}</p>`).join("")}
+                ${((sr.traits && sr.traits.length ? sr.traits : race.traits) || []).map((t) => `<p><strong>${escapeHtml(t.name)}:</strong> ${escapeHtml(t.desc)}</p>`).join("")}
               </div>`).join("")}
           </div>
         </div>`;

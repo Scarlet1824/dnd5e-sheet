@@ -567,9 +567,16 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
    anchored in the modal's right column had no way to render past the
    modal's edge. Moving the popover out to a body-level layer sidesteps that
    entirely; this class only styles it once it's there. */
-.hover-card-portal { position: fixed; z-index: 200; pointer-events: none; }
+/* pointer-events stays enabled (unlike a purely decorative overlay) --
+   this layer holds the only copy of the popover's text, so the mouse must
+   be able to move onto it to scroll a long entry; wireHoverCardPortal()
+   only hides it once the pointer leaves BOTH the trigger and this element. */
+.hover-card-portal { position: fixed; z-index: 200; font-size: 0.86rem; max-width: min(90vw, 380px); }
 .hover-card-portal .spell-hover-card,
-.hover-card-portal .subclass-hover-card { display: block; position: static; margin: 0; }
+.hover-card-portal .subclass-hover-card {
+  display: block; position: static; margin: 0; width: auto; max-width: 100%;
+  max-height: min(70vh, 480px);
+}
 
 .roll-log { max-height: 220px; overflow-y: auto; font-size: 0.92rem; }
 .roll-log .entry { border-bottom: 1px dashed var(--border); padding: 6px 0; display: flex; justify-content: space-between; gap: 8px; }

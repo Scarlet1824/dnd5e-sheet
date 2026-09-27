@@ -97,6 +97,13 @@ export function wireHoverCardPortal(root) {
     if (floatEl) { floatEl.remove(); floatEl = null; }
     currentTrigger = null;
   }
+  // True while the pointer is over the trigger OR the floated card itself --
+  // the card lives outside `root` (it's appended to document.body), so
+  // leaving the trigger toward the card must NOT hide it, and the card needs
+  // its own listeners since root's delegated ones never see its events.
+  function pointerStillInside(relatedTarget) {
+    return !!(currentTrigger && currentTrigger.contains(relatedTarget)) || !!(floatEl && floatEl.contains(relatedTarget));
+  }
   function show(trigger) {
     const source = trigger.querySelector(":scope > .spell-hover-card, :scope > .subclass-hover-card");
     if (!source) return;
@@ -107,6 +114,9 @@ export function wireHoverCardPortal(root) {
     floatEl.appendChild(source.cloneNode(true));
     document.body.appendChild(floatEl);
     place(trigger);
+    floatEl.addEventListener("mouseout", (e) => {
+      if (!pointerStillInside(e.relatedTarget)) hide();
+    });
   }
   root.addEventListener("mouseover", (e) => {
     const trigger = e.target.closest(".spell-hover-name, .subclass-hover-name");
@@ -114,7 +124,7 @@ export function wireHoverCardPortal(root) {
   });
   root.addEventListener("mouseout", (e) => {
     const trigger = e.target.closest(".spell-hover-name, .subclass-hover-name");
-    if (trigger && trigger === currentTrigger && !trigger.contains(e.relatedTarget)) hide();
+    if (trigger && trigger === currentTrigger && !pointerStillInside(e.relatedTarget)) hide();
   });
   root.addEventListener("focusin", (e) => {
     const trigger = e.target.closest(".spell-hover-name, .subclass-hover-name");
@@ -122,7 +132,7 @@ export function wireHoverCardPortal(root) {
   });
   root.addEventListener("focusout", (e) => {
     const trigger = e.target.closest(".spell-hover-name, .subclass-hover-name");
-    if (trigger && trigger === currentTrigger && !trigger.contains(e.relatedTarget)) hide();
+    if (trigger && trigger === currentTrigger && !pointerStillInside(e.relatedTarget)) hide();
   });
 }
 

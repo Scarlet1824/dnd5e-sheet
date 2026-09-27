@@ -204,6 +204,22 @@ function unarmoredFlatACBase(data) {
   return best;
 }
 
+// Bladesinging's "Песнь клинка": while active (a manual on/off toggle on
+// its feature card, see sheet.js -- the sheet has no minute-by-minute
+// clock to expire it on its own) and the character isn't wearing medium/
+// heavy armor or a shield, it adds the Intelligence modifier (minimum +1)
+// to AC. Scoped to characters who actually have the feature card, same as
+// the other passive-bonus parsers above, so toggling data.bladesongActive
+// on a non-Bladesinger (impossible via the UI, but the field is plain
+// character data) has no effect.
+function bladesongACBonus(data, armor) {
+  if (!data.bladesongActive) return 0;
+  if (armor && armor.category !== "light") return 0;
+  if (data.shieldEquipped) return 0;
+  if (!(data.features || []).some((f) => /^Песнь клинка$/i.test(f.name || ""))) return 0;
+  return Math.max(1, getAbilityMod(data, "int"));
+}
+
 export function armorClass(data) {
   const dexMod = getAbilityMod(data, "dex");
   // Backward compatibility for characters saved before the armor/shield model
@@ -232,7 +248,7 @@ export function armorClass(data) {
   }
   const shieldBonus = data.shieldEquipped ? Number(data.shieldACBonus ?? SHIELD_DEFAULT_AC_BONUS) : 0;
   const featureBonus = passiveArmorFeatureACBonus(data, armor);
-  return base + shieldBonus + featureBonus;
+  return base + shieldBonus + featureBonus + bladesongACBonus(data, armor);
 }
 
 export function initiativeBonus(data) {

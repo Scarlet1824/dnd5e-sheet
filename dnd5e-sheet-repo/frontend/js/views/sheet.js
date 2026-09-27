@@ -789,6 +789,18 @@ export async function renderSheet(id) {
   // markers above, it's filtered out of the generic feature-card push
   // instead of becoming its own inert card.
   const SPELL_CIRCLE_UNLOCK_FEATURE_NAME = /^Заклинания\s+\d+-(?:го|й)\s+круга$/i;
+  // Same idea as the circle-unlock marker above, but for the "you can now
+  // cast spells at all" notice a half-caster's OWN level-2 slot uses
+  // (Следопыт/Паладин; Волшебник/Жрец/Бард word this as "Заклинания
+  // волшебника"/etc at level 1, which is character-creation territory, not
+  // level-up, so it never reached this filter before -- but the exact same
+  // wording pattern is reused here for consistency, in case a future class's
+  // level-up table also opens spellcasting this way at a level other than 1).
+  // Casting itself already works once spellcasting.ability is set (done
+  // automatically at creation) and the Заклинания tab's own "Количество
+  // ячеек" numbers are filled in by applyLevelUpSpellSlots -- this text
+  // never had a mechanic of its own to lose by being filtered out.
+  const SPELLCASTING_INTRO_FEATURE_NAME = /^Заклинания\s+(волшебника|жреца|следопыта|паладина|барда|друида|чародея|колдуна)$/i;
   function levelHasAsiChoice(cls, newLevel) {
     const raw = cls && cls.features && cls.features[newLevel];
     return !!(raw || []).some((f) => ASI_FEATURE_NAME.test(f));
@@ -992,6 +1004,54 @@ export async function renderSheet(id) {
     const sc = levelUpState.knownCantripChoice;
     return !!(sc && sc.cantripIds.length < knownCantripGrowthCount(cls, newLevel));
   }
+  // Standard 5e spell-slot-by-caster-level table (PHB "Multiclass
+  // Spellcaster" table -- identical in shape to each individual full
+  // caster's own table, since that table IS this one restricted to a
+  // single class). Index 0 unused; each entry is slots per circle 1..9 (a
+  // missing trailing index means 0 slots of that circle yet).
+  const SPELL_SLOTS_BY_CASTER_LEVEL = {
+    1: [2], 2: [3], 3: [4, 2], 4: [4, 3], 5: [4, 3, 2], 6: [4, 3, 3], 7: [4, 3, 3, 1],
+    8: [4, 3, 3, 2], 9: [4, 3, 3, 3, 1], 10: [4, 3, 3, 3, 2], 11: [4, 3, 3, 3, 2, 1],
+    12: [4, 3, 3, 3, 2, 1], 13: [4, 3, 3, 3, 2, 1, 1], 14: [4, 3, 3, 3, 2, 1, 1],
+    15: [4, 3, 3, 3, 2, 1, 1, 1], 16: [4, 3, 3, 3, 2, 1, 1, 1], 17: [4, 3, 3, 3, 2, 1, 1, 1, 1],
+    18: [4, 3, 3, 3, 3, 1, 1, 1, 1], 19: [4, 3, 3, 3, 3, 2, 1, 1, 1], 20: [4, 3, 3, 3, 3, 2, 2, 1, 1],
+  };
+  // Combined caster level across every class the character has, using the
+  // standard multiclassing rule: a full caster (Волшебник/Жрец/Друид/Бард/
+  // Чародей) counts its whole level, a half caster (Паладин/Следопыт --
+  // spellcasting.startsAtLevel is how this data set already marks that
+  // shape) counts half its level rounded down, and a pact-magic caster
+  // (Колдун) is excluded entirely since Pact Magic has its own separate,
+  // differently-shaped slot table this doesn't model. Warlock aside, this
+  // app doesn't track third-casters (Eldritch Knight/Arcane Trickster spell
+  // slots are folded into the base Воин/Плут class object, not a separate
+  // entry), so those don't need their own branch here.
+  function multiclassCasterLevel(data) {
+    let level = 0;
+    (data.classes || []).forEach((c) => {
+      const cls = getClass(c.id);
+      if (!cls || !cls.spellcasting || cls.spellcasting.pact) return;
+      const lvl = c.level || 1;
+      level += cls.spellcasting.startsAtLevel === 2 ? Math.floor(lvl / 2) : lvl;
+    });
+    return level;
+  }
+  // Recomputes data.spellcasting.slots from the character's current combined
+  // caster level, called right after a spellcasting class's level actually
+  // changes (see applyLevelUp below) -- fixes slots staying manual forever
+  // (the "Количество ячеек" fields on the Заклинания tab are still plain
+  // editable numbers for the player to track usage against, but their
+  // starting/max value per level now fills in on its own instead of staying
+  // at whatever the player happened to leave them).
+  function applyLevelUpSpellSlots(cls) {
+    if (!cls.spellcasting || cls.spellcasting.pact) return;
+    if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+    if (!data.spellcasting.slots) data.spellcasting.slots = {};
+    const table = SPELL_SLOTS_BY_CASTER_LEVEL[Math.min(20, Math.max(0, multiclassCasterLevel(data)))] || [];
+    for (let circle = 1; circle <= 9; circle++) {
+      data.spellcasting.slots[circle] = table[circle - 1] || 0;
+    }
+  }
   // Champion's "Дополнительный боевой стиль" (10th level: pick a SECOND
   // fighting style) is, in the data, just another subclass feature card
   // resolved through the "Умение архетипа" marker like any other -- this
@@ -1033,6 +1093,49 @@ export async function renderSheet(id) {
   }
   function fightingStyleChoiceIncomplete() {
     return !!(levelUpState.fightingStyleChoice && !levelUpState.fightingStyleChoice.name);
+  }
+  // Паладин/Следопыт get a fighting style too, but -- unlike Воин -- only at
+  // a level-UP (2nd level), never at creation, and their own class object
+  // has no level1Choice for it (that field only ever meant "at level 1").
+  // Their features[level] slot just says "Боевой стиль (тот же список, что
+  // и у Воина)" in plain text today; this turns THAT into a real first-ever
+  // pick, reusing Воин's own option list (exactly what the text promises)
+  // since Паладин/Следопыт don't carry a restricted subset of their own in
+  // this data set. Distinct from fightingStyleChoice above, which is always
+  // a class's OWN second pick (Champion 10th level) gated on cls.level1Choice
+  // already existing -- this is the opposite case, a class's first and only
+  // pick, gated on cls.level1Choice NOT existing (Воин is excluded since it
+  // already resolves its one fighting style at creation).
+  const FIRST_FIGHTING_STYLE_FEATURE_NAME = /^Боевой стиль\b/i;
+  function levelHasBaseFightingStyleChoice(cls, newLevel) {
+    if (!cls || cls.level1Choice) return false;
+    const raw = (cls.features && cls.features[newLevel]) || [];
+    return raw.some((f) => FIRST_FIGHTING_STYLE_FEATURE_NAME.test(f));
+  }
+  function freshBaseFightingStyleChoiceState() {
+    return { name: "" };
+  }
+  function baseFightingStyleChoicePanelHtml() {
+    const sc = levelUpState.baseFightingStyleChoice;
+    const options = (getClass("fighter").level1Choice.options || []);
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Боевой стиль</h4>
+        <div class="grid cols-2">
+          ${options
+            .map(
+              (o) => `
+            <label class="card selectable ${sc.name === o.name ? "selected" : ""}" style="cursor:pointer;">
+              <input type="radio" name="level-up-base-fighting-style" data-level-up-base-fighting-style="${escapeHtml(o.name)}" ${sc.name === o.name ? "checked" : ""} style="margin-right:6px;" />
+              <strong>${escapeHtml(o.name)}</strong><br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(o.desc)}</span>
+            </label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+  function baseFightingStyleChoiceIncomplete() {
+    return !!(levelUpState.baseFightingStyleChoice && !levelUpState.baseFightingStyleChoice.name);
   }
   // Мастер боевых искусств's "Ученик войны" (3rd level) grants a
   // craftsman's-tool proficiency of the player's choice -- like the second
@@ -1401,7 +1504,9 @@ export async function renderSheet(id) {
         !ASI_FEATURE_NAME.test(f.name) &&
         !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) &&
         f.name !== ARCHETYPE_FEATURE_MARKER &&
-        !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name)
+        !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name) &&
+        !SPELLCASTING_INTRO_FEATURE_NAME.test(f.name) &&
+        !(FIRST_FIGHTING_STYLE_FEATURE_NAME.test(f.name) && !cls.level1Choice)
     );
     // Once a subclass is chosen (already, or right here in subclassChoice),
     // its own features at this exact level replace the "Умение архетипа"
@@ -1469,6 +1574,7 @@ export async function renderSheet(id) {
       </div>
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
+      ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
       ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
@@ -1483,6 +1589,7 @@ export async function renderSheet(id) {
           asiChoiceIncomplete() ||
           subclassChoiceIncomplete(cls) ||
           fightingStyleChoiceIncomplete() ||
+          baseFightingStyleChoiceIncomplete() ||
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
           subLanguageChoiceIncomplete() ||
@@ -1519,6 +1626,7 @@ export async function renderSheet(id) {
       levelUpState.asi = ccls && levelHasAsiChoice(ccls, newLevel) ? freshAsiState() : null;
       levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, newLevel) ? freshSubclassChoiceState() : null;
       levelUpState.fightingStyleChoice = ccls && levelHasFightingStyleChoice(cc, ccls, newLevel) ? freshFightingStyleChoiceState() : null;
+      levelUpState.baseFightingStyleChoice = ccls && levelHasBaseFightingStyleChoice(ccls, newLevel) ? freshBaseFightingStyleChoiceState() : null;
       levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState() : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
@@ -1563,6 +1671,10 @@ export async function renderSheet(id) {
     });
     on(modal, "change", "[data-level-up-fighting-style]", (e, el) => {
       levelUpState.fightingStyleChoice.name = el.dataset.levelUpFightingStyle;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-base-fighting-style]", (e, el) => {
+      levelUpState.baseFightingStyleChoice.name = el.dataset.levelUpBaseFightingStyle;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-maneuver]", (e, el) => {
@@ -1779,7 +1891,9 @@ export async function renderSheet(id) {
           !ASI_FEATURE_NAME.test(f.name) &&
           !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) &&
           f.name !== ARCHETYPE_FEATURE_MARKER &&
-          !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name)
+          !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name) &&
+          !SPELLCASTING_INTRO_FEATURE_NAME.test(f.name) &&
+          !(FIRST_FIGHTING_STYLE_FEATURE_NAME.test(f.name) && !cls.level1Choice)
       )
       .forEach((f) => {
         if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) return;
@@ -1856,6 +1970,10 @@ export async function renderSheet(id) {
     if (levelUpState.toolChoice && levelUpState.toolChoice.name) {
       if (!data.proficiencies.tools.includes(levelUpState.toolChoice.name)) data.proficiencies.tools.push(levelUpState.toolChoice.name);
     }
+    if (levelUpState.baseFightingStyleChoice && levelUpState.baseFightingStyleChoice.name) {
+      const opt = (getClass("fighter").level1Choice.options || []).find((o) => o.name === levelUpState.baseFightingStyleChoice.name);
+      if (opt) data.features.push({ name: `Боевой стиль: ${opt.name}`, source: cls.name, desc: opt.desc });
+    }
     if (levelUpState.subSkillChoice) {
       const sc = levelUpState.subSkillChoice;
       sc.picked.filter(Boolean).forEach((id) => {
@@ -1889,6 +2007,7 @@ export async function renderSheet(id) {
         if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
       });
     }
+    applyLevelUpSpellSlots(cls);
     doSave();
     render();
   }
@@ -1908,6 +2027,7 @@ export async function renderSheet(id) {
       asi: cls && levelHasAsiChoice(cls, newLevel) ? freshAsiState() : null,
       subclassChoice: cls && levelHasSubclassChoice(c, cls, newLevel) ? freshSubclassChoiceState() : null,
       fightingStyleChoice: cls && levelHasFightingStyleChoice(c, cls, newLevel) ? freshFightingStyleChoiceState() : null,
+      baseFightingStyleChoice: cls && levelHasBaseFightingStyleChoice(cls, newLevel) ? freshBaseFightingStyleChoiceState() : null,
       toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState() : null,
       subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
       subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
@@ -2764,7 +2884,13 @@ export async function renderSheet(id) {
     // grammatical case of whatever noun phrase names the feature.
     if (
       /не более (одного|1) раза за/i.test(text) ||
-      /не (можете|сможете)(\s+вновь)?\s+(использовать|применить|воспользоваться)[^,.]*,?\s*(не завершив|пока не (завершите|закончите))/i.test(text)
+      // "до окончания короткого/продолжительного отдыха" covers the
+      // "...повторно до окончания X отдыха" phrasing used across dozens of
+      // features in this data set (e.g. Плут «Вор заклинаний») -- it's its
+      // own branch here rather than folded into the catch-all below since
+      // it needs to win even when the text ALSO contains "снова"/"повторно"
+      // nowhere near "отдых" (the catch-all's proximity window is narrower).
+      /не (можете|сможете)(\s+вновь)?\s+(использовать|применить|воспользоваться)[^,.]*,?\s*(не завершив|пока не (завершите|закончите)|до окончания)/i.test(text)
     ) {
       return { max: 1, recharge: rechargeOf(text) || "short" };
     }
@@ -2793,7 +2919,7 @@ export async function renderSheet(id) {
     // one-use-per-rest feature mentions both "отдых" and "снова" close
     // together, regardless of exact wording, so this is a safe general
     // fallback rather than a name-specific special case.
-    if (/(снова[^.]{0,100}отдых|отдых[а-яё]*[^.]{0,100}снова)/i.test(text)) {
+    if (/((снова|повторно)[^.]{0,100}отдых|отдых[а-яё]*[^.]{0,100}(снова|повторно))/i.test(text)) {
       return { max: 1, recharge: rechargeOf(text) || "any" };
     }
     return null;
@@ -3596,9 +3722,24 @@ export async function renderSheet(id) {
                     // pip from the pool -- the generic button would otherwise
                     // add a second, non-spending "🎲 Бросить к8" from the die
                     // size mentioned in the same card's text.
-                    BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "");
+                    BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "") ||
+                    // Божественная кара's dice count depends on which spell
+                    // slot is spent, chosen only at the moment of a weapon
+                    // damage roll (see the "Божественная кара" section of
+                    // startDamageRoll) -- a standalone "🎲 Бросить 2к8" button
+                    // here would just roll the WRONG (always-minimum)
+                    // amount and not spend a slot.
+                    /^Божественная кара$/i.test(f.name || "");
                   const dice = noRollButton ? null : featureDiceInfo(f.desc);
-                  const dc = featureSaveDCInfo(f.desc);
+                  // «Вор заклинаний»'s own text only says "Сл равна вашей Сл
+                  // спасброска заклинания" -- it doesn't restate the 8 +
+                  // proficiency + ability formula featureSaveDCInfo's regex
+                  // looks for, so that parser correctly finds nothing here.
+                  // The DC it's referring to is simply the character's own
+                  // spellcasting DC, already computed elsewhere on the sheet.
+                  const dc = /^Вор заклинаний$/i.test(f.name || "")
+                    ? (spellSaveDC(data) !== null ? { dc: spellSaveDC(data), abilityId: data.spellcasting?.ability || null } : null)
+                    : featureSaveDCInfo(f.desc);
                   // Бездонный патрона's "Щупальце из глубин" is a melee
                   // spell attack -- the generic dice button already covers
                   // its cold-damage roll, this adds the missing attack roll
@@ -3622,7 +3763,20 @@ export async function renderSheet(id) {
                   // bake in a number that would go stale.
                   const isSneakAttack = /^Скрытая атака\b/i.test(f.name || "");
                   const sneakInfo = isSneakAttack ? sneakAttackDice() : null;
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo) return "";
+                  // Bladesinging's "Песнь клинка" is a bonus-action toggle
+                  // lasting 1 minute (or until a two-handed weapon attack,
+                  // heavier armor/a shield, or being incapacitated ends it
+                  // early) that changes derived stats (AC, and later "Песнь
+                  // победы"'s melee damage bonus) while active -- the sheet
+                  // has no minute-by-minute clock, so this is a manual
+                  // on/off switch the player flips themselves, the same way
+                  // "Уцелевший" above is a manual per-turn button standing in
+                  // for a trigger the sheet can't observe on its own.
+                  // armorClass()/doRollAttackDamage() read data.bladesongActive
+                  // directly (see the matching comment there).
+                  const isBladesong = /^Песнь клинка$/i.test(f.name || "");
+                  const bladesongActive = isBladesong && !!data.bladesongActive;
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -3641,7 +3795,10 @@ export async function renderSheet(id) {
                   const sneakSpan = sneakInfo
                     ? `<span class="feature-card-dc" title="Растёт с уровнем Плута — добавляется как флажок в окне броска урона оружием">Сейчас: ${escapeHtml(sneakInfo.raw)}</span>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${sneakSpan}${dcSpan}</div>`;
+                  const bladesongBtn = isBladesong
+                    ? `<button class="small feature-card-roll ${bladesongActive ? "primary" : ""}" data-action="toggle-bladesong" data-index="${i}">${bladesongActive ? "✔ Активировано" : "Активировать"}</button>`
+                    : "";
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -4037,7 +4194,53 @@ export async function renderSheet(id) {
     weaponRolls.forEach((v) => breakdown.push({ value: v, label: "оружие" }));
     savageRolls.forEach((v) => breakdown.push({ value: v, label: "свирепые атаки" }));
   }
-  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, priorRoll) {
+  function hasDivineSmiteFeature() {
+    return (data.features || []).some((f) => /^Божественная кара$/i.test(f.name || ""));
+  }
+  // How many of a given spell-slot circle are still unspent -- same
+  // "true = available" array shape spellSlotsArrayFor() (further below)
+  // reads for the Заклинания tab's own slot pips, read here independently
+  // since Божественная кара needs to both check and (via
+  // consumeSpellSlotOfLevel) spend one without rendering anything.
+  function spellSlotAvailableCount(level) {
+    const sc = data.spellcasting;
+    const max = Number((sc && sc.slots && sc.slots[level]) || 0);
+    if (!max) return 0;
+    const stored = sc.slotsFilled && sc.slotsFilled[level];
+    const arr = Array.isArray(stored) ? stored.slice(0, max) : [];
+    while (arr.length < max) arr.push(true);
+    return arr.filter(Boolean).length;
+  }
+  function consumeSpellSlotOfLevel(level) {
+    const sc = data.spellcasting;
+    if (!sc) return false;
+    const max = Number((sc.slots && sc.slots[level]) || 0);
+    if (!max) return false;
+    if (!sc.slotsFilled) sc.slotsFilled = {};
+    const stored = sc.slotsFilled[level];
+    const arr = Array.isArray(stored) ? stored.slice(0, max) : [];
+    while (arr.length < max) arr.push(true);
+    const idx = arr.indexOf(true);
+    if (idx === -1) return false;
+    arr[idx] = false;
+    sc.slotsFilled[level] = arr;
+    doSave();
+    return true;
+  }
+  // Божественная кара's own damage-dice count for a given slot level: 2к8
+  // at 1st, +1к8 per level above that, capped at 5к8 (5th level or higher).
+  function smiteDiceForSlotLevel(level) {
+    return Math.min(5, level + 1);
+  }
+  function availableSmiteSlotLevels() {
+    const levels = [];
+    for (let lvl = 1; lvl <= 9; lvl++) {
+      const available = spellSlotAvailableCount(lvl);
+      if (available > 0) levels.push({ level: lvl, available });
+    }
+    return levels;
+  }
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead, priorRoll) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
     if (useVersatile) {
@@ -4122,6 +4325,33 @@ export async function renderSheet(id) {
       parts.push(`${bonus}`);
       breakdown.push({ value: bonus, label: "Ярость" });
     }
+    // Bladesinging «Песнь победы» (14th level): automatic while «Песнь
+    // клинка» is active (see the toggle button on that feature card and
+    // bladesongACBonus() in character.js for the matching AC bonus) --
+    // unlike Дуэлянт/Ярость above, RAW gives no choice about it, so it's
+    // applied here directly rather than as a checkbox in startDamageRoll.
+    if (data.bladesongActive && a.rangeType !== "ranged" && (data.features || []).some((f) => /^Песнь победы$/i.test(f.name || ""))) {
+      const bonus = Math.max(1, getAbilityMod(data, "int"));
+      total += bonus;
+      parts.push(`${bonus}`);
+      breakdown.push({ value: bonus, label: "Песнь победы" });
+    }
+    // Божественная кара: spends the chosen slot here (rather than trusting
+    // the level picked in the modal alone), same "don't trust the confirmed
+    // choice blindly" reasoning as the superiority-die spend right below --
+    // a slot that ran out between opening the modal and confirming can't be
+    // spent twice. Crit doubles the dice count (RAW), same as Жестокая
+    // критика/Свирепые атаки above; the +1к8 undead/fiend bonus is part of
+    // the same pool of "divine smite dice" so it doubles right along with it.
+    if (smiteLevel && consumeSpellSlotOfLevel(smiteLevel)) {
+      let diceCount = smiteDiceForSlotLevel(smiteLevel) + (useSmiteUndead ? 1 : 0);
+      if (isCrit) diceCount *= 2;
+      const rSmite = rollDice(diceCount, 8);
+      const smiteTotal = rSmite.reduce((s, v) => s + v, 0);
+      total += smiteTotal;
+      parts.push(`${diceCount}к8: [${rSmite.join(", ")}]`);
+      rSmite.forEach((v) => breakdown.push({ value: v, label: "божественная кара" }));
+    }
     // Мастер боевых искусств: adding a superiority die spends one from the
     // "Боевое превосходство" card's own pip pool -- checked here (rather
     // than trusting the checkbox alone) so a pool that ran out between
@@ -4159,11 +4389,11 @@ export async function renderSheet(id) {
       reroll: savageAvailable
         ? {
             label: "Дикий атакующий: перебросить кости урона",
-            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, { total, detail: parts.join(" + ") }),
+            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, 0, false, { total, detail: parts.join(" + ") }),
           }
         : null,
     });
-    if (useSuperiority) render();
+    if (useSuperiority || smiteLevel) render();
   }
   // Both the plain-damage and crit buttons funnel through this: roll right
   // away when there's no bonus-dice choice to make, otherwise ask first --
@@ -4185,8 +4415,14 @@ export async function renderSheet(id) {
     // Barbarian level at all, same "player confirms the table fact" pattern
     // as Дуэлянт, since the sheet has no "currently raging" flag to check.
     const rageAvailable = a.rangeType === "melee" && a.ability === "str" && barbarianLevel(data) > 0;
-    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !rageAvailable) {
-      doRollAttackDamage(a, false, isCrit, false, false, false, false, false);
+    // Божественная кара only applies to a melee weapon attack that hit, and
+    // needs at least one unspent spell slot to actually offer -- a level with
+    // 0 available (all spent, or the character just doesn't have that circle
+    // yet) isn't shown as an option, same "don't offer what can't be used"
+    // rule the superiority-die/tool checkboxes above already follow.
+    const smiteAvailable = a.rangeType === "melee" && hasDivineSmiteFeature() && availableSmiteSlotLevels().length > 0;
+    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !rageAvailable && !smiteAvailable) {
+      doRollAttackDamage(a, false, isCrit, false, false, false, false, false, 0, false);
       return;
     }
     const oneHandedRaw = parseDiceFromText(a.damage);
@@ -4240,6 +4476,25 @@ export async function renderSheet(id) {
       </label>`
           : ""
       }
+      ${
+        smiteAvailable
+          ? `<div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageAvailable ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
+        <label class="row" style="gap:8px;align-items:center;">
+          <span>Божественная кара:</span>
+          <select data-smite-level style="flex:1;">
+            <option value="0">Не использовать</option>
+            ${availableSmiteSlotLevels()
+              .map((s) => `<option value="${s.level}">ячейка ${s.level} круга (${smiteDiceForSlotLevel(s.level)}к8) — осталось ${s.available}</option>`)
+              .join("")}
+          </select>
+        </label>
+        <label class="row" style="gap:8px;align-items:center;margin-top:6px;">
+          <input type="checkbox" data-smite-undead />
+          цель — нежить или исчадие (+1к8)
+        </label>
+      </div>`
+          : ""
+      }
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
         <button data-action="confirm-roll-damage" class="primary">Бросить</button>
       </div>`;
@@ -4251,10 +4506,12 @@ export async function renderSheet(id) {
       const useVersatile = versatileSides ? modal.querySelector("[data-use-versatile]").checked : false;
       const useSuperiority = superiorityAvailable ? modal.querySelector("[data-use-superiority]").checked : false;
       const useRage = rageAvailable ? modal.querySelector("[data-use-rage]").checked : false;
+      const smiteLevel = smiteAvailable ? Number(modal.querySelector("[data-smite-level]").value) : 0;
+      const useSmiteUndead = smiteAvailable ? modal.querySelector("[data-smite-undead]").checked : false;
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage);
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
@@ -4465,6 +4722,11 @@ export async function renderSheet(id) {
     const amount = 5 + getAbilityMod(data, "con");
     const max = Number(data.hp.max) || 0;
     data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + amount);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-bladesong]", () => {
+    data.bladesongActive = !data.bladesongActive;
     doSave();
     render();
   });
