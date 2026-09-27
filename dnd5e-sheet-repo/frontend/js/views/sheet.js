@@ -806,7 +806,14 @@ export async function renderSheet(id) {
   // levelHasSubclassChoice() checks the class's OWN raw feature text for
   // this level rather than hardcoding "level 3", so it generalizes to
   // whichever level a future class's data uses for the same choice.
-  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип/i;
+  // Most classes phrase their own "pick a subclass now" slot text with the
+  // word "архетип" (Боевой архетип, Архетип плута, Архетип следопыта, ...),
+  // but Варвар's is "Путь первобытности" -- matched by the leading "Путь"
+  // instead, which is safe here since this regex only ever runs against a
+  // class's OWN features[level] slot text (never a subclass's own NAME,
+  // which is where wording like "Путь открытой ладони" actually lives), and
+  // Варвар is the only class whose slot text starts with that word.
+  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь\b/i;
   // "Умение архетипа" (Воин 7-й/10-й уровень) is a placeholder marker in
   // cls.features -- the ACTUAL feature at that level comes from whichever
   // subclass the character already picked (see subclassFeaturesAtLevel()),
@@ -1549,6 +1556,19 @@ export async function renderSheet(id) {
     if (hasToughFeat()) {
       data.hp.max += 2;
       data.hp.current += 2;
+    }
+    // Варвар «Изначальный чемпион» (20th level): unlike an ASI/feat pick,
+    // this ability increase is unconditional and raises the character's
+    // Сила/Телосложение max to 24 for these two scores specifically -- not
+    // modeled anywhere else on the sheet, so it's applied directly here
+    // rather than through the ASI chooser. Con going up needs the same
+    // retroactive HP top-up an ASI/feat Con increase gets (see
+    // applyConHpRetroactive above).
+    if (cls.id === "barbarian" && newLevel === 20) {
+      const conModBeforePrimalChampion = getAbilityMod(data, "con");
+      data.abilities.str = Math.min(24, (Number(data.abilities.str) || 10) + 4);
+      data.abilities.con = Math.min(24, (Number(data.abilities.con) || 10) + 4);
+      applyConHpRetroactive(conModBeforePrimalChampion, getAbilityMod(data, "con"));
     }
     // Level-dependent feature TEXT (e.g. Второе дыхание's "1к10 + ваш
     // уровень воина") already reads the class's current level live rather
@@ -3746,10 +3766,33 @@ export async function renderSheet(id) {
   // Adds Свирепые атаки's one extra die directly onto a dice expression's
   // count (2к6 -> 3к6), rather than rolling/displaying it separately.
   function addSavageAttacksDie(expr) {
+    return addExtraDice(expr, 1);
+  }
+  function addExtraDice(expr, extra) {
     const m = String(expr).match(/^(\d*)d(\d+)([+-]\s*\d+)?$/i);
     if (!m) return expr;
-    const count = (m[1] ? parseInt(m[1], 10) : 1) + 1;
+    const count = (m[1] ? parseInt(m[1], 10) : 1) + extra;
     return `${count}d${m[2]}${m[3] || ""}`;
+  }
+  // Barbarian's «Жестокая критика»: extra weapon damage dice merged into the
+  // crit roll, same idea as Half-Orc's Свирепые атаки above but scaling with
+  // level (1 die at 9th, 2 at 13th, 3 at 17th) instead of a flat one.
+  function barbarianLevel(data) {
+    const b = (data.classes || []).find((c) => c.id === "barbarian");
+    return b && b.level ? b.level : 0;
+  }
+  function brutalCriticalDice(data) {
+    const lvl = barbarianLevel(data);
+    if (lvl >= 17) return 3;
+    if (lvl >= 13) return 2;
+    if (lvl >= 9) return 1;
+    return 0;
+  }
+  function rageDamageBonus(data) {
+    const lvl = barbarianLevel(data);
+    if (lvl >= 16) return 4;
+    if (lvl >= 9) return 3;
+    return 2;
   }
   // Every dice-formula segment shown to the player must use Cyrillic "к",
   // never Latin "d" -- some formulas are built from whatever the user
@@ -3785,7 +3828,7 @@ export async function renderSheet(id) {
     const second = rollExpr(expr);
     return second.total > first.total ? { picked: second, discarded: first } : { picked: first, discarded: second };
   }
-  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker) {
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker, useRage) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
     if (useVersatile) {
@@ -3793,6 +3836,10 @@ export async function renderSheet(id) {
       if (sides) base = applyVersatileDie(base, sides);
     }
     const isSavage = isCrit && hasSavageAttacks();
+    // Жестокая критика only applies to a melee weapon attack, same
+    // "rangeType" gate Дуэлянт uses above -- a thrown weapon fired at range
+    // doesn't qualify even though it's still the same weapon.
+    const brutalDice = isCrit && a.rangeType !== "ranged" ? brutalCriticalDice(data) : 0;
     const parts = [];
     const breakdown = [];
     let total = 0;
@@ -3800,6 +3847,7 @@ export async function renderSheet(id) {
       let dieOnly = base.expr.replace(/[+-]\s*\d+$/, "");
       if (isCrit) dieOnly = doubleDiceCount(dieOnly);
       if (isSavage) dieOnly = addSavageAttacksDie(dieOnly);
+      if (brutalDice) dieOnly = addExtraDice(dieOnly, brutalDice);
       const { picked: rBase, discarded } = rollBaseExprWithSavageAttacker(dieOnly, useSavageAttacker);
       const abilityMod = getAbilityMod(data, a.ability);
       total += rBase.total + abilityMod;
@@ -3814,6 +3862,7 @@ export async function renderSheet(id) {
     } else {
       let expr = isCrit ? doubleDiceCount(base.expr) : base.expr;
       if (isSavage) expr = addSavageAttacksDie(expr);
+      if (brutalDice) expr = addExtraDice(expr, brutalDice);
       const { picked: rBase, discarded } = rollBaseExprWithSavageAttacker(expr, useSavageAttacker);
       total += rBase.total;
       // formatModifier always signs its number ("+0" for a zero modifier),
@@ -3853,6 +3902,17 @@ export async function renderSheet(id) {
       parts.push(`2 (Дуэлянт)`);
       breakdown.push({ value: 2, label: "боевой стиль: Дуэлянт" });
     }
+    // Ярость's flat damage bonus (+2/+3/+4 by Barbarian level, see
+    // rageDamageBonus below) only applies to a Ближний бой Силовой атаке
+    // while actually raging -- the sheet has no "currently raging" state to
+    // check automatically, so, like Дуэлянт, it's a checkbox the player
+    // ticks themselves in startDamageRoll.
+    if (useRage) {
+      const bonus = rageDamageBonus(data);
+      total += bonus;
+      parts.push(`${bonus} (Ярость)`);
+      breakdown.push({ value: bonus, label: "Ярость" });
+    }
     // Мастер боевых искусств: adding a superiority die spends one from the
     // "Боевое превосходство" card's own pip pool -- checked here (rather
     // than trusting the checkbox alone) so a pool that ran out between
@@ -3883,8 +3943,13 @@ export async function renderSheet(id) {
     const versatileSides = versatileDieSidesForAttack(a);
     const superiorityAvailable = hasBattlemaster() && superiorityDiceAvailable() > 0;
     const savageAttacker = hasFeat(SAVAGE_ATTACKER_FEAT_ID);
-    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !savageAttacker) {
-      doRollAttackDamage(a, false, isCrit, false, false, false, false, false);
+    // Ярость's damage bonus only applies to a Ближний бой Силовой атаке
+    // (see rageDamageBonus above) -- offered whenever the character has any
+    // Barbarian level at all, same "player confirms the table fact" pattern
+    // as Дуэлянт, since the sheet has no "currently raging" flag to check.
+    const rageAvailable = a.rangeType === "melee" && a.ability === "str" && barbarianLevel(data) > 0;
+    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !savageAttacker && !rageAvailable) {
+      doRollAttackDamage(a, false, isCrit, false, false, false, false, false, false);
       return;
     }
     const oneHandedRaw = parseDiceFromText(a.damage);
@@ -3938,6 +4003,14 @@ export async function renderSheet(id) {
       </label>`
           : ""
       }
+      ${
+        rageAvailable
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || savageAttacker ? "6px" : "0"};">
+        <input type="checkbox" data-use-rage />
+        добавить Ярость (+${rageDamageBonus(data)}) — только пока персонаж в состоянии ярости
+      </label>`
+          : ""
+      }
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
         <button data-action="confirm-roll-damage" class="primary">Бросить</button>
       </div>`;
@@ -3949,10 +4022,11 @@ export async function renderSheet(id) {
       const useVersatile = versatileSides ? modal.querySelector("[data-use-versatile]").checked : false;
       const useSuperiority = superiorityAvailable ? modal.querySelector("[data-use-superiority]").checked : false;
       const useSavageAttacker = savageAttacker ? modal.querySelector("[data-use-savage-attacker]").checked : false;
+      const useRage = rageAvailable ? modal.querySelector("[data-use-rage]").checked : false;
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker);
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker, useRage);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
