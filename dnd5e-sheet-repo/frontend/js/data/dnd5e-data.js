@@ -2490,6 +2490,45 @@ export function splitFeatureText(text) {
   return { name: String(text || "").trim(), desc: "" };
 }
 
+// Shared copies of wizard.js's own subclass-feature-text choice parsers, so
+// sheet.js's level-up modal can recognize the very same "владение одним из
+// следующих навыков: ..." / "N навыком(-ами) на выбор" / "выучить N языков
+// на свой выбор" wording at ANY level a subclass grants it (not just level
+// 1, which is all wizard.js ever needed since character creation only ever
+// deals with a level-1 subclass pick). Kept as separate exported copies
+// rather than having wizard.js import these (and delete its own private
+// versions) to avoid touching working, already-tested creation-time code
+// while adding this.
+export const SKILL_CHOICE_COUNT_WORDS = { "одним": 1, "одна": 1, "одно": 1, "двумя": 2, "тремя": 3, "четырьмя": 4, "пятью": 5 };
+export function parseSkillChoiceGrant(desc) {
+  const text = String(desc || "");
+  const m = /владение\s+(одним|одна|одно|двумя)\s+(?:навык(?:ом|ами)\s+)?(?:по\s+вашему\s+выбору\s+)?из\s+(?:следующего\s+списка|следующих\s+навыков)(?:\s+по\s+вашему\s+выбору)?:\s*([^.]+)\./i.exec(text);
+  if (!m) return null;
+  const count = SKILL_CHOICE_COUNT_WORDS[m[1].toLowerCase()] || 1;
+  const optionIds = m[2]
+    .split(/\s*,\s*|\s+или\s+|\s+и\s+/i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((nm) => SKILLS.find((s) => s.label.toLowerCase() === nm.toLowerCase()))
+    .filter(Boolean)
+    .map((s) => s.id);
+  if (!optionIds.length) return null;
+  const expertise = /бонус мастерства удваивается/i.test(text);
+  return { count, optionIds, expertise };
+}
+export function parseFreeSkillChoiceGrant(desc) {
+  const text = String(desc || "");
+  const m = /владение\s+(одним|одна|одно|двумя|тремя|четырьмя|пятью)\s+навык(?:ом|ами|а)\s+на\s+выбор\.?\s*$/i.exec(text.trim());
+  if (!m) return null;
+  return { count: SKILL_CHOICE_COUNT_WORDS[m[1].toLowerCase()] || 1 };
+}
+const LANGUAGE_CHOICE_COUNT_WORDS = { "один": 1, "одно": 1, "два": 2, "две": 2, "три": 3 };
+export function parseLanguageChoiceGrant(desc) {
+  const m = /выучить\s+(\d+|один|одно|два|две|три)\s+язы[кав]+\s+на\s+свой\s+выбор/i.exec(String(desc || ""));
+  if (!m) return 0;
+  return /^\d+$/.test(m[1]) ? Number(m[1]) : LANGUAGE_CHOICE_COUNT_WORDS[m[1].toLowerCase()] || 0;
+}
+
 // Short reference descriptions for the standard PHB equipment packs, shown
 // as a hover tooltip in the equipment-choice step of character creation.
 export const EQUIPMENT_PACK_DESCRIPTIONS = {

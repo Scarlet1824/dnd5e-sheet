@@ -498,6 +498,31 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
 .spell-hover-name:hover .spell-hover-card,
 .spell-hover-name:focus-within .spell-hover-card { display: block; }
 
+/* Same hover-popover idea as .spell-hover-name/.spell-hover-card above, but
+   for a subclass/archetype card in the level-up chooser (and anywhere else
+   a subclass name is offered as a pick) -- its full intro text plus the
+   features it grants at the earliest level it has any, so a player doesn't
+   have to pick blind or scroll away to read what an archetype does. */
+.subclass-hover-name { position: relative; cursor: help; border-bottom: 1px dotted var(--gold-dim); }
+.subclass-hover-card {
+  display: none;
+  position: absolute;
+  z-index: 60;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  width: 360px;
+  max-height: 420px;
+  overflow-y: auto;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(212, 175, 55, 0.15) inset;
+}
+.subclass-hover-name:hover .subclass-hover-card,
+.subclass-hover-name:focus-within .subclass-hover-card { display: block; }
+.subclass-hover-card p { margin: 0 0 6px; }
+.subclass-hover-card p:last-child { margin-bottom: 0; }
+.subclass-hover-card h5 { margin: 8px 0 2px; color: var(--gold-bright); font-size: 0.92rem; }
+.subclass-hover-card h5:first-child { margin-top: 0; }
+
 /* Known spells grouped by circle: a header naming the circle plus its
    slot-tracking circles, then a gold divider line, then that circle's
    spell cards -- repeated per circle, so circles don't run together. */

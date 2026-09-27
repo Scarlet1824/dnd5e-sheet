@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -901,6 +901,117 @@ export async function renderSheet(id) {
       .filter((sf) => sf.name && sf.level === level)
       .map((sf) => ({ name: sf.name, desc: (sf.desc || []).join("\n\n") }));
   }
+  // Generic version of chosenLevel1SubclassSkillGrant()/
+  // chosenLevel1SubclassLanguageGrant() in wizard.js -- those only ever
+  // look at a subclass's LEVEL-1 features, since character creation only
+  // ever deals with a level-1 subclass pick. Levelling up can grant the
+  // same "владение одним из следующих навыков"/"выучить N языков" wording
+  // at any level a subclass has it (Samurai/Cavalier/Rune Knight's
+  // "Дополнительные владения"/"Бонусные владения" at level 3, etc.), so
+  // this scans whatever level is actually being granted right now instead
+  // of hardcoding level 1.
+  function subclassSkillChoiceGrant(cls, subName, level) {
+    for (const f of subclassFeaturesAtLevel(cls, subName, level)) {
+      const listGrant = parseSkillChoiceGrant(f.desc);
+      if (listGrant) return { featureName: f.name, ...listGrant };
+      const freeGrant = parseFreeSkillChoiceGrant(f.desc);
+      if (freeGrant) return { featureName: f.name, ...freeGrant };
+    }
+    return null;
+  }
+  function subclassLanguageChoiceGrant(cls, subName, level) {
+    for (const f of subclassFeaturesAtLevel(cls, subName, level)) {
+      const count = parseLanguageChoiceGrant(f.desc);
+      if (count) return { featureName: f.name, count };
+    }
+    return null;
+  }
+  function resolveSubSkillChoiceState(cls, subName, level) {
+    if (!cls || !subName) return null;
+    const grant = subclassSkillChoiceGrant(cls, subName, level);
+    return grant ? { ...grant, picked: [] } : null;
+  }
+  function resolveSubLanguageChoiceState(cls, subName, level) {
+    if (!cls || !subName) return null;
+    const grant = subclassLanguageChoiceGrant(cls, subName, level);
+    return grant ? { ...grant, picked: Array(grant.count).fill("") } : null;
+  }
+  function subSkillChoicePanelHtml() {
+    const sc = levelUpState.subSkillChoice;
+    const already = new Set(data.proficiencies?.skills || []);
+    if (sc.optionIds) {
+      const options = sc.optionIds.map((id) => SKILLS.find((s) => s.id === id)).filter(Boolean);
+      const inputType = sc.count === 1 ? "radio" : "checkbox";
+      return `
+        <div class="panel" style="margin:10px 0;">
+          <h4 style="margin-top:0;">${escapeHtml(sc.featureName)}: выбор навыка${sc.count > 1 ? ` (${sc.count})` : ""}${sc.expertise ? " — с компетентностью" : ""}</h4>
+          <div class="grid cols-2">
+            ${options
+              .map((s) => {
+                const disabled = already.has(s.id);
+                const checked = sc.picked.includes(s.id);
+                return `<label class="row" style="gap:8px;align-items:center;${disabled ? "opacity:0.5;" : ""}">
+                  <input type="${inputType}" name="level-up-sub-skill" data-level-up-sub-skill value="${s.id}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
+                  <span>${escapeHtml(s.label)}${disabled ? " (уже есть)" : ""}</span>
+                </label>`;
+              })
+              .join("")}
+          </div>
+        </div>`;
+    }
+    // Free choice (any skill not already known) -- one <select> per pick.
+    const pickable = SKILLS.filter((s) => !already.has(s.id));
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${escapeHtml(sc.featureName)}: выбор навыка (${sc.count})</h4>
+        ${Array.from({ length: sc.count })
+          .map(
+            (_, idx) => `
+          <select data-level-up-sub-skill data-level-up-sub-skill-index="${idx}" style="margin-bottom:6px;">
+            <option value="">Выберите навык…</option>
+            ${pickable.map((s) => `<option value="${s.id}" ${sc.picked[idx] === s.id ? "selected" : ""}>${escapeHtml(s.label)}</option>`).join("")}
+          </select>`
+          )
+          .join("")}
+      </div>`;
+  }
+  function subSkillChoiceIncomplete() {
+    const sc = levelUpState.subSkillChoice;
+    return !!(sc && sc.picked.filter(Boolean).length < sc.count);
+  }
+  // Same rendering as wizard.js's own languageSelectOptionsHtml (grouped
+  // Распространённые/Экзотические optgroups, already-known languages left
+  // out) -- kept as a separate copy here for the same reason the choice
+  // parsers above are, rather than importing across view modules.
+  function languageSelectOptionsHtml(picked, exclude) {
+    const excludeSet = new Set(exclude || []);
+    return LANGUAGE_GROUPS.map((g) => {
+      const items = g.items.filter((l) => !excludeSet.has(l));
+      if (!items.length) return "";
+      return `<optgroup label="${escapeHtml(g.label)}">${items.map((l) => `<option value="${escapeHtml(l)}" ${picked === l ? "selected" : ""}>${escapeHtml(l)}</option>`).join("")}</optgroup>`;
+    }).join("");
+  }
+  function subLanguageChoicePanelHtml() {
+    const sc = levelUpState.subLanguageChoice;
+    const alreadyKnown = data.proficiencies?.languages || [];
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${escapeHtml(sc.featureName)}: выбор языка${sc.count > 1 ? ` (${sc.count})` : ""}</h4>
+        ${Array.from({ length: sc.count })
+          .map(
+            (_, idx) => `
+          <select data-level-up-sub-language data-level-up-sub-language-index="${idx}" style="margin-bottom:6px;">
+            <option value="">Выберите язык…</option>
+            ${languageSelectOptionsHtml(sc.picked[idx], alreadyKnown)}
+          </select>`
+          )
+          .join("")}
+      </div>`;
+  }
+  function subLanguageChoiceIncomplete() {
+    const sc = levelUpState.subLanguageChoice;
+    return !!(sc && sc.picked.filter(Boolean).length < sc.count);
+  }
   function refreshLevelUpModal() {
     if (levelUpModalEl) levelUpModalEl.innerHTML = levelUpModalBodyHtml();
   }
@@ -1049,6 +1160,24 @@ export async function renderSheet(id) {
   // pick a subclass card, see its own this-level feature text right below
   // it, and (for the two archetypes with a level-3 sub-choice of their own)
   // the maneuver/spell chooser under that.
+  // Full-description hover card for a subclass/archetype choice -- its
+  // intro plus whatever it grants at the earliest level it has any
+  // features (so a player can read what picking it actually does before
+  // committing, the same way a spell's hover card already works via
+  // spellHoverNameHtml). Generic over any class's subclasses, not just the
+  // ones this file happened to add a bespoke chooser for.
+  function subclassHoverCardHtml(sub) {
+    const levels = (sub.features || []).map((f) => f.level).filter((lvl) => typeof lvl === "number");
+    const firstLevel = levels.length ? Math.min(...levels) : null;
+    const firstFeatures = firstLevel === null ? [] : (sub.features || []).filter((f) => f.level === firstLevel);
+    return `<span class="subclass-hover-name" tabindex="0">${escapeHtml(sub.name)}<span class="subclass-hover-card panel">
+      ${sub.source ? `<p class="muted" style="margin-top:0;">${escapeHtml(sub.source)}</p>` : ""}
+      ${sub.intro ? `<p>${escapeHtml(sub.intro)}</p>` : ""}
+      ${firstFeatures
+        .map((f) => `<h5>${escapeHtml(f.name)}</h5><p>${escapeHtml((f.desc || [])[0] || "")}</p>`)
+        .join("")}
+    </span></span>`;
+  }
   function subclassChoicePanelHtml(cls) {
     const sc = levelUpState.subclassChoice;
     const picked = (cls.subclasses || []).find((s) => s.name === sc.name);
@@ -1061,7 +1190,7 @@ export async function renderSheet(id) {
               (s) => `
             <label class="card selectable ${sc.name === s.name ? "selected" : ""}" style="cursor:pointer;">
               <input type="radio" name="level-up-subclass" data-level-up-subclass="${escapeHtml(s.name)}" ${sc.name === s.name ? "checked" : ""} style="margin-right:6px;" />
-              <strong>${escapeHtml(s.name)}</strong>
+              <strong>${subclassHoverCardHtml(s)}</strong>
             </label>`
             )
             .join("")}
@@ -1168,10 +1297,22 @@ export async function renderSheet(id) {
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
+      ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
+      ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
       ${levelUpState.asi ? asiChooserHtml() : ""}
       <div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px;">
         <button type="button" data-action="close-modal">Отмена</button>
-        <button type="button" class="primary" ${(levelUpState.hpMethod === "roll" && levelUpState.rolledAmount === null) || asiChoiceIncomplete() || subclassChoiceIncomplete(cls) || fightingStyleChoiceIncomplete() || toolChoiceIncomplete() ? "disabled" : ""} data-action="confirm-level-up">Повысить уровень</button>
+        <button type="button" class="primary" ${
+          (levelUpState.hpMethod === "roll" && levelUpState.rolledAmount === null) ||
+          asiChoiceIncomplete() ||
+          subclassChoiceIncomplete(cls) ||
+          fightingStyleChoiceIncomplete() ||
+          toolChoiceIncomplete() ||
+          subSkillChoiceIncomplete() ||
+          subLanguageChoiceIncomplete()
+            ? "disabled"
+            : ""
+        } data-action="confirm-level-up">Повысить уровень</button>
       </div>`;
   }
   function wireLevelUpModal(modal) {
@@ -1194,10 +1335,13 @@ export async function renderSheet(id) {
       levelUpState.rolledAmount = null;
       const cc = levelUpEligibleClasses()[levelUpState.classIndex];
       const ccls = cc && getClass(cc.id);
-      levelUpState.asi = ccls && levelHasAsiChoice(ccls, (cc.level || 1) + 1) ? freshAsiState() : null;
-      levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, (cc.level || 1) + 1) ? freshSubclassChoiceState() : null;
-      levelUpState.fightingStyleChoice = ccls && levelHasFightingStyleChoice(cc, ccls, (cc.level || 1) + 1) ? freshFightingStyleChoiceState() : null;
-      levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, (cc.level || 1) + 1) ? freshToolChoiceState() : null;
+      const newLevel = (cc?.level || 1) + 1;
+      levelUpState.asi = ccls && levelHasAsiChoice(ccls, newLevel) ? freshAsiState() : null;
+      levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, newLevel) ? freshSubclassChoiceState() : null;
+      levelUpState.fightingStyleChoice = ccls && levelHasFightingStyleChoice(cc, ccls, newLevel) ? freshFightingStyleChoiceState() : null;
+      levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState() : null;
+      levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
+      levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-subclass]", (e, el) => {
@@ -1209,10 +1353,29 @@ export async function renderSheet(id) {
       const cls = c && getClass(c.id);
       const newLevel = (c.level || 1) + 1;
       levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState() : null;
+      levelUpState.subSkillChoice = resolveSubSkillChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
+      levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-tool-choice]", (e, el) => {
       levelUpState.toolChoice.name = el.value;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-sub-skill]", (e, el) => {
+      const sc = levelUpState.subSkillChoice;
+      const v = el.value;
+      if (sc.count === 1) {
+        sc.picked = v ? [v] : [];
+      } else if (el.checked) {
+        if (!sc.picked.includes(v) && sc.picked.length < sc.count) sc.picked.push(v);
+      } else {
+        sc.picked = sc.picked.filter((id) => id !== v);
+      }
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-sub-language]", (e, el) => {
+      const idx = Number(el.dataset.levelUpSubLanguageIndex);
+      levelUpState.subLanguageChoice.picked[idx] = el.value;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-fighting-style]", (e, el) => {
@@ -1476,6 +1639,18 @@ export async function renderSheet(id) {
     if (levelUpState.toolChoice && levelUpState.toolChoice.name) {
       if (!data.proficiencies.tools.includes(levelUpState.toolChoice.name)) data.proficiencies.tools.push(levelUpState.toolChoice.name);
     }
+    if (levelUpState.subSkillChoice) {
+      const sc = levelUpState.subSkillChoice;
+      sc.picked.filter(Boolean).forEach((id) => {
+        if (!data.proficiencies.skills.includes(id)) data.proficiencies.skills.push(id);
+        if (sc.expertise && !data.proficiencies.expertise.includes(id)) data.proficiencies.expertise.push(id);
+      });
+    }
+    if (levelUpState.subLanguageChoice) {
+      levelUpState.subLanguageChoice.picked.filter(Boolean).forEach((lang) => {
+        if (!data.proficiencies.languages.includes(lang)) data.proficiencies.languages.push(lang);
+      });
+    }
     doSave();
     render();
   }
@@ -1487,14 +1662,17 @@ export async function renderSheet(id) {
     }
     const c = classes[0];
     const cls = c && getClass(c.id);
+    const newLevel = (c?.level || 1) + 1;
     levelUpState = {
       classIndex: 0,
       hpMethod: "average",
       rolledAmount: null,
-      asi: cls && levelHasAsiChoice(cls, (c.level || 1) + 1) ? freshAsiState() : null,
-      subclassChoice: cls && levelHasSubclassChoice(c, cls, (c.level || 1) + 1) ? freshSubclassChoiceState() : null,
-      fightingStyleChoice: cls && levelHasFightingStyleChoice(c, cls, (c.level || 1) + 1) ? freshFightingStyleChoiceState() : null,
-      toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, (c.level || 1) + 1) ? freshToolChoiceState() : null,
+      asi: cls && levelHasAsiChoice(cls, newLevel) ? freshAsiState() : null,
+      subclassChoice: cls && levelHasSubclassChoice(c, cls, newLevel) ? freshSubclassChoiceState() : null,
+      fightingStyleChoice: cls && levelHasFightingStyleChoice(c, cls, newLevel) ? freshFightingStyleChoiceState() : null,
+      toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState() : null,
+      subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
+      subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
     };
     levelUpModalEl = openModal(levelUpModalBodyHtml());
     wireLevelUpModal(levelUpModalEl);
@@ -2929,7 +3107,7 @@ export async function renderSheet(id) {
           <select data-spell-level-filter style="flex:none;width:auto;">
             <option value="all" ${spellLevelFilter === "all" ? "selected" : ""}>Все уровни</option>
             <option value="0" ${spellLevelFilter === "0" ? "selected" : ""}>Заговоры</option>
-            <option value="1" ${spellLevelFilter === "1" ? "selected" : ""}>1-й круг</option>
+            ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((lvl) => `<option value="${lvl}" ${spellLevelFilter === String(lvl) ? "selected" : ""}>${lvl}-й круг</option>`).join("")}
           </select>
         </div>
         ${
