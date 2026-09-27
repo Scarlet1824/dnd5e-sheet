@@ -1,4 +1,4 @@
-import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal } from "../dom.js";
+import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
@@ -813,7 +813,7 @@ export async function renderSheet(id) {
   // class's OWN features[level] slot text (never a subclass's own NAME,
   // which is where wording like "Путь открытой ладони" actually lives), and
   // Варвар is the only class whose slot text starts with that word.
-  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь\b|традиция/i;
+  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь\b|традиция|клятва|колледж/i;
   // "Умение архетипа" (Воин 7-й/10-й уровень) is a placeholder marker in
   // cls.features -- the ACTUAL feature at that level comes from whichever
   // subclass the character already picked (see subclassFeaturesAtLevel()),
@@ -886,6 +886,111 @@ export async function renderSheet(id) {
   function spellbookChoiceIncomplete() {
     const sc = levelUpState.spellbookChoice;
     return !!(sc && sc.spellIds.length < SPELLBOOK_GROWTH_PER_LEVEL);
+  }
+  // "Known spells" casters (Бард/Следопыт today -- spellcasting.type ===
+  // "known", i.e. a fixed number of spells is chosen once and stays known
+  // until swapped out, unlike Волшебник's ever-growing book or Жрец's
+  // free daily prepare) learn a specific number of NEW spells at specific
+  // levels, per the class's own "Известные заклинания" table column -- these
+  // tables encode exactly that column so the level-up modal can offer the
+  // right number of picks (often 1, sometimes 2) instead of a fixed 2 like
+  // the spellbook mechanic above. Values are the TOTAL known count effective
+  // AT that level (every level 1-20 is listed so no threshold lookup is
+  // needed); the picker's count is just the difference from the level below.
+  const KNOWN_SPELLS_BY_LEVEL = {
+    bard: { 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 10: 14, 11: 15, 12: 15, 13: 16, 14: 18, 15: 19, 16: 19, 17: 20, 18: 22, 19: 22, 20: 22 },
+    ranger: { 1: 0, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 5, 8: 5, 9: 6, 10: 6, 11: 7, 12: 7, 13: 8, 14: 8, 15: 9, 16: 9, 17: 10, 18: 10, 19: 11, 20: 11 },
+  };
+  // Same idea, but for CANTRIPS known -- only Бард grows this count post-1st
+  // level today (Following's cantrips are fixed, Колдун/Чародей don't have
+  // their own level-up support yet either).
+  const KNOWN_CANTRIPS_BY_LEVEL = {
+    bard: { 1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4, 19: 4, 20: 4 },
+  };
+  // Следопыт is a half-caster with its own (slower) max-circle progression --
+  // distinct from maxSpellCircleForLevel()'s full-caster formula used above
+  // for Волшебник/Бард.
+  const RANGER_MAX_CIRCLE_BY_LEVEL = { 1: 0, 2: 1, 3: 1, 4: 1, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4, 17: 5, 18: 5, 19: 5, 20: 5 };
+  function maxKnownSpellCircleForLevel(list, level) {
+    if (list === "ranger") return RANGER_MAX_CIRCLE_BY_LEVEL[level] || 0;
+    return maxSpellCircleForLevel(level);
+  }
+  function knownSpellGrowthCount(cls, newLevel) {
+    const table = cls && cls.spellcasting && KNOWN_SPELLS_BY_LEVEL[cls.spellcasting.list];
+    if (!table) return 0;
+    return Math.max(0, (table[newLevel] || 0) - (table[newLevel - 1] || 0));
+  }
+  function knownCantripGrowthCount(cls, newLevel) {
+    const table = cls && cls.spellcasting && KNOWN_CANTRIPS_BY_LEVEL[cls.spellcasting.list];
+    if (!table) return 0;
+    return Math.max(0, (table[newLevel] || 0) - (table[newLevel - 1] || 0));
+  }
+  function freshKnownSpellChoiceState() {
+    return { spellIds: [] };
+  }
+  function freshKnownCantripChoiceState() {
+    return { cantripIds: [] };
+  }
+  function knownSpellChoicePanelHtml(cls, newLevel) {
+    const sc = levelUpState.knownSpellChoice;
+    const need = knownSpellGrowthCount(cls, newLevel);
+    const maxCircle = maxKnownSpellCircleForLevel(cls.spellcasting.list, newLevel);
+    const alreadyKnown = new Set([
+      ...((data.spellcasting && data.spellcasting.cantrips) || []),
+      ...((data.spellcasting && data.spellcasting.known) || []),
+      ...((data.spellcasting && data.spellcasting.prepared) || []),
+    ]);
+    const options = SPELLS.filter(
+      (s) => s.level >= 1 && s.level <= maxCircle && s.classes.includes(cls.spellcasting.list) && !alreadyKnown.has(s.id)
+    ).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Новые известные заклинания (${sc.spellIds.length}/${need})</h4>
+        <p class="muted" style="font-size:0.82rem;">На этом уровне становится известно ${need} нов${need === 1 ? "ое заклинание" : "ых заклинания"} ${maxCircle}-го круга или ниже.</p>
+        <div class="grid cols-2">
+          ${options
+            .map(
+              (s) => `
+            <label class="row" style="gap:6px;">
+              <input type="checkbox" data-level-up-known-spell="${s.id}" ${sc.spellIds.includes(s.id) ? "checked" : ""}
+                ${!sc.spellIds.includes(s.id) && sc.spellIds.length >= need ? "disabled" : ""} />
+              ${spellHoverNameHtml(s)}
+            </label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+  function knownSpellChoiceIncomplete(cls, newLevel) {
+    const sc = levelUpState.knownSpellChoice;
+    return !!(sc && sc.spellIds.length < knownSpellGrowthCount(cls, newLevel));
+  }
+  function knownCantripChoicePanelHtml(cls, newLevel) {
+    const sc = levelUpState.knownCantripChoice;
+    const need = knownCantripGrowthCount(cls, newLevel);
+    const alreadyKnown = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
+    const options = SPELLS.filter((s) => s.level === 0 && s.classes.includes(cls.spellcasting.list) && !alreadyKnown.has(s.id))
+      .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Новые заговоры (${sc.cantripIds.length}/${need})</h4>
+        <div class="grid cols-2">
+          ${options
+            .map(
+              (s) => `
+            <label class="row" style="gap:6px;">
+              <input type="checkbox" data-level-up-known-cantrip="${s.id}" ${sc.cantripIds.includes(s.id) ? "checked" : ""}
+                ${!sc.cantripIds.includes(s.id) && sc.cantripIds.length >= need ? "disabled" : ""} />
+              ${spellHoverNameHtml(s)}
+            </label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+  function knownCantripChoiceIncomplete(cls, newLevel) {
+    const sc = levelUpState.knownCantripChoice;
+    return !!(sc && sc.cantripIds.length < knownCantripGrowthCount(cls, newLevel));
   }
   // Champion's "Дополнительный боевой стиль" (10th level: pick a SECOND
   // fighting style) is, in the data, just another subclass feature card
@@ -1249,7 +1354,7 @@ export async function renderSheet(id) {
     const picked = (cls.subclasses || []).find((s) => s.name === sc.name);
     let html = `
       <div class="panel" style="margin:10px 0;">
-        <h4 style="margin-top:0;">Боевой архетип</h4>
+        <h4 style="margin-top:0;">Подкласс</h4>
         <div class="grid cols-2">
           ${cls.subclasses
             .map(
@@ -1368,6 +1473,8 @@ export async function renderSheet(id) {
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
       ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
       ${levelUpState.spellbookChoice ? spellbookChoicePanelHtml(cls, newLevel) : ""}
+      ${levelUpState.knownCantripChoice ? knownCantripChoicePanelHtml(cls, newLevel) : ""}
+      ${levelUpState.knownSpellChoice ? knownSpellChoicePanelHtml(cls, newLevel) : ""}
       ${levelUpState.asi ? asiChooserHtml() : ""}
       <div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px;">
         <button type="button" data-action="close-modal">Отмена</button>
@@ -1379,13 +1486,16 @@ export async function renderSheet(id) {
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
           subLanguageChoiceIncomplete() ||
-          spellbookChoiceIncomplete()
+          spellbookChoiceIncomplete() ||
+          knownSpellChoiceIncomplete(cls, newLevel) ||
+          knownCantripChoiceIncomplete(cls, newLevel)
             ? "disabled"
             : ""
         } data-action="confirm-level-up">Повысить уровень</button>
       </div>`;
   }
   function wireLevelUpModal(modal) {
+    wireHoverCardPortal(modal);
     on(modal, "click", "[data-action=close-modal]", closeModal);
     on(modal, "click", "[data-action=level-up-roll-hp]", () => {
       const c = levelUpEligibleClasses()[levelUpState.classIndex];
@@ -1413,6 +1523,8 @@ export async function renderSheet(id) {
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.spellbookChoice = ccls && levelHasSpellbookGrowth(ccls, newLevel) ? freshSpellbookChoiceState() : null;
+      levelUpState.knownSpellChoice = ccls && knownSpellGrowthCount(ccls, newLevel) > 0 ? freshKnownSpellChoiceState() : null;
+      levelUpState.knownCantripChoice = ccls && knownCantripGrowthCount(ccls, newLevel) > 0 ? freshKnownCantripChoiceState() : null;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-subclass]", (e, el) => {
@@ -1479,6 +1591,20 @@ export async function renderSheet(id) {
       const sc = levelUpState.spellbookChoice;
       if (el.checked) { if (!sc.spellIds.includes(id)) sc.spellIds.push(id); }
       else sc.spellIds = sc.spellIds.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-known-spell]", (e, el) => {
+      const id = el.dataset.levelUpKnownSpell;
+      const sc = levelUpState.knownSpellChoice;
+      if (el.checked) { if (!sc.spellIds.includes(id)) sc.spellIds.push(id); }
+      else sc.spellIds = sc.spellIds.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-known-cantrip]", (e, el) => {
+      const id = el.dataset.levelUpKnownCantrip;
+      const sc = levelUpState.knownCantripChoice;
+      if (el.checked) { if (!sc.cantripIds.includes(id)) sc.cantripIds.push(id); }
+      else sc.cantripIds = sc.cantripIds.filter((x) => x !== id);
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-asi-mode]", (e, el) => {
@@ -1749,6 +1875,20 @@ export async function renderSheet(id) {
         if (!data.spellcasting.known.includes(id)) data.spellcasting.known.push(id);
       });
     }
+    if (levelUpState.knownSpellChoice) {
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!data.spellcasting.known) data.spellcasting.known = [];
+      levelUpState.knownSpellChoice.spellIds.forEach((id) => {
+        if (!data.spellcasting.known.includes(id)) data.spellcasting.known.push(id);
+      });
+    }
+    if (levelUpState.knownCantripChoice) {
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+      levelUpState.knownCantripChoice.cantripIds.forEach((id) => {
+        if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
+      });
+    }
     doSave();
     render();
   }
@@ -1772,8 +1912,10 @@ export async function renderSheet(id) {
       subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
       subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
       spellbookChoice: cls && levelHasSpellbookGrowth(cls, newLevel) ? freshSpellbookChoiceState() : null,
+      knownSpellChoice: cls && knownSpellGrowthCount(cls, newLevel) > 0 ? freshKnownSpellChoiceState() : null,
+      knownCantripChoice: cls && knownCantripGrowthCount(cls, newLevel) > 0 ? freshKnownCantripChoiceState() : null,
     };
-    levelUpModalEl = openModal(levelUpModalBodyHtml());
+    levelUpModalEl = openModal(levelUpModalBodyHtml(), { wide: true });
     wireLevelUpModal(levelUpModalEl);
   }
 

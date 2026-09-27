@@ -463,12 +463,16 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
   display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px;
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
 }
-.spell-card-prop { display: flex; flex-direction: column; gap: 1px; font-size: 0.85rem; }
+/* min-width:0 overrides the grid item's default auto min-width, which
+   otherwise lets a long unbroken value (a full class list, a long duration
+   string) push the card wider than its border instead of wrapping. */
+.spell-card-prop { display: flex; flex-direction: column; gap: 1px; font-size: 0.85rem; min-width: 0; overflow-wrap: break-word; }
 .spell-card-prop .prop-label { font-size: 0.96rem; letter-spacing: 0.02em; text-transform: uppercase; color: var(--gold-dim); }
 .spell-card-classes { grid-column: 1 / -1; }
 /* Fills the rest of the fixed-height card; past roughly the first ~400
    characters the text scrolls inside this box instead of growing the card. */
-.spell-card-desc { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.9rem; color: var(--text); line-height: 1.4; }
+.spell-card-desc { flex: 1; min-height: 0; overflow-y: auto; overflow-wrap: break-word; font-size: 0.9rem; color: var(--text); line-height: 1.4; }
+.spell-card-title { overflow-wrap: break-word; }
 .spell-card-desc p { margin: 0 0 6px; }
 .spell-card-desc p:last-child { margin-bottom: 0; }
 
@@ -495,8 +499,10 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
   max-height: 420px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(212, 175, 55, 0.15) inset;
 }
-.spell-hover-name:hover .spell-hover-card,
-.spell-hover-name:focus-within .spell-hover-card { display: block; }
+/* No :hover/:focus-within rule here any more -- wireHoverCardPortal()
+   (dom.js) clones this card into a body-level layer on hover/focus instead
+   of showing it in place, so it can render past a scrolling ancestor's
+   (e.g. the level-up modal's) edge. See .hover-card-portal above. */
 
 /* Same hover-popover idea as .spell-hover-name/.spell-hover-card above, but
    for a subclass/archetype card in the level-up chooser (and anywhere else
@@ -516,8 +522,7 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
   overflow-y: auto;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(212, 175, 55, 0.15) inset;
 }
-.subclass-hover-name:hover .subclass-hover-card,
-.subclass-hover-name:focus-within .subclass-hover-card { display: block; }
+/* Portal-driven, same as .spell-hover-card above -- see wireHoverCardPortal(). */
 .subclass-hover-card p { margin: 0 0 6px; }
 .subclass-hover-card p:last-child { margin-bottom: 0; }
 .subclass-hover-card h5 { margin: 8px 0 2px; color: var(--gold-bright); font-size: 0.92rem; }
@@ -551,6 +556,20 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
   display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px;
 }
 .modal { background: var(--bg-panel); border: 1px solid var(--gold); border-radius: var(--radius); padding: 20px; max-width: 460px; width: 100%; max-height: 90vh; overflow-y: auto; }
+/* Wider variant for content-heavy modals (e.g. level-up, whose two-column
+   subclass/spell grids get cramped and clip their hover cards at 460px). */
+.modal.modal-wide { max-width: 760px; }
+/* Hover-card popovers (.spell-hover-card/.subclass-hover-card) are cloned
+   into this fixed-position layer on hover/focus by wireHoverCardPortal()
+   (dom.js) instead of showing in place -- `overflow-y: auto` on `.modal`
+   above clips ANY descendant popover regardless of its own position
+   (fixed/absolute doesn't escape a scrolling ancestor's clip), so a card
+   anchored in the modal's right column had no way to render past the
+   modal's edge. Moving the popover out to a body-level layer sidesteps that
+   entirely; this class only styles it once it's there. */
+.hover-card-portal { position: fixed; z-index: 200; pointer-events: none; }
+.hover-card-portal .spell-hover-card,
+.hover-card-portal .subclass-hover-card { display: block; position: static; margin: 0; }
 
 .roll-log { max-height: 220px; overflow-y: auto; font-size: 0.92rem; }
 .roll-log .entry { border-bottom: 1px dashed var(--border); padding: 6px 0; display: flex; justify-content: space-between; gap: 8px; }
