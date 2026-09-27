@@ -813,7 +813,7 @@ export async function renderSheet(id) {
   // class's OWN features[level] slot text (never a subclass's own NAME,
   // which is where wording like "Путь открытой ладони" actually lives), and
   // Варвар is the only class whose slot text starts with that word.
-  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь\b/i;
+  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь\b|традиция/i;
   // "Умение архетипа" (Воин 7-й/10-й уровень) is a placeholder marker in
   // cls.features -- the ACTUAL feature at that level comes from whichever
   // subclass the character already picked (see subclassFeaturesAtLevel()),
@@ -827,6 +827,65 @@ export async function renderSheet(id) {
   }
   function freshSubclassChoiceState() {
     return { name: "", maneuverIds: [], cantripIds: [], spellIds: [] };
+  }
+  // A spellbook caster (Волшебник today -- "prepared" type with no
+  // preparedFormula, i.e. the character picks which spells go INTO the book
+  // rather than freely preparing off the whole class list like Жрец does)
+  // adds 2 new spells to their book on every level-up from 2nd level on
+  // (PHB, "Spellcasting" table footnote). Gated to the max spell circle the
+  // class table actually grants by that level, using the standard full-caster
+  // progression (circle 1 at level 1, +1 circle every 2 levels, capped at 9).
+  // Scoped to Волшебник specifically (list === "wizard") rather than the
+  // generic "prepared type with no preparedFormula" shape -- Паладин has that
+  // same shape in the data (its own preparedFormula just isn't modeled yet)
+  // but doesn't grow a permanent spellbook the way Волшебник does; it
+  // re-prepares its whole known list each day instead, so forcing a 2-spell
+  // pick on it at every level-up would be wrong.
+  function isSpellbookCaster(cls) {
+    return !!(cls && cls.spellcasting && cls.spellcasting.type === "prepared" && !cls.spellcasting.preparedFormula && cls.spellcasting.list === "wizard");
+  }
+  function maxSpellCircleForLevel(level) {
+    return Math.min(9, Math.ceil(level / 2));
+  }
+  const SPELLBOOK_GROWTH_PER_LEVEL = 2;
+  function levelHasSpellbookGrowth(cls, newLevel) {
+    return isSpellbookCaster(cls) && newLevel >= 2;
+  }
+  function freshSpellbookChoiceState() {
+    return { spellIds: [] };
+  }
+  function spellbookChoicePanelHtml(cls, newLevel) {
+    const sc = levelUpState.spellbookChoice;
+    const maxCircle = maxSpellCircleForLevel(newLevel);
+    const alreadyKnown = new Set([
+      ...((data.spellcasting && data.spellcasting.cantrips) || []),
+      ...((data.spellcasting && data.spellcasting.known) || []),
+      ...((data.spellcasting && data.spellcasting.prepared) || []),
+    ]);
+    const options = SPELLS.filter(
+      (s) => s.level >= 1 && s.level <= maxCircle && s.classes.includes(cls.spellcasting.list) && !alreadyKnown.has(s.id)
+    ).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Новые заклинания в книгу заклинаний (${sc.spellIds.length}/${SPELLBOOK_GROWTH_PER_LEVEL})</h4>
+        <p class="muted" style="font-size:0.82rem;">На этом уровне книга заклинаний пополняется на ${SPELLBOOK_GROWTH_PER_LEVEL} заклинания ${maxCircle}-го круга или ниже.</p>
+        <div class="grid cols-2">
+          ${options
+            .map(
+              (s) => `
+            <label class="row" style="gap:6px;">
+              <input type="checkbox" data-level-up-book-spell="${s.id}" ${sc.spellIds.includes(s.id) ? "checked" : ""}
+                ${!sc.spellIds.includes(s.id) && sc.spellIds.length >= SPELLBOOK_GROWTH_PER_LEVEL ? "disabled" : ""} />
+              ${spellHoverNameHtml(s)}
+            </label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+  function spellbookChoiceIncomplete() {
+    const sc = levelUpState.spellbookChoice;
+    return !!(sc && sc.spellIds.length < SPELLBOOK_GROWTH_PER_LEVEL);
   }
   // Champion's "Дополнительный боевой стиль" (10th level: pick a SECOND
   // fighting style) is, in the data, just another subclass feature card
@@ -1297,7 +1356,9 @@ export async function renderSheet(id) {
               : missingSubclassForArchetypeLevel
                 ? `<p class="muted">У этого персонажа ещё не выбран архетип (боевой архетип выбирается на 3-м уровне) — повысьте сначала до 3-го уровня, чтобы выбрать его, тогда умения архетипа появятся и здесь.</p>`
                 : levelHasNoFeaturesByDesign
-                  ? `<p class="muted">На этом уровне класс не получает новых умений.</p>`
+                  ? cls.scalingNotes && cls.scalingNotes[newLevel]
+                    ? `<p class="muted">Новых умений нет, но растут уже имеющиеся: ${escapeHtml(cls.scalingNotes[newLevel])}</p>`
+                    : `<p class="muted">На этом уровне класс не получает новых умений.</p>`
                   : `<p class="muted">Нет данных об умениях класса «${escapeHtml(cls.name)}» на ${newLevel} уровне в базе — добавьте их вручную на вкладке «Умения» после повышения.</p>`
         }
       </div>
@@ -1306,6 +1367,7 @@ export async function renderSheet(id) {
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
       ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
+      ${levelUpState.spellbookChoice ? spellbookChoicePanelHtml(cls, newLevel) : ""}
       ${levelUpState.asi ? asiChooserHtml() : ""}
       <div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px;">
         <button type="button" data-action="close-modal">Отмена</button>
@@ -1316,7 +1378,8 @@ export async function renderSheet(id) {
           fightingStyleChoiceIncomplete() ||
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
-          subLanguageChoiceIncomplete()
+          subLanguageChoiceIncomplete() ||
+          spellbookChoiceIncomplete()
             ? "disabled"
             : ""
         } data-action="confirm-level-up">Повысить уровень</button>
@@ -1349,6 +1412,7 @@ export async function renderSheet(id) {
       levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState() : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
+      levelUpState.spellbookChoice = ccls && levelHasSpellbookGrowth(ccls, newLevel) ? freshSpellbookChoiceState() : null;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-subclass]", (e, el) => {
@@ -1406,6 +1470,13 @@ export async function renderSheet(id) {
     on(modal, "change", "[data-level-up-ek-spell]", (e, el) => {
       const id = el.dataset.levelUpEkSpell;
       const sc = levelUpState.subclassChoice;
+      if (el.checked) { if (!sc.spellIds.includes(id)) sc.spellIds.push(id); }
+      else sc.spellIds = sc.spellIds.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-book-spell]", (e, el) => {
+      const id = el.dataset.levelUpBookSpell;
+      const sc = levelUpState.spellbookChoice;
       if (el.checked) { if (!sc.spellIds.includes(id)) sc.spellIds.push(id); }
       else sc.spellIds = sc.spellIds.filter((x) => x !== id);
       refreshLevelUpModal();
@@ -1671,6 +1742,13 @@ export async function renderSheet(id) {
         if (!data.proficiencies.languages.includes(lang)) data.proficiencies.languages.push(lang);
       });
     }
+    if (levelUpState.spellbookChoice) {
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!data.spellcasting.known) data.spellcasting.known = [];
+      levelUpState.spellbookChoice.spellIds.forEach((id) => {
+        if (!data.spellcasting.known.includes(id)) data.spellcasting.known.push(id);
+      });
+    }
     doSave();
     render();
   }
@@ -1693,6 +1771,7 @@ export async function renderSheet(id) {
       toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState() : null,
       subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
       subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
+      spellbookChoice: cls && levelHasSpellbookGrowth(cls, newLevel) ? freshSpellbookChoiceState() : null,
     };
     levelUpModalEl = openModal(levelUpModalBodyHtml());
     wireLevelUpModal(levelUpModalEl);
@@ -3816,19 +3895,7 @@ export async function renderSheet(id) {
     weaponRolls.forEach((v) => breakdown.push({ value: v, label: "оружие" }));
     savageRolls.forEach((v) => breakdown.push({ value: v, label: "свирепые атаки" }));
   }
-  // «Дикий атакующий» (feat): once per turn, reroll all the weapon's own
-  // damage dice and keep either result -- implemented as "roll the base
-  // dice expression twice, keep the higher total", which is equivalent to
-  // "reroll and choose" without needing a separate confirm step. Only the
-  // base weapon dice are rerolled (not Скрытая атака/особые свойства/etc,
-  // which are each their own roll already), matching the feat's own wording.
-  function rollBaseExprWithSavageAttacker(expr, useSavageAttacker) {
-    const first = rollExpr(expr);
-    if (!useSavageAttacker) return { picked: first, discarded: null };
-    const second = rollExpr(expr);
-    return second.total > first.total ? { picked: second, discarded: first } : { picked: first, discarded: second };
-  }
-  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker, useRage) {
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, priorRoll) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
     if (useVersatile) {
@@ -3848,12 +3915,12 @@ export async function renderSheet(id) {
       if (isCrit) dieOnly = doubleDiceCount(dieOnly);
       if (isSavage) dieOnly = addSavageAttacksDie(dieOnly);
       if (brutalDice) dieOnly = addExtraDice(dieOnly, brutalDice);
-      const { picked: rBase, discarded } = rollBaseExprWithSavageAttacker(dieOnly, useSavageAttacker);
+      const rBase = rollExpr(dieOnly);
       const abilityMod = getAbilityMod(data, a.ability);
       total += rBase.total + abilityMod;
       // Just the number, not the ability's name -- the modifier is already
       // implied by this being a damage roll for that attack.
-      parts.push(`${toCyrillicDice(dieOnly)} = ${rBase.rolls.join("+")}${abilityMod ? formatModifier(abilityMod) : ""}${discarded ? ` (дикий атакующий, отброшено: ${discarded.rolls.join("+")})` : ""}`);
+      parts.push(`${toCyrillicDice(dieOnly)} = ${rBase.rolls.join("+")}${abilityMod ? formatModifier(abilityMod) : ""}`);
       pushBaseRollBreakdown(breakdown, rBase.rolls, isSavage);
       if (abilityMod) {
         const abilityInfo = ABILITIES.find((ab) => ab.id === a.ability);
@@ -3863,12 +3930,12 @@ export async function renderSheet(id) {
       let expr = isCrit ? doubleDiceCount(base.expr) : base.expr;
       if (isSavage) expr = addSavageAttacksDie(expr);
       if (brutalDice) expr = addExtraDice(expr, brutalDice);
-      const { picked: rBase, discarded } = rollBaseExprWithSavageAttacker(expr, useSavageAttacker);
+      const rBase = rollExpr(expr);
       total += rBase.total;
       // formatModifier always signs its number ("+0" for a zero modifier),
       // which reads as a bogus "+0" tacked onto the roll when the dice
       // expression had no flat modifier at all -- only show it when nonzero.
-      parts.push(`${toCyrillicDice(isCrit || isSavage ? expr : base.raw)} = ${rBase.rolls.join("+")}${rBase.modifier ? formatModifier(rBase.modifier) : ""}${discarded ? ` (дикий атакующий, отброшено: ${discarded.rolls.join("+")})` : ""}`);
+      parts.push(`${toCyrillicDice(isCrit || isSavage ? expr : base.raw)} = ${rBase.rolls.join("+")}${rBase.modifier ? formatModifier(rBase.modifier) : ""}`);
       pushBaseRollBreakdown(breakdown, rBase.rolls, isSavage);
       if (rBase.modifier) breakdown.push({ value: rBase.modifier, label: "модификатор" });
     }
@@ -3899,7 +3966,7 @@ export async function renderSheet(id) {
     // below rather than applied automatically.
     if (useDuelist) {
       total += 2;
-      parts.push(`2 (Дуэлянт)`);
+      parts.push(`2`);
       breakdown.push({ value: 2, label: "боевой стиль: Дуэлянт" });
     }
     // Ярость's flat damage bonus (+2/+3/+4 by Barbarian level, see
@@ -3910,7 +3977,7 @@ export async function renderSheet(id) {
     if (useRage) {
       const bonus = rageDamageBonus(data);
       total += bonus;
-      parts.push(`${bonus} (Ярость)`);
+      parts.push(`${bonus}`);
       breakdown.push({ value: bonus, label: "Ярость" });
     }
     // Мастер боевых искусств: adding a superiority die spends one from the
@@ -3921,10 +3988,39 @@ export async function renderSheet(id) {
       const sides = superiorityDieSides(data);
       const rSup = rollDice(1, sides)[0];
       total += rSup;
-      parts.push(`к${sides}: [${rSup}] (превосходство)`);
+      parts.push(`к${sides}: [${rSup}]`);
       breakdown.push({ value: rSup, label: "кость превосходства" });
     }
-    showRollResult({ label: `Урон${isCrit ? " (крит!)" : ""}: ${a.name || "атака"}`, detail: parts.join(" + "), total, breakdown });
+    // «Дикий атакующий»: offered AFTER the roll (as a reroll option on the
+    // result itself, see showRollResult's `reroll` param) rather than as a
+    // checkbox before rolling -- the feat lets you see the result first and
+    // then decide whether it's worth rerolling. A reroll re-runs this whole
+    // function again (same bonuses/checkboxes) and keeps whichever total is
+    // higher; priorRoll being set here means this IS that reroll, so it
+    // doesn't offer itself again.
+    let finalTotal = total;
+    let finalDetail = parts.join(" + ");
+    if (priorRoll) {
+      if (priorRoll.total >= total) {
+        finalTotal = priorRoll.total;
+        finalDetail = `${priorRoll.detail} (после переброса «Дикий атакующий» оставлен этот результат, новый бросок дал ${total})`;
+      } else {
+        finalDetail = `${finalDetail} (переброс «Дикий атакующий», было ${priorRoll.total})`;
+      }
+    }
+    const savageAvailable = !priorRoll && a.rangeType !== "ranged" && hasFeat(SAVAGE_ATTACKER_FEAT_ID);
+    showRollResult({
+      label: `Урон${isCrit ? " (крит!)" : ""}: ${a.name || "атака"}`,
+      detail: finalDetail,
+      total: finalTotal,
+      breakdown,
+      reroll: savageAvailable
+        ? {
+            label: "Дикий атакующий: перебросить кости урона",
+            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, { total, detail: parts.join(" + ") }),
+          }
+        : null,
+    });
     if (useSuperiority) render();
   }
   // Both the plain-damage and crit buttons funnel through this: roll right
@@ -3942,14 +4038,13 @@ export async function renderSheet(id) {
     const duelist = a.rangeType === "melee" && hasFightingStyle("Дуэлянт");
     const versatileSides = versatileDieSidesForAttack(a);
     const superiorityAvailable = hasBattlemaster() && superiorityDiceAvailable() > 0;
-    const savageAttacker = hasFeat(SAVAGE_ATTACKER_FEAT_ID);
     // Ярость's damage bonus only applies to a Ближний бой Силовой атаке
     // (see rageDamageBonus above) -- offered whenever the character has any
     // Barbarian level at all, same "player confirms the table fact" pattern
     // as Дуэлянт, since the sheet has no "currently raging" flag to check.
     const rageAvailable = a.rangeType === "melee" && a.ability === "str" && barbarianLevel(data) > 0;
-    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !savageAttacker && !rageAvailable) {
-      doRollAttackDamage(a, false, isCrit, false, false, false, false, false, false);
+    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !rageAvailable) {
+      doRollAttackDamage(a, false, isCrit, false, false, false, false, false);
       return;
     }
     const oneHandedRaw = parseDiceFromText(a.damage);
@@ -3996,16 +4091,8 @@ export async function renderSheet(id) {
           : ""
       }
       ${
-        savageAttacker
-          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable ? "6px" : "0"};">
-        <input type="checkbox" data-use-savage-attacker />
-        добавить черту «Дикий атакующий» — переброс костей урона оружия, взять лучший результат (раз за ход)
-      </label>`
-          : ""
-      }
-      ${
         rageAvailable
-          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || savageAttacker ? "6px" : "0"};">
+          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable ? "6px" : "0"};">
         <input type="checkbox" data-use-rage />
         добавить Ярость (+${rageDamageBonus(data)}) — только пока персонаж в состоянии ярости
       </label>`
@@ -4021,12 +4108,11 @@ export async function renderSheet(id) {
       const useDuelist = duelist ? modal.querySelector("[data-use-duelist]").checked : false;
       const useVersatile = versatileSides ? modal.querySelector("[data-use-versatile]").checked : false;
       const useSuperiority = superiorityAvailable ? modal.querySelector("[data-use-superiority]").checked : false;
-      const useSavageAttacker = savageAttacker ? modal.querySelector("[data-use-savage-attacker]").checked : false;
       const useRage = rageAvailable ? modal.querySelector("[data-use-rage]").checked : false;
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useSavageAttacker, useRage);
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {

@@ -18,7 +18,16 @@ export function d20VectorSvg(size, extraClass = "") {
 // main result. Only damage rolls build this today (see doRollAttackDamage in
 // sheet.js); anything that doesn't pass it just gets the plain result as
 // before.
-export function showRollResult({ label, detail, total, isCrit, isFumble, breakdown }) {
+// `reroll` (optional) is { label, onClick } -- a follow-up choice offered
+// on the result itself, for effects that only make sense to decide about
+// AFTER seeing the roll (e.g. «Дикий атакующий»: "once per turn you may
+// reroll all the weapon's damage dice", which only makes sense to invoke
+// once you've seen whether the first roll was worth rerolling). Clicking
+// it closes this modal and calls onClick(), which is expected to compute
+// and show its own follow-up result (typically by calling showRollResult
+// again) -- this function has no opinion on what a reroll produces, it
+// just offers the button and gets out of the way once clicked.
+export function showRollResult({ label, detail, total, isCrit, isFumble, breakdown, reroll }) {
   pushRollLog({ label, detail, total, isCrit, isFumble, breakdown });
   // Lets any inline roll-log display (e.g. the one on the sheet's main tab)
   // refresh itself in place without needing a full page re-render.
@@ -40,11 +49,18 @@ export function showRollResult({ label, detail, total, isCrit, isFumble, breakdo
     </details>`
         : ""
     }
-    <div class="row" style="justify-content:flex-end;">
+    <div class="row" style="justify-content:${reroll ? "space-between" : "flex-end"};align-items:center;">
+      ${reroll ? `<button data-action="reroll-result">🎲 ${escapeHtml(reroll.label)}</button>` : ""}
       <button data-action="close-modal" class="primary">ОК</button>
     </div>`;
   const modal = openModal(html);
   on(modal, "click", "[data-action=close-modal]", closeModal);
+  if (reroll) {
+    on(modal, "click", "[data-action=reroll-result]", () => {
+      closeModal();
+      reroll.onClick();
+    });
+  }
 }
 
 // A d20-based check/save/attack with advantage/disadvantage buttons.
@@ -89,7 +105,7 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
     if (useDie && superiorityDie.onUse()) {
       const dieRoll = rollDie(superiorityDie.sides);
       total += dieRoll;
-      detail += ` + к${superiorityDie.sides}: [${dieRoll}] (превосходство)`;
+      detail += ` + к${superiorityDie.sides}: [${dieRoll}]`;
     }
     showRollResult({ label, detail, total, isCrit: r.isCrit, isFumble: r.isFumble });
   });
