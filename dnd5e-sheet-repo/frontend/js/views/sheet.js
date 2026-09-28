@@ -506,12 +506,14 @@ export async function renderSheet(id) {
     return `
       <div class="col">
         <label>Раса</label>
-        <select data-action="race-select">
-          <option value="">—</option>
-          ${RACES.map((r) => `<option value="${escapeHtml(r.name)}" ${!custom && data.raceName === r.name ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
-          <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
-        </select>
-        ${custom ? `<input type="text" data-bind="raceName" maxlength="30" value="${escapeHtml(data.raceName || "")}" placeholder="своя раса" style="margin-top:4px;" />` : ""}
+        <div style="display:flex;gap:6px;">
+          <select data-action="race-select" style="${custom ? "flex:0 0 auto;width:auto;" : "flex:1;min-width:0;"}">
+            <option value="">—</option>
+            ${RACES.map((r) => `<option value="${escapeHtml(r.name)}" ${!custom && data.raceName === r.name ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
+            <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
+          </select>
+          ${custom ? `<input type="text" data-bind="raceName" maxlength="30" value="${escapeHtml(data.raceName || "")}" placeholder="своя раса" style="flex:1;min-width:0;" />` : ""}
+        </div>
       </div>`;
   }
   function backgroundFieldHtml() {
@@ -520,12 +522,14 @@ export async function renderSheet(id) {
     return `
       <div class="col">
         <label>Предыстория</label>
-        <select data-action="background-select">
-          <option value="">—</option>
-          ${BACKGROUNDS.map((b) => `<option value="${escapeHtml(b.name)}" ${!custom && data.backgroundName === b.name ? "selected" : ""}>${escapeHtml(b.name)}</option>`).join("")}
-          <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
-        </select>
-        ${custom ? `<input type="text" data-bind="backgroundName" maxlength="30" value="${escapeHtml(data.backgroundName || "")}" placeholder="своя предыстория" style="margin-top:4px;" />` : ""}
+        <div style="display:flex;gap:6px;">
+          <select data-action="background-select" style="${custom ? "flex:0 0 auto;width:auto;" : "flex:1;min-width:0;"}">
+            <option value="">—</option>
+            ${BACKGROUNDS.map((b) => `<option value="${escapeHtml(b.name)}" ${!custom && data.backgroundName === b.name ? "selected" : ""}>${escapeHtml(b.name)}</option>`).join("")}
+            <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
+          </select>
+          ${custom ? `<input type="text" data-bind="backgroundName" maxlength="30" value="${escapeHtml(data.backgroundName || "")}" placeholder="своя предыстория" style="flex:1;min-width:0;" />` : ""}
+        </div>
       </div>`;
   }
   function headerBlock() {
