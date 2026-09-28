@@ -534,6 +534,23 @@ export async function renderSheet(id) {
   function ensureHitDice() {
     if (!data.hitDice) data.hitDice = { die: 8, total: 1, current: 1 };
   }
+  // Keeps the shared Hit Dice pool's total in step with total character
+  // level (PHB: you gain a Hit Die every time you gain a level, whichever
+  // class it's in), instead of `total` staying frozen at whatever it was
+  // set to at character creation. Called with the level BEFORE whatever
+  // change (level-up, adding/removing a class, editing a level number by
+  // hand) just happened, so it can tell growth from shrinkage: growth also
+  // bumps `current` by the same amount (a newly-gained die starts
+  // available, same as hp.current growing alongside hp.max on level-up);
+  // shrinkage just clamps `current` down to the new total instead of
+  // fabricating dice back.
+  function syncHitDiceTotalToLevel(beforeLevel) {
+    ensureHitDice();
+    const afterLevel = totalLevel(data);
+    const gained = Math.max(0, afterLevel - beforeLevel);
+    data.hitDice.total = afterLevel;
+    data.hitDice.current = Math.max(0, Math.min(afterLevel, (Number(data.hitDice.current) || 0) + gained));
+  }
   function hitDiceInfo() {
     ensureHitDice();
     return {
@@ -1920,8 +1937,10 @@ export async function renderSheet(id) {
     const conMod = getAbilityMod(data, "con");
     const avg = levelUpAverageHp(cls);
     const hpGain = Math.max(1, (levelUpState.hpMethod === "roll" ? levelUpState.rolledAmount ?? avg : avg) + conMod);
+    const levelBefore = totalLevel(data);
     const newLevel = (c.level || 1) + 1;
     c.level = newLevel;
+    syncHitDiceTotalToLevel(levelBefore);
     data.hp.max = (Number(data.hp.max) || 0) + hpGain;
     data.hp.current = (Number(data.hp.current) || 0) + hpGain;
     if (hasToughFeat()) {
@@ -2122,7 +2141,7 @@ export async function renderSheet(id) {
     return `
       <div>
         <table class="sheet-table">
-          <thead><tr><th style="width:170px;">Класс</th><th style="width:92px;">Уровень</th><th style="width:100px;">Подкласс</th><th style="width:110px;">Опыт (ОП)</th></tr></thead>
+          <thead><tr><th style="width:170px;">Класс</th><th style="width:92px;">Уровень</th><th style="width:100px;">Подкласс</th><th style="width:110px;">Опыт (ОП)</th><th style="width:34px;"></th></tr></thead>
           <tbody>
             ${
               classes.length
@@ -2153,10 +2172,11 @@ export async function renderSheet(id) {
                 <td><input type="number" min="1" max="20" data-class-field="level" data-class-index="${i}" value="${c.level || 1}" /></td>
                 <td>${subclassField}</td>
                 <td>${i === 0 ? `<input type="number" min="0" data-bind="xp" value="${data.xp ?? 0}" />` : ""}</td>
+                <td><button type="button" class="small danger" data-action="remove-class" data-index="${i}" title="Удалить класс">✕</button></td>
               </tr>`;
                     })
                     .join("")
-                : `<tr><td colspan="3" class="muted">Класс пока не выбран.</td><td><input type="number" min="0" data-bind="xp" value="${data.xp ?? 0}" /></td></tr>`
+                : `<tr><td colspan="3" class="muted">Класс пока не выбран.</td><td><input type="number" min="0" data-bind="xp" value="${data.xp ?? 0}" /></td><td></td></tr>`
             }
           </tbody>
         </table>
@@ -4263,12 +4283,16 @@ export async function renderSheet(id) {
 
   // classes
   on(app, "click", "[data-action=add-class]", () => {
+    const levelBefore = totalLevel(data);
     data.classes.push({ id: "", name: "", level: 1, subclass: "" });
+    syncHitDiceTotalToLevel(levelBefore);
     doSave();
     render();
   });
   on(app, "click", "[data-action=remove-class]", (e, el) => {
+    const levelBefore = totalLevel(data);
     data.classes.splice(Number(el.dataset.index), 1);
+    syncHitDiceTotalToLevel(levelBefore);
     doSave();
     render();
   });
@@ -4282,6 +4306,7 @@ export async function renderSheet(id) {
     // is still fine -- but skip the dropdown case here entirely so the two
     // listeners don't fight over the same field on the same event.
     if (field === "subclass" && el.tagName === "SELECT") return;
+    const levelBefore = field === "level" ? totalLevel(data) : null;
     let val = el.value;
     if (field === "level") val = Math.max(1, Math.min(20, Number(val) || 1));
     if (field === "id") {
@@ -4289,6 +4314,7 @@ export async function renderSheet(id) {
       data.classes[i].name = cls ? cls.name : "";
     }
     data.classes[i][field] = val;
+    if (field === "level") syncHitDiceTotalToLevel(levelBefore);
     doSave();
     if (field !== "subclass") render();
   });
