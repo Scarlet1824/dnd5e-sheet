@@ -256,7 +256,16 @@ export function armorClass(data) {
   if (armor) {
     let dexBonus = 0;
     if (armor.dexMode === "full") dexBonus = dexMod;
-    else if (armor.dexMode === "capped") dexBonus = Math.min(dexMod, armor.dexCap);
+    else if (armor.dexMode === "capped") {
+      // «Мастер средних доспехов»: "вы можете добавлять к КД 3, а не 2,
+      // если ваша Ловкость 16 или выше" -- only while actually wearing
+      // medium armor (its own прereq is "владение средними доспехами", but
+      // the bonus itself is conditioned on wearing one, not just knowing how).
+      const dexCap = armor.category === "medium" && dexMod >= 3 && (data.feats || []).some((f) => f.id === "medium-armor-master")
+        ? 3
+        : armor.dexCap;
+      dexBonus = Math.min(dexMod, dexCap);
+    }
     base = armor.baseAC + dexBonus;
   } else {
     const bonusAbility = unarmoredDefenseBonusAbility(data);
@@ -274,7 +283,10 @@ export function armorClass(data) {
 
 export function initiativeBonus(data) {
   const alert = (data.feats || []).some((f) => f.id === "alert") ? 5 : 0;
-  return getAbilityMod(data, "dex") + alert;
+  // Плут, Дуэлянт (Swashbuckler) «Лихая удаль»: "Вы добавляете свой
+  // модификатор Харизмы к результату броска инициативы."
+  const rakishAudacity = (data.features || []).some((f) => /^Лихая удаль$/i.test(f.name || "")) ? getAbilityMod(data, "cha") : 0;
+  return getAbilityMod(data, "dex") + alert + rakishAudacity;
 }
 
 export function spellSaveDC(data) {
@@ -287,6 +299,22 @@ export function spellAttackBonus(data) {
   const ability = data.spellcasting?.ability;
   if (ability === null || ability === undefined) return null;
   return proficiencyBonus(data) + getAbilityMod(data, ability);
+}
+
+// Speed-increasing feats/features that add a flat number of feet on top of
+// whatever `data.speed` is set to -- kept as a separate bonus (rather than
+// baked into the editable `data.speed` field itself) the same way ability
+// bonuses stay in their own list instead of being silently folded into
+// `data.abilities`, so the source of each bonus stays visible and the base
+// number the player set at creation is never silently overwritten.
+export function speedBonusSources(data) {
+  const sources = [];
+  if ((data.feats || []).some((f) => f.id === "mobile")) sources.push({ label: "Подвижный", amount: 10 });
+  if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
+  return sources;
+}
+export function totalSpeed(data) {
+  return (Number(data.speed) || 0) + speedBonusSources(data).reduce((s, b) => s + b.amount, 0);
 }
 
 export function abilityLabel(abilityId) {

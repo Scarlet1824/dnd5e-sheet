@@ -6,6 +6,7 @@ import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
   passivePerception, passiveInvestigation, passiveInsight, armorClass, initiativeBonus, spellSaveDC, spellAttackBonus,
+  speedBonusSources, totalSpeed,
 } from "../character.js";
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
@@ -67,6 +68,29 @@ export async function renderSheet(id) {
   let featChosenAbility = ""; // ability chosen for a multi-choice abilityIncrease feat, before "Добавить"
   let featChosenSkills = []; // skills chosen for a skillChoice feat (Одарённый), before "Добавить"
   let featChosenManeuvers = []; // maneuvers chosen for «Воинский адепт», before "Добавить"
+  let featChosenWeapons = []; // weapons chosen for «Мастер оружия», before "Добавить"
+  let featChosenLanguages = []; // languages chosen for «Языковед», before "Добавить"
+  let featChosenElement = "fire"; // damage type chosen for «Стихийный адепт», before "Добавить"
+  // Both «Посвящённый в магию» and «Меткие заклинания» let the player pick a
+  // class (limiting which spell list the rest of the choice comes from) and
+  // one or two cantrips from it; Посвящённый в магию also adds one 1st-level
+  // spell. Shared state since a character only ever has one of these
+  // pending at once (the feat picker only shows one feat's own choice UI at
+  // a time already).
+  const FEAT_SPELL_CLASS_OPTIONS = [
+    { id: "bard", label: "Бард" }, { id: "cleric", label: "Жрец" }, { id: "druid", label: "Друид" },
+    { id: "sorcerer", label: "Чародей" }, { id: "warlock", label: "Колдун" }, { id: "wizard", label: "Волшебник" },
+  ];
+  let featChosenSpellClass = "wizard";
+  let featChosenCantrips = [];
+  let featChosenSpell = "";
+  const ELEMENTAL_ADEPT_DAMAGE_TYPES = [
+    { id: "acid", label: "Кислота" },
+    { id: "cold", label: "Холод" },
+    { id: "fire", label: "Огонь" },
+    { id: "lightning", label: "Электричество" },
+    { id: "thunder", label: "Звук" },
+  ];
   let spellSearch = ""; // free-text filter in the spells tab's "add spell" browser
   let spellLevelFilter = "all"; // "all" | "0" | "1" in the spells tab's "add spell" browser
   let spellBrowseOpen = false; // spells tab: whether the "+ Добавить заклинание" browse panel is open
@@ -2161,6 +2185,7 @@ export async function renderSheet(id) {
     if (!Array.isArray(data.proficiencies.skills)) data.proficiencies.skills = [];
     if (!Array.isArray(data.proficiencies.armor)) data.proficiencies.armor = [];
     if (!Array.isArray(data.proficiencies.weapons)) data.proficiencies.weapons = [];
+    if (!Array.isArray(data.proficiencies.tools)) data.proficiencies.tools = [];
     if (!Array.isArray(data.proficiencies.savingThrows)) data.proficiencies.savingThrows = [];
     const savingThrowGrant = SAVE_PROFICIENCY_GRANTS[name];
     if (savingThrowGrant && !data.proficiencies.savingThrows.includes(savingThrowGrant)) {
@@ -2189,6 +2214,9 @@ export async function renderSheet(id) {
       });
       grants.armor.forEach((a) => {
         if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a);
+      });
+      grants.tools.forEach((t) => {
+        if (!data.proficiencies.tools.includes(t)) data.proficiencies.tools.push(t);
       });
     }
   }
@@ -2420,7 +2448,11 @@ export async function renderSheet(id) {
             <div class="grid cols-3 combat-stats">
               <div class="stat-box"><div class="value" data-derived="ac">${armorClass(data)}</div><div class="label">КД</div></div>
               <div class="stat-box" data-action="roll-initiative" style="cursor:pointer;"><div class="value" data-derived="initiative">${formatModifier(initiativeBonus(data))}</div><div class="label">Инициатива</div></div>
-              <div class="stat-box"><input class="value" style="width:100%;text-align:center;background:transparent;border:none;" type="number" data-bind="speed" value="${data.speed}" /><div class="label">Скорость, фт</div></div>
+              <div class="stat-box"><input class="value" style="width:100%;text-align:center;background:transparent;border:none;" type="number" data-bind="speed" value="${data.speed}" /><div class="label">Скорость, фт</div>${
+                speedBonusSources(data).length
+                  ? `<div class="muted" style="font-size:0.68rem;" title="${escapeHtml(speedBonusSources(data).map((b) => `+${b.amount} (${b.label})`).join(", "))}">Итого: ${totalSpeed(data)}</div>`
+                  : ""
+              }</div>
             </div>
             <div class="grid" style="grid-template-columns: 3fr 1fr; gap:10px; margin-top:8px;">
               <div class="col">
@@ -2937,7 +2969,11 @@ export async function renderSheet(id) {
       return { max: Math.max(0, base + mod), recharge: rechargeOf(text) };
     }
     // "...модификатору Мудрости... минимум 1 раз" / "минимум один"
-    const modMatch = text.match(/модификатор[а-я]*\s+(Силы|Ловкости|Телосложения|Интеллекта|Мудрости|Харизмы)[^.]{0,60}?минимум\s+(\d+|один|одна|одно|два|три|четыре|пять)/i);
+    // "модификатору вашей Мудрости" (Сыщик «Безошибочный взгляд») has a
+    // possessive word between "модификатор..." and the ability name that
+    // "равн[а-я]* ... модификатор Х" phrasing elsewhere doesn't -- optional
+    // so it still matches text without it.
+    const modMatch = text.match(/модификатор[а-я]*\s+(?:ваш(?:ей|его)?|сво(?:ей|его))?\s*(Силы|Ловкости|Телосложения|Интеллекта|Мудрости|Харизмы)[^.]{0,60}?минимум\s+(\d+|один|одна|одно|два|три|четыре|пять)/i);
     if (modMatch) {
       const abilityId = USES_ABILITY_WORDS[modMatch[1].toLowerCase()];
       const min = ruNumberToInt(modMatch[2]);
@@ -3037,6 +3073,39 @@ export async function renderSheet(id) {
   // correct after a level-up with no extra bookkeeping (see applyLevelUp
   // above), the same way Ярость's use count already does for level.
   const SECOND_WIND_FEATURE_NAME = /^Второе дыхание/i;
+  // Клинок души «Псионическая сила»'s own die grows with Rogue level (к6 at
+  // 3rd, к8 at 5th, к10 at 11th, к12 at 17th) -- same idea as
+  // SECOND_WIND_FEATURE_NAME's level-dependent bonus above, just a die SIZE
+  // instead of a flat add-on, so it's substituted into both the roll button
+  // (see the noRollButton/dice override in the feature-card render loop)
+  // and the actual roll (below) instead of relying on the static "к6" baked
+  // into the card's stored desc text.
+  const PSIONIC_POWER_FEATURE_NAME = /^Псионическая сила$/i;
+  function rogueLevel(data) {
+    const r = (data.classes || []).find((c) => c.id === "rogue");
+    return r && r.level ? r.level : 0;
+  }
+  // Фантом «Могильные вопли»: "половина костей «Скрытой атаки» на вашем
+  // уровне (с округлением в большую сторону)" -- no literal "Nк6" anywhere
+  // in the text for featureDiceInfo's generic dice-in-text scan to find, so
+  // this computes it straight from the same sneak-attack-dice formula
+  // sneakAttackDice() already uses.
+  const GRAVE_MIGHT_FEATURE_NAME = /^Могильные вопли$/i;
+  function graveyardShriekDice() {
+    const sneak = sneakAttackDice();
+    if (!sneak) return null;
+    const sneakCount = Number(/^(\d+)/.exec(sneak.raw)?.[1] || 0);
+    if (!sneakCount) return null;
+    const count = Math.max(1, Math.ceil(sneakCount / 2));
+    return { expr: `${count}d6`, raw: `${count}к6` };
+  }
+  function psionicDieSides(data) {
+    const lvl = rogueLevel(data);
+    if (lvl >= 17) return 12;
+    if (lvl >= 11) return 10;
+    if (lvl >= 5) return 8;
+    return 6;
+  }
   function fighterLevel(data) {
     const f = (data.classes || []).find((c) => c.id === "fighter");
     return f && f.level ? f.level : 0;
@@ -3163,6 +3232,11 @@ export async function renderSheet(id) {
     if (GENIE_VESSEL_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "long" };
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
     if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
+    // Клинок души «Псионическая сила»: "количество... равно вашему
+    // удвоенному бонусу мастерства" -- the generic "равно ... бонус
+    // мастерства" parser below only handles a PLAIN bonus, not a doubled
+    // one, so this needs its own branch.
+    if (PSIONIC_POWER_FEATURE_NAME.test(f.name || "")) return { max: 2 * proficiencyBonus(data), recharge: "long" };
     return parseUsesFromText(f.desc);
   }
   function featureUsesHtml(f, i) {
@@ -3738,6 +3812,77 @@ export async function renderSheet(id) {
                 : ""
             }
             ${
+              preview.weaponChoice
+                ? `
+              <p class="muted" style="margin:6px 0 2px;">Выберите ${preview.weaponChoice.count} вида оружия:</p>
+              <div class="grid cols-3">
+                ${WEAPONS.filter((w) => w.id !== "custom" && !(data.proficiencies.weapons || []).includes(w.name)).map(
+                  (w) => `
+                  <label style="font-weight:normal;"><input type="checkbox" data-feat-weapon-choice value="${escapeHtml(w.name)}" ${featChosenWeapons.includes(w.name) ? "checked" : ""} /> ${escapeHtml(w.name)}</label>`
+                ).join("")}
+              </div>`
+                : ""
+            }
+            ${
+              preview.languageChoice
+                ? `
+              <p class="muted" style="margin:6px 0 2px;">Выберите ${preview.languageChoice.count} языка(ов):</p>
+              <div class="grid cols-3">
+                ${LANGUAGE_GROUPS.flatMap((g) => g.items).filter((l) => !(data.proficiencies.languages || []).includes(l)).map(
+                  (l) => `
+                  <label style="font-weight:normal;"><input type="checkbox" data-feat-language-choice value="${escapeHtml(l)}" ${featChosenLanguages.includes(l) ? "checked" : ""} /> ${escapeHtml(l)}</label>`
+                ).join("")}
+              </div>`
+                : ""
+            }
+            ${
+              preview.damageTypeChoice
+                ? `
+              <div class="row" style="align-items:center;">
+                <label style="margin-right:8px;">Вид урона:</label>
+                <select data-feat-element-choice>
+                  ${ELEMENTAL_ADEPT_DAMAGE_TYPES.map((d) => `<option value="${d.id}" ${d.id === featChosenElement ? "selected" : ""}>${d.label}</option>`).join("")}
+                </select>
+              </div>`
+                : ""
+            }
+            ${
+              preview.magicInitiateChoice || preview.spellSniperChoice
+                ? (() => {
+                    const cantripCount = preview.magicInitiateChoice ? 2 : 1;
+                    const alreadyKnown = new Set([...((data.spellcasting && data.spellcasting.cantrips) || []), ...((data.spellcasting && data.spellcasting.known) || [])]);
+                    const cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes(featChosenSpellClass) && !alreadyKnown.has(s.id));
+                    const spells1 = SPELLS.filter((s) => s.level === 1 && s.classes.includes(featChosenSpellClass) && !alreadyKnown.has(s.id));
+                    return `
+              <div class="row" style="align-items:center;">
+                <label style="margin-right:8px;">Класс:</label>
+                <select data-feat-spell-class>
+                  ${FEAT_SPELL_CLASS_OPTIONS.map((c) => `<option value="${c.id}" ${c.id === featChosenSpellClass ? "selected" : ""}>${c.label}</option>`).join("")}
+                </select>
+              </div>
+              <p class="muted" style="margin:6px 0 2px;">Выберите ${cantripCount} заговор(а)${preview.spellSniperChoice ? " (требующий броска атаки)" : ""} (${featChosenCantrips.length}/${cantripCount}):</p>
+              <div class="grid cols-2">
+                ${cantrips.map((s) => `
+                <label class="row" style="gap:6px;font-weight:normal;">
+                  <input type="checkbox" data-feat-cantrip-choice value="${s.id}" ${featChosenCantrips.includes(s.id) ? "checked" : ""}
+                    ${!featChosenCantrips.includes(s.id) && featChosenCantrips.length >= cantripCount ? "disabled" : ""} />
+                  ${spellHoverNameHtml(s)}
+                </label>`).join("")}
+              </div>
+              ${
+                preview.magicInitiateChoice
+                  ? `
+              <p class="muted" style="margin:6px 0 2px;">Выберите заклинание 1-го уровня:</p>
+              <select data-feat-spell1-choice>
+                <option value="">—</option>
+                ${spells1.map((s) => `<option value="${s.id}" ${s.id === featChosenSpell ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
+              </select>`
+                  : ""
+              }`;
+                  })()
+                : ""
+            }
+            ${
               preview.id === "martial-adept"
                 ? `
               <p class="muted" style="margin:6px 0 2px;">Выберите 2 приёма (${featChosenManeuvers.length}/2):</p>
@@ -3866,17 +4011,46 @@ export async function renderSheet(id) {
                     // startDamageRoll) -- a standalone "🎲 Бросить 2к8" button
                     // here would just roll the WRONG (always-minimum)
                     // amount and not spend a slot.
-                    /^Божественная кара$/i.test(f.name || "");
-                  const dice = noRollButton ? null : featureDiceInfo(f.desc);
+                    /^Божественная кара$/i.test(f.name || "") ||
+                    // Фантом «Призрачная походка»'s "1к10 урона силовым
+                    // полем" is fall-through damage for ending your turn
+                    // inside a creature/object while phased, not something
+                    // to roll from this card on its own.
+                    /^Призрачная походка$/i.test(f.name || "") ||
+                    // Клинок души «Психические клинки» conjures a weapon,
+                    // not a one-off roll -- best added to the Атаки tab like
+                    // any other weapon (1к6 + характеристика, «фехтовальное,
+                    // метательное»), which already has its own attack/damage/
+                    // crit roll buttons, rather than duplicated here.
+                    /^Психические клинки$/i.test(f.name || "");
+                  const dice = noRollButton
+                    ? null
+                    : PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
+                      ? { expr: `1d${psionicDieSides(data)}`, raw: `1к${psionicDieSides(data)}` }
+                      : GRAVE_MIGHT_FEATURE_NAME.test(f.name || "")
+                        ? graveyardShriekDice()
+                        : featureDiceInfo(f.desc);
                   // «Вор заклинаний»'s own text only says "Сл равна вашей Сл
                   // спасброска заклинания" -- it doesn't restate the 8 +
                   // proficiency + ability formula featureSaveDCInfo's regex
                   // looks for, so that parser correctly finds nothing here.
                   // The DC it's referring to is simply the character's own
                   // spellcasting DC, already computed elsewhere on the sheet.
+                  // Клинок души «Раздирание разума»'s own DC formula reads
+                  // "8 + бонус мастерства + ваш модификатор Ловкости" (Психические
+                  // клинки cast off Ловкость/Харизма/Мудрость), but the save it
+                  // actually FORCES is Мудрости -- two different abilities in
+                  // the same sentence, which featureSaveDCInfo's generic parser
+                  // (built assuming they're always the same ability) can't tell
+                  // apart, so it showed the DC-computing ability as if it were
+                  // the save type. The DC number itself (computed off Ловкости)
+                  // is correct; only the label needs overriding to the save
+                  // that's actually rolled.
                   const dc = /^Вор заклинаний$/i.test(f.name || "")
                     ? (spellSaveDC(data) !== null ? { dc: spellSaveDC(data), abilityId: data.spellcasting?.ability || null } : null)
-                    : featureSaveDCInfo(f.desc);
+                    : /^Раздирание разума$/i.test(f.name || "")
+                      ? (() => { const d = featureSaveDCInfo(f.desc); return d ? { dc: d.dc, abilityId: "wis" } : null; })()
+                      : featureSaveDCInfo(f.desc);
                   // Бездонный патрона's "Щупальце из глубин" is a melee
                   // spell attack -- the generic dice button already covers
                   // its cold-damage roll, this adds the missing attack roll
@@ -4211,8 +4385,10 @@ export async function renderSheet(id) {
         : null,
       blessed: !!data.blessingActive,
       powerAttack: hasFeat(GREAT_WEAPON_MASTER_FEAT_ID) && weaponIsHeavyMelee(a)
-        ? { penalty: 5, label: "-5 к атаке (Мастер большого оружия) — при попадании +10 к урону", onToggle: (used) => { a.useGWM = used; doSave(); } }
-        : null,
+        ? { penalty: 5, label: "-5 к атаке (Мастер большого оружия) — при попадании +10 к урону", onToggle: (used) => { a.usePowerAttack = used; doSave(); } }
+        : hasFeat(SHARPSHOOTER_FEAT_ID) && a.rangeType === "ranged"
+          ? { penalty: 5, label: "-5 к атаке (Меткий стрелок) — при попадании +10 к урону", onToggle: (used) => { a.usePowerAttack = used; doSave(); } }
+          : null,
     });
     const ammoType = ammoTypeForWeapon(a.name);
     if (ammoType) {
@@ -4255,6 +4431,7 @@ export async function renderSheet(id) {
   }
   const SAVAGE_ATTACKER_FEAT_ID = "savage-attacker";
   const GREAT_WEAPON_MASTER_FEAT_ID = "great-weapon-master";
+  const SHARPSHOOTER_FEAT_ID = "sharpshooter";
   // Half-orc's "Свирепые атаки": on a critical hit, one extra weapon damage
   // die (on top of the normal crit doubling) is merged straight into the
   // base weapon die count -- unlike Скрытая атака this is automatic on
@@ -4486,17 +4663,17 @@ export async function renderSheet(id) {
       parts.push(`${bonus}`);
       breakdown.push({ value: bonus, label: "Песнь победы" });
     }
-    // «Мастер большого оружия»: the -5/+10 choice was made back at the
-    // ATTACK roll (see the powerAttack option on openD20RollModal in the
-    // roll-attack handler), which stored it on the attack itself since this
-    // damage roll is a separate step -- consumed (reset to false) here so
-    // it doesn't silently reapply to a later, un-chosen damage roll on the
-    // same attack.
-    if (a.useGWM) {
+    // «Мастер большого оружия»/«Меткий стрелок»: the -5/+10 choice was made
+    // back at the ATTACK roll (see the powerAttack option on
+    // openD20RollModal in the roll-attack handler), which stored it on the
+    // attack itself since this damage roll is a separate step -- consumed
+    // (reset to false) here so it doesn't silently reapply to a later,
+    // un-chosen damage roll on the same attack.
+    if (a.usePowerAttack) {
       total += 10;
       parts.push("10");
-      breakdown.push({ value: 10, label: "Мастер большого оружия" });
-      a.useGWM = false;
+      breakdown.push({ value: 10, label: a.rangeType === "ranged" ? "Меткий стрелок" : "Мастер большого оружия" });
+      a.usePowerAttack = false;
       doSave();
     }
     // Free-form extra dice (see the "Дополнительные кубики к урону" builder
@@ -4798,10 +4975,35 @@ export async function renderSheet(id) {
     featChosenAbility = feat && feat.abilityIncrease ? feat.abilityIncrease.choices[0] : "";
     featChosenSkills = [];
     featChosenManeuvers = [];
+    featChosenWeapons = [];
+    featChosenLanguages = [];
+    featChosenCantrips = [];
+    featChosenSpell = "";
     render();
   });
   on(app, "change", "[data-feat-ability-choice]", (e, el) => {
     featChosenAbility = el.value;
+  });
+  on(app, "change", "[data-feat-element-choice]", (e, el) => {
+    featChosenElement = el.value;
+  });
+  on(app, "change", "[data-feat-spell-class]", (e, el) => {
+    featChosenSpellClass = el.value;
+    featChosenCantrips = [];
+    featChosenSpell = "";
+    render();
+  });
+  on(app, "change", "[data-feat-cantrip-choice]", (e, el) => {
+    const v = el.value;
+    if (el.checked) {
+      if (!featChosenCantrips.includes(v)) featChosenCantrips.push(v);
+    } else {
+      featChosenCantrips = featChosenCantrips.filter((c) => c !== v);
+    }
+    render();
+  });
+  on(app, "change", "[data-feat-spell1-choice]", (e, el) => {
+    featChosenSpell = el.value;
   });
   on(app, "change", "[data-feat-skill-choice]", (e, el) => {
     const v = el.value;
@@ -4809,6 +5011,22 @@ export async function renderSheet(id) {
       if (!featChosenSkills.includes(v)) featChosenSkills.push(v);
     } else {
       featChosenSkills = featChosenSkills.filter((s) => s !== v);
+    }
+  });
+  on(app, "change", "[data-feat-weapon-choice]", (e, el) => {
+    const v = el.value;
+    if (el.checked) {
+      if (!featChosenWeapons.includes(v)) featChosenWeapons.push(v);
+    } else {
+      featChosenWeapons = featChosenWeapons.filter((w) => w !== v);
+    }
+  });
+  on(app, "change", "[data-feat-language-choice]", (e, el) => {
+    const v = el.value;
+    if (el.checked) {
+      if (!featChosenLanguages.includes(v)) featChosenLanguages.push(v);
+    } else {
+      featChosenLanguages = featChosenLanguages.filter((l) => l !== v);
     }
   });
   on(app, "change", "[data-feat-maneuver-choice]", (e, el) => {
@@ -4823,12 +5041,24 @@ export async function renderSheet(id) {
   on(app, "click", "[data-action=add-feat]", () => {
     const feat = FEATS.find((f) => f.id === featPreviewId);
     if (!feat) return;
-    if ((data.feats || []).some((f) => f.id === feat.id)) {
+    if (!feat.repeatable && (data.feats || []).some((f) => f.id === feat.id)) {
       alert("Эта черта уже добавлена.");
       return;
     }
     const conModBefore = getAbilityMod(data, "con");
-    const entry = { id: feat.id, name: feat.name, desc: feat.desc, prereq: feat.prereq || "" };
+    // «Стихийный адепт»: "Вы можете брать это умение несколько раз. Каждый
+    // раз, когда вы это делаете, вы выбираете новый вид урона." -- the only
+    // repeatable feat on file, so its own chosen damage type is folded into
+    // the stored name/desc right away (rather than a separate field) so
+    // each copy reads as its own distinct entry in the Черты list instead
+    // of several identical "Стихийный адепт" rows.
+    const elementLabel = feat.damageTypeChoice ? ELEMENTAL_ADEPT_DAMAGE_TYPES.find((d) => d.id === featChosenElement)?.label : null;
+    const entry = {
+      id: feat.id,
+      name: elementLabel ? `${feat.name} (${elementLabel})` : feat.name,
+      desc: elementLabel ? feat.desc.replace(/^Когда вы получаете это умение, выберите[^.]*\./, `Выбранный вид урона: ${elementLabel}.`) : feat.desc,
+      prereq: feat.prereq || "",
+    };
     // Ability-increasing feats mechanically raise the chosen ability score,
     // tracked in data.abilityBonuses so the "откуда бонус" box can show it.
     if (feat.abilityIncrease) {
@@ -4852,6 +5082,43 @@ export async function renderSheet(id) {
       data.proficiencies.skills = data.proficiencies.skills || [];
       skills.forEach((s) => { if (!data.proficiencies.skills.includes(s)) data.proficiencies.skills.push(s); });
       entry.grantedSkills = skills;
+    }
+    // «Мастер оружия»: proficiency in the chosen weapons.
+    if (feat.weaponChoice) {
+      const weapons = featChosenWeapons.slice(0, feat.weaponChoice.count);
+      data.proficiencies.weapons = data.proficiencies.weapons || [];
+      weapons.forEach((w) => { if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w); });
+      entry.grantedWeapons = weapons;
+    }
+    // «Языковед»: the chosen languages.
+    if (feat.languageChoice) {
+      const languages = featChosenLanguages.slice(0, feat.languageChoice.count);
+      data.proficiencies.languages = data.proficiencies.languages || [];
+      languages.forEach((l) => { if (!data.proficiencies.languages.includes(l)) data.proficiencies.languages.push(l); });
+      entry.grantedLanguages = languages;
+    }
+    // «Посвящённый в магию»/«Меткие заклинания»: the chosen cantrips (and,
+    // for Magic Initiate, one 1st-level spell) go straight onto the
+    // character's known spells like any other -- the app's spellcasting
+    // model is one ability/one list for the whole character rather than
+    // per-source, so if nothing is set yet this fills in a reasonable
+    // starting ability for the chosen class; an existing caster's own
+    // ability is left alone rather than overwritten.
+    if (feat.magicInitiateChoice || feat.spellSniperChoice) {
+      const cantripCount = feat.magicInitiateChoice ? 2 : 1;
+      const cantrips = featChosenCantrips.slice(0, cantripCount);
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+      if (!data.spellcasting.known) data.spellcasting.known = [];
+      if (!data.spellcasting.ability) {
+        data.spellcasting.ability = { bard: "cha", warlock: "cha", sorcerer: "cha", wizard: "int", cleric: "wis", druid: "wis" }[featChosenSpellClass] || "int";
+      }
+      cantrips.forEach((id) => { if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id); });
+      entry.grantedCantrips = cantrips;
+      if (feat.magicInitiateChoice && featChosenSpell) {
+        if (!data.spellcasting.known.includes(featChosenSpell)) data.spellcasting.known.push(featChosenSpell);
+        entry.grantedSpell = featChosenSpell;
+      }
     }
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
@@ -4888,6 +5155,10 @@ export async function renderSheet(id) {
     featChosenAbility = "";
     featChosenSkills = [];
     featChosenManeuvers = [];
+    featChosenWeapons = [];
+    featChosenLanguages = [];
+    featChosenCantrips = [];
+    featChosenSpell = "";
     doSave();
     render();
   });
@@ -4954,7 +5225,11 @@ export async function renderSheet(id) {
   });
   on(app, "click", "[data-action=roll-feature]", (e, el) => {
     const f = data.features[Number(el.dataset.index)];
-    const dice = featureDiceInfo(f.desc);
+    const dice = PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
+      ? { expr: `1d${psionicDieSides(data)}` }
+      : GRAVE_MIGHT_FEATURE_NAME.test(f.name || "")
+        ? graveyardShriekDice()
+        : featureDiceInfo(f.desc);
     if (!dice) return;
     let expr = dice.expr;
     if (SECOND_WIND_FEATURE_NAME.test(f.name || "")) {
