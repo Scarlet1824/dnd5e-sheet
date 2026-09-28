@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -1185,28 +1185,37 @@ export async function renderSheet(id) {
   function baseFightingStyleChoiceIncomplete() {
     return !!(levelUpState.baseFightingStyleChoice && !levelUpState.baseFightingStyleChoice.name);
   }
-  // Мастер боевых искусств's "Ученик войны" (3rd level) grants a
-  // craftsman's-tool proficiency of the player's choice -- like the second
-  // fighting style above, this turns a plain text card into an actual pick
-  // in the level-up modal. Matched by exact feature name for the same
-  // reason as SECOND_FIGHTING_STYLE_FEATURE_NAME.
-  const CRAFT_TOOL_CHOICE_FEATURE_NAME = "Ученик войны";
+  // A subclass feature that grants proficiency in ONE tool/kit of the
+  // player's choosing, from a specific catalog list -- turns the plain text
+  // card into an actual pick in the level-up modal, the same way the second
+  // fighting style/subclass choice above do. Keyed by exact feature name
+  // (each entry names its own options list) rather than one hardcoded
+  // catalog, so this covers both Мастер боевых искусств's "Ученик войны"
+  // (a craftsman's tool) and Комбинатор's "Интриган" (a gaming set — its
+  // OTHER grants, the fixed disguise/forgery kits and the 2 languages, are
+  // handled by the generic proficiency-text parser and subLanguageChoice
+  // respectively, since those aren't a catalog-driven choice like this one).
+  const TOOL_CHOICE_FEATURE_OPTIONS = {
+    "Ученик войны": (TOOL_GROUPS.find((g) => g.label === "Ремесленные инструменты") || {}).items || [],
+    "Интриган": GAMING_SETS,
+  };
   function levelHasCraftToolChoice(cls, subName, newLevel) {
     if (!subName) return false;
-    return subclassFeaturesAtLevel(cls, subName, newLevel).some((f) => f.name === CRAFT_TOOL_CHOICE_FEATURE_NAME);
+    return subclassFeaturesAtLevel(cls, subName, newLevel).some((f) => Object.prototype.hasOwnProperty.call(TOOL_CHOICE_FEATURE_OPTIONS, f.name));
   }
-  function freshToolChoiceState() {
-    return { name: "" };
+  function freshToolChoiceState(cls, subName, newLevel) {
+    const feature = subName ? subclassFeaturesAtLevel(cls, subName, newLevel).find((f) => Object.prototype.hasOwnProperty.call(TOOL_CHOICE_FEATURE_OPTIONS, f.name)) : null;
+    return { name: "", featureName: feature ? feature.name : "" };
   }
   function craftToolChoicePanelHtml() {
     const tc = levelUpState.toolChoice;
-    const craftTools = (TOOL_GROUPS.find((g) => g.label === "Ремесленные инструменты") || {}).items || [];
+    const options = TOOL_CHOICE_FEATURE_OPTIONS[tc.featureName] || [];
     return `
       <div class="panel" style="margin:10px 0;">
-        <h4 style="margin-top:0;">${escapeHtml(CRAFT_TOOL_CHOICE_FEATURE_NAME)}: выбор инструмента</h4>
+        <h4 style="margin-top:0;">${escapeHtml(tc.featureName)}: выбор инструмента</h4>
         <select data-level-up-tool-choice>
           <option value="">Выберите инструмент…</option>
-          ${craftTools.map((t) => `<option value="${escapeHtml(t)}" ${tc.name === t ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
+          ${options.map((t) => `<option value="${escapeHtml(t)}" ${tc.name === t ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
         </select>
       </div>`;
   }
@@ -1675,7 +1684,7 @@ export async function renderSheet(id) {
       levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, newLevel) ? freshSubclassChoiceState() : null;
       levelUpState.fightingStyleChoice = ccls && levelHasFightingStyleChoice(cc, ccls, newLevel) ? freshFightingStyleChoiceState() : null;
       levelUpState.baseFightingStyleChoice = ccls && levelHasBaseFightingStyleChoice(ccls, newLevel) ? freshBaseFightingStyleChoiceState() : null;
-      levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState() : null;
+      levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState(ccls, cc.subclass, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.spellbookChoice = ccls && levelHasSpellbookGrowth(ccls, newLevel) ? freshSpellbookChoiceState() : null;
@@ -1691,7 +1700,7 @@ export async function renderSheet(id) {
       const c = levelUpEligibleClasses()[levelUpState.classIndex];
       const cls = c && getClass(c.id);
       const newLevel = (c.level || 1) + 1;
-      levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState() : null;
+      levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState(cls, levelUpState.subclassChoice.name, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       refreshLevelUpModal();
@@ -2081,7 +2090,7 @@ export async function renderSheet(id) {
       subclassChoice: cls && levelHasSubclassChoice(c, cls, newLevel) ? freshSubclassChoiceState() : null,
       fightingStyleChoice: cls && levelHasFightingStyleChoice(c, cls, newLevel) ? freshFightingStyleChoiceState() : null,
       baseFightingStyleChoice: cls && levelHasBaseFightingStyleChoice(cls, newLevel) ? freshBaseFightingStyleChoiceState() : null,
-      toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState() : null,
+      toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState(cls, c.subclass, newLevel) : null,
       subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
       subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
       spellbookChoice: cls && levelHasSpellbookGrowth(cls, newLevel) ? freshSpellbookChoiceState() : null,
