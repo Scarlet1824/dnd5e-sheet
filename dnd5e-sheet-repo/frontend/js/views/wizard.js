@@ -13,10 +13,25 @@ import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
 
+// Следопыт's own 1st-level choices (Избранный враг / Природный следопыт):
+// not a subclass and not shaped like Воин's level1Choice (a single named
+// option with one line of flavor each) -- Избранный враг needs a free-text
+// sub-pick when "Гуманоиды" is chosen (two specific species) plus an
+// optional language, so it gets its own step and its own state instead of
+// being forced through the generic level1Choice mechanism.
+const RANGER_FAVORED_ENEMY_TYPES = [
+  "Аберрации", "Зверолюды", "Звери", "Драконы", "Элементали", "Феи",
+  "Нежить", "Великаны", "Гуманоиды", "Монстры", "Растения", "Порождения",
+];
+const RANGER_FAVORED_TERRAIN_TYPES = [
+  "Арктика", "Горы", "Леса", "Побережье", "Пустоши", "Пустыня", "Равнины", "Подземье", "Болота",
+];
+
 const STEPS = [
   { id: "edition", label: "Редакция" },
   { id: "race", label: "Раса" },
   { id: "class", label: "Класс" },
+  { id: "rangerFavored", label: "Следопыт" },
   { id: "equipment", label: "Снаряжение" },
   { id: "background", label: "Предыстория" },
   { id: "abilities", label: "Характеристики" },
@@ -71,13 +86,19 @@ export function renderWizard() {
     classEquipmentDeclined: false, // player chose starting gold instead of the class equipment package
     classGoldRoll: 0, // rolled amount when classEquipmentDeclined is true
     level1ChoiceIndex: null, // chosen index into the class's level1Choice.options (fighting style / subclass picked at level 1)
+    favoredEnemy: "", // Следопыт: one of RANGER_FAVORED_ENEMY_TYPES
+    favoredEnemyHumanoid1: "", // when favoredEnemy === "Гуманоиды": first chosen species (e.g. "гноллы")
+    favoredEnemyHumanoid2: "", // ...and the second (e.g. "орки")
+    favoredEnemyLanguage: "", // a LANGUAGES entry, or "custom", or "" (no language / skip)
+    favoredEnemyLanguageCustom: "", // free-text language name, when favoredEnemyLanguage === "custom"
+    favoredTerrain: "", // Следопыт: one of RANGER_FAVORED_TERRAIN_TYPES
     name: "",
   };
 
   function relevantSteps() {
     const cls = CLASSES.find((c) => c.id === state.classId);
     const hasLevel1Spells = cls && cls.spellcasting && cls.spellcasting.startsAtLevel !== 2;
-    return STEPS.filter((s) => s.id !== "spells" || hasLevel1Spells);
+    return STEPS.filter((s) => s.id !== "spells" || hasLevel1Spells).filter((s) => s.id !== "rangerFavored" || (cls && cls.id === "ranger"));
   }
 
   // Guards the "Далее"/"Создать персонажа" button against a choice the
@@ -115,6 +136,11 @@ export function renderWizard() {
       const cls = CLASSES.find((c) => c.id === state.classId);
       if (cls && cls.toolChoice && state.chosenClassTools.length < cls.toolChoice.count) return false;
     }
+    if (stepId === "rangerFavored") {
+      if (!state.favoredEnemy || !state.favoredTerrain) return false;
+      if (state.favoredEnemy === "Гуманоиды" && (!state.favoredEnemyHumanoid1.trim() || !state.favoredEnemyHumanoid2.trim())) return false;
+      if (state.favoredEnemyLanguage === "custom" && !state.favoredEnemyLanguageCustom.trim()) return false;
+    }
     return true;
   }
 
@@ -148,6 +174,7 @@ export function renderWizard() {
       case "edition": return stepEdition();
       case "race": return stepRace();
       case "class": return stepClass();
+      case "rangerFavored": return stepRangerFavored();
       case "equipment": return stepEquipment();
       case "background": return stepBackground();
       case "abilities": return stepAbilities();
@@ -366,6 +393,68 @@ export function renderWizard() {
               <p class="muted" style="font-size:0.8rem;">Источник: ${escapeHtml(c.source || "—")}</p>
               <p>Кость хитов: к${c.hitDie} · Основная характеристика: ${escapeHtml(c.primaryAbility)}</p>
               <p>${escapeHtml(c.flavor || "")}</p>
+            </div>`
+          ).join("")}
+        </div>
+      </div>`;
+  }
+
+  // Следопыт's 1st-level Избранный враг + Природный следопыт picks -- see
+  // RANGER_FAVORED_ENEMY_TYPES/RANGER_FAVORED_TERRAIN_TYPES above for why
+  // this doesn't reuse the generic level1Choice mechanism.
+  function stepRangerFavored() {
+    const cls = CLASSES.find((c) => c.id === state.classId);
+    return `
+      <div class="panel">
+        <p class="muted">💡 На 1 уровне следопыт выбирает тип избранного врага и тип избранной местности (не подкласс — «Архетип следопыта» выбирается на 3 уровне).</p>
+      </div>
+      <div class="panel">
+        <h3 style="margin-top:0;">Избранный враг</h3>
+        <div class="grid cols-3">
+          ${RANGER_FAVORED_ENEMY_TYPES.map(
+            (t) => `
+            <div class="card selectable ${state.favoredEnemy === t ? "selected" : ""}" data-favored-enemy="${escapeHtml(t)}">
+              <h4 style="margin:0;">${escapeHtml(t)}</h4>
+            </div>`
+          ).join("")}
+        </div>
+        ${
+          state.favoredEnemy === "Гуманоиды"
+            ? `
+        <div class="row" style="gap:10px;margin-top:10px;">
+          <div class="col" style="flex:1;">
+            <label>Первый вид</label>
+            <input type="text" data-favored-enemy-humanoid="1" value="${escapeHtml(state.favoredEnemyHumanoid1)}" placeholder="например, гноллы" />
+          </div>
+          <div class="col" style="flex:1;">
+            <label>Второй вид</label>
+            <input type="text" data-favored-enemy-humanoid="2" value="${escapeHtml(state.favoredEnemyHumanoid2)}" placeholder="например, орки" />
+          </div>
+        </div>`
+            : ""
+        }
+        ${
+          state.favoredEnemy
+            ? `
+        <div class="col" style="margin-top:10px;max-width:280px;">
+          <label>Язык избранного врага (если есть)</label>
+          <select data-favored-enemy-language>
+            <option value="">—</option>
+            ${LANGUAGE_GROUPS.map((g) => `<optgroup label="${escapeHtml(g.label)}">${g.items.map((l) => `<option value="${escapeHtml(l)}" ${state.favoredEnemyLanguage === l ? "selected" : ""}>${escapeHtml(l)}</option>`).join("")}</optgroup>`).join("")}
+            <option value="custom" ${state.favoredEnemyLanguage === "custom" ? "selected" : ""}>Другой…</option>
+          </select>
+          ${state.favoredEnemyLanguage === "custom" ? `<input type="text" data-favored-enemy-language-custom value="${escapeHtml(state.favoredEnemyLanguageCustom)}" placeholder="свой язык" style="margin-top:6px;" />` : ""}
+        </div>`
+            : ""
+        }
+      </div>
+      <div class="panel">
+        <h3 style="margin-top:0;">Природный следопыт (местность)</h3>
+        <div class="grid cols-3">
+          ${RANGER_FAVORED_TERRAIN_TYPES.map(
+            (t) => `
+            <div class="card selectable ${state.favoredTerrain === t ? "selected" : ""}" data-favored-terrain="${escapeHtml(t)}">
+              <h4 style="margin:0;">${escapeHtml(t)}</h4>
             </div>`
           ).join("")}
         </div>
@@ -878,18 +967,34 @@ export function renderWizard() {
 
   function pointBuyUI(bonusMap) {
     const spent = ABILITIES.reduce((sum, a) => sum + (POINT_BUY_COSTS[state.abilities[a.id]] ?? 0), 0);
+    const remaining = POINT_BUY_BUDGET - spent;
     return `
-      <p class="muted">Бюджет: ${POINT_BUY_BUDGET} очков. Потрачено: ${spent}. Осталось: ${POINT_BUY_BUDGET - spent}</p>
+      <p class="muted">Бюджет: ${POINT_BUY_BUDGET} очков. Потрачено: ${spent}. Осталось: ${remaining}</p>
       <div class="grid cols-3">
         ${ABILITIES.map((a) => {
           const bonus = bonusMap[a.id] || 0;
+          const current = state.abilities[a.id];
+          const currentCost = POINT_BUY_COSTS[current] ?? 0;
           return `
           <div class="col">
             <label>${a.label}${raceBadge(bonus)}</label>
             <select data-pointbuy-ability="${a.id}">
-              ${Object.keys(POINT_BUY_COSTS).map((v) => `<option value="${v}" ${Number(v) === state.abilities[a.id] ? "selected" : ""}>${v}</option>`).join("")}
+              ${Object.keys(POINT_BUY_COSTS).map((vStr) => {
+                const v = Number(vStr);
+                const cost = POINT_BUY_COSTS[v];
+                // Selecting this value would change the total spend by
+                // (its own cost minus what this ability is currently
+                // costing) -- disable it when that would blow the budget,
+                // so the player can never buy their way into negative
+                // points remaining. The ability's own current value stays
+                // selectable (and shown) even if an earlier, since-fixed
+                // save had somehow gone over budget.
+                const wouldSpend = spent - currentCost + cost;
+                const disabled = v !== current && wouldSpend > POINT_BUY_BUDGET;
+                return `<option value="${v}" ${v === current ? "selected" : ""} ${disabled ? "disabled" : ""}>${v} (${cost} очк.)</option>`;
+              }).join("")}
             </select>
-            <span class="muted" style="font-size:0.8rem;">Итог: ${state.abilities[a.id] + bonus}</span>
+            <span class="muted" style="font-size:0.8rem;">Итог: ${current + bonus}</span>
           </div>`;
         }).join("")}
       </div>`;
@@ -1775,6 +1880,12 @@ export function renderWizard() {
       state.chosenSubclassSkills = [];
       state.chosenSubclassLanguages = [];
       state.subclassLanguageCustom = {};
+      state.favoredEnemy = "";
+      state.favoredEnemyHumanoid1 = "";
+      state.favoredEnemyHumanoid2 = "";
+      state.favoredEnemyLanguage = "";
+      state.favoredEnemyLanguageCustom = "";
+      state.favoredTerrain = "";
       render();
     });
     on(app, "click", "[data-action=change-class]", () => {
@@ -1792,6 +1903,27 @@ export function renderWizard() {
       state.chosenSubclassSkills = [];
       state.chosenSubclassLanguages = [];
       state.subclassLanguageCustom = {};
+      render();
+    });
+    on(app, "click", "[data-favored-enemy]", (e, el) => {
+      state.favoredEnemy = el.dataset.favoredEnemy;
+      state.favoredEnemyHumanoid1 = "";
+      state.favoredEnemyHumanoid2 = "";
+      render();
+    });
+    on(app, "input", "[data-favored-enemy-humanoid]", (e, el) => {
+      if (el.dataset.favoredEnemyHumanoid === "1") state.favoredEnemyHumanoid1 = el.value;
+      else state.favoredEnemyHumanoid2 = el.value;
+    });
+    on(app, "change", "[data-favored-enemy-language]", (e, el) => {
+      state.favoredEnemyLanguage = el.value;
+      render();
+    });
+    on(app, "input", "[data-favored-enemy-language-custom]", (e, el) => {
+      state.favoredEnemyLanguageCustom = el.value;
+    });
+    on(app, "click", "[data-favored-terrain]", (e, el) => {
+      state.favoredTerrain = el.dataset.favoredTerrain;
       render();
     });
     on(app, "click", "[data-background]", (e, el) => {
@@ -2290,6 +2422,30 @@ export function renderWizard() {
           } else {
             data.features.push({ name: `${cls.level1Choice.label}: ${level1Choice.name}`, source: cls.name, desc: level1Choice.desc });
           }
+        } else if (cls.id === "ranger" && split.name === "Избранный враг" && state.favoredEnemy) {
+          // Personalizes the generic "выберите тип избранного врага" card
+          // with the actual pick made in stepRangerFavored(), instead of
+          // leaving the raw un-filled-in class text on the sheet.
+          const enemyLabel =
+            state.favoredEnemy === "Гуманоиды"
+              ? `Гуманоиды (${state.favoredEnemyHumanoid1.trim()}, ${state.favoredEnemyHumanoid2.trim()})`
+              : state.favoredEnemy;
+          const lang =
+            state.favoredEnemyLanguage === "custom" ? state.favoredEnemyLanguageCustom.trim() : state.favoredEnemyLanguage;
+          const fullText = cls.classFeatureText && cls.classFeatureText[split.name];
+          data.features.push({
+            name: `Избранный враг: ${enemyLabel}`,
+            source: cls.name,
+            desc: (fullText || split.desc) + (lang ? `\n\nЯзык избранного врага: ${lang}.` : ""),
+          });
+          if (lang && !data.proficiencies.languages.includes(lang)) data.proficiencies.languages.push(lang);
+        } else if (cls.id === "ranger" && split.name === "Природный следопыт" && state.favoredTerrain) {
+          const fullText = cls.classFeatureText && cls.classFeatureText[split.name];
+          data.features.push({
+            name: `Природный следопыт: ${state.favoredTerrain}`,
+            source: cls.name,
+            desc: fullText || split.desc,
+          });
         } else {
           const fullText = cls.classFeatureText && cls.classFeatureText[split.name];
           addFeatureOrFold(split.name, fullText || split.desc, cls.name);

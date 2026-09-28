@@ -41,6 +41,22 @@ function set(obj, path, value) {
   o[keys[keys.length - 1]] = value;
 }
 
+// Adds a value to a free-text proficiency list (armor/weapons/tools/
+// languages -- the four fields backed by the comma-separated textareas on
+// the Черты/Умения tab, see traitsTab()'s listField()) the same way every
+// automatic grant already does (skip if already present), but first drops
+// any lone placeholder entry a player typed by hand into an empty field
+// ("нет"/"—"/"-"/"нету"/"отсутствует") -- otherwise a later real grant just
+// sat next to that placeholder instead of replacing it.
+const PROFICIENCY_PLACEHOLDER_RE = /^(нет|нету|отсутствует|—|-|—)$/i;
+function addProficiencyValue(list, value) {
+  if (!Array.isArray(list) || !value) return;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (PROFICIENCY_PLACEHOLDER_RE.test((list[i] || "").trim())) list.splice(i, 1);
+  }
+  if (!list.includes(value)) list.push(value);
+}
+
 export async function renderSheet(id) {
   const user = getUser();
   // Scopes the roll log (dice.js) to this character -- every roll made
@@ -253,25 +269,19 @@ export async function renderSheet(id) {
       const namedWeapons = TRAIT_NAMED_WEAPON_GRANTS[f.name];
       if (namedWeapons) {
         namedWeapons.forEach((w) => {
-          if (!data.proficiencies.weapons.includes(w)) {
-            data.proficiencies.weapons.push(w);
-            changed = true;
-          }
+          if (!data.proficiencies.weapons.includes(w)) changed = true;
+          addProficiencyValue(data.proficiencies.weapons, w);
         });
         return;
       }
       const grants = parseProficiencyGrantsFromText(f.desc);
       grants.weapons.forEach((w) => {
-        if (!data.proficiencies.weapons.includes(w)) {
-          data.proficiencies.weapons.push(w);
-          changed = true;
-        }
+        if (!data.proficiencies.weapons.includes(w)) changed = true;
+        addProficiencyValue(data.proficiencies.weapons, w);
       });
       grants.armor.forEach((a) => {
-        if (!data.proficiencies.armor.includes(a)) {
-          data.proficiencies.armor.push(a);
-          changed = true;
-        }
+        if (!data.proficiencies.armor.includes(a)) changed = true;
+        addProficiencyValue(data.proficiencies.armor, a);
       });
     });
     if (changed) doSave();
@@ -890,7 +900,13 @@ export async function renderSheet(id) {
   // class's OWN features[level] slot text (never a subclass's own NAME,
   // which is where wording like "Путь открытой ладони" actually lives), and
   // Варвар is the only class whose slot text starts with that word.
-  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь\b|традиция|клятва|колледж/i;
+  // NOTE: JS's \b (word boundary) is defined in terms of \w, which only
+  // covers [A-Za-z0-9_] -- it never matches next to a Cyrillic letter (every
+  // Cyrillic character is "non-word" to the regex engine), so `^путь\b`
+  // never matched ANYTHING, ever (not even the exact string "путь"). Use an
+  // explicit "next char isn't a letter" lookahead instead everywhere a
+  // Cyrillic word needs a real boundary.
+  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь(?![a-zа-яё])|традиция|клятва|колледж/i;
   // "Умение архетипа" (Воин 7-й/10-й уровень) is a placeholder marker in
   // cls.features -- the ACTUAL feature at that level comes from whichever
   // subclass the character already picked (see subclassFeaturesAtLevel()),
@@ -1171,7 +1187,7 @@ export async function renderSheet(id) {
   // already existing -- this is the opposite case, a class's first and only
   // pick, gated on cls.level1Choice NOT existing (Воин is excluded since it
   // already resolves its one fighting style at creation).
-  const FIRST_FIGHTING_STYLE_FEATURE_NAME = /^Боевой стиль\b/i;
+  const FIRST_FIGHTING_STYLE_FEATURE_NAME = /^Боевой стиль(?![a-zа-яё])/i;
   function levelHasBaseFightingStyleChoice(cls, newLevel) {
     if (!cls || cls.level1Choice) return false;
     const raw = (cls.features && cls.features[newLevel]) || [];
@@ -1911,8 +1927,8 @@ export async function renderSheet(id) {
     data.proficiencies.armor = data.proficiencies.armor || [];
     data.proficiencies.weapons = data.proficiencies.weapons || [];
     const profGrants = parseProficiencyGrantsFromText(feat.desc);
-    profGrants.armor.forEach((a) => { if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a); });
-    profGrants.weapons.forEach((w) => { if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w); });
+    profGrants.armor.forEach((a) => { addProficiencyValue(data.proficiencies.armor, a); });
+    profGrants.weapons.forEach((w) => { addProficiencyValue(data.proficiencies.weapons, w); });
   }
   // Snapshot of the ENTIRE character taken right before a level-up is
   // applied, so "Откатить уровень" can restore it wholesale -- a level-up
@@ -2049,7 +2065,7 @@ export async function renderSheet(id) {
       }
     }
     if (levelUpState.toolChoice && levelUpState.toolChoice.name) {
-      if (!data.proficiencies.tools.includes(levelUpState.toolChoice.name)) data.proficiencies.tools.push(levelUpState.toolChoice.name);
+      addProficiencyValue(data.proficiencies.tools, levelUpState.toolChoice.name);
     }
     if (levelUpState.baseFightingStyleChoice && levelUpState.baseFightingStyleChoice.name) {
       const opt = (getClass("fighter").level1Choice.options || []).find((o) => o.name === levelUpState.baseFightingStyleChoice.name);
@@ -2064,7 +2080,7 @@ export async function renderSheet(id) {
     }
     if (levelUpState.subLanguageChoice) {
       levelUpState.subLanguageChoice.picked.filter(Boolean).forEach((lang) => {
-        if (!data.proficiencies.languages.includes(lang)) data.proficiencies.languages.push(lang);
+        addProficiencyValue(data.proficiencies.languages, lang);
       });
     }
     if (levelUpState.spellbookChoice) {
@@ -2234,18 +2250,18 @@ export async function renderSheet(id) {
     const namedWeapons = TRAIT_NAMED_WEAPON_GRANTS[name];
     if (namedWeapons) {
       namedWeapons.forEach((w) => {
-        if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w);
+        addProficiencyValue(data.proficiencies.weapons, w);
       });
     } else {
       const grants = parseProficiencyGrantsFromText(desc);
       grants.weapons.forEach((w) => {
-        if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w);
+        addProficiencyValue(data.proficiencies.weapons, w);
       });
       grants.armor.forEach((a) => {
-        if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a);
+        addProficiencyValue(data.proficiencies.armor, a);
       });
       grants.tools.forEach((t) => {
-        if (!data.proficiencies.tools.includes(t)) data.proficiencies.tools.push(t);
+        addProficiencyValue(data.proficiencies.tools, t);
       });
     }
   }
@@ -2386,6 +2402,11 @@ export async function renderSheet(id) {
           <span class="insp-star ${insp.bardStar ? "filled" : ""}" data-action="toggle-bard-star" title="Получена кость вдохновения барда, ещё не потрачена">${insp.bardStar ? "★" : "☆"}</span>
           <button type="button" class="small" data-action="roll-bard-inspiration" ${insp.bardStar ? "" : "disabled"}>🎲 Бросить</button>
         </div>
+        ${
+          barbarianLevel(data) > 0
+            ? `<button type="button" class="small ${data.rageActive ? "primary" : ""}" data-action="toggle-rage" title="Пока включено, к урону оружием ближнего боя в силовых атаках (Сила) добавляется бонус Ярости (+${rageDamageBonus(data)} на этом уровне)">${data.rageActive ? "✔ Ярость" : "Ярость"}</button>`
+            : ""
+        }
         <button type="button" class="small ${data.blessingActive ? "primary" : ""}" data-action="toggle-blessing" title="Пока включено, ко всем броскам атаки, спасброскам и проверкам характеристик автоматически добавляется к4 (эффект заклинания благословение)">${data.blessingActive ? "✔ Благословение" : "Благословение"}</button>
         <button type="button" class="small primary" data-action="open-level-up-modal">⬆ Повысить уровень</button>
         ${Array.isArray(data._levelUpUndoStack) && data._levelUpUndoStack.length ? `<button type="button" class="small" data-action="revert-level-up" title="Отменить последнее повышение уровня">↺ Откатить уровень</button>` : ""}
@@ -3426,7 +3447,16 @@ export async function renderSheet(id) {
   // spellbook (sc.known, built via "+ Добавить в книгу заклинаний").
   function spellPrepPool(cls, sc) {
     if (cls.spellcasting.preparedFormula) {
-      return SPELLS.filter((sp) => sp.level > 0 && sp.classes.includes(cls.id));
+      // A Жрец/Друид/Изобретатель has access to their WHOLE class list from
+      // level 1 (there's no personal "known" list to grow, unlike a Wizard's
+      // spellbook) -- but that doesn't mean every circle is preparable
+      // immediately: a 3rd-circle spell is only choosable once the
+      // character actually has a 3rd-circle slot (see "Количество ячеек"
+      // above), same as any other caster. Gate the pool on the slot count
+      // the player has entered for each circle, rather than only on class
+      // membership -- 0/blank means "no access yet" for that circle.
+      const slots = sc.slots || {};
+      return SPELLS.filter((sp) => sp.level > 0 && sp.classes.includes(cls.id) && Number(slots[sp.level] || 0) > 0);
     }
     // Characters created before this prepare/spellbook split had their
     // starting spells written straight into "prepared" (the old bucket for
@@ -3880,7 +3910,17 @@ export async function renderSheet(id) {
                 ? (() => {
                     const cantripCount = preview.magicInitiateChoice ? 2 : 1;
                     const alreadyKnown = new Set([...((data.spellcasting && data.spellcasting.cantrips) || []), ...((data.spellcasting && data.spellcasting.known) || [])]);
-                    const cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes(featChosenSpellClass) && !alreadyKnown.has(s.id));
+                    let cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes(featChosenSpellClass) && !alreadyKnown.has(s.id));
+                    // «Меткие заклинания» ["Spell Sniper"] only lets you pick a
+                    // cantrip that requires an attack roll (its whole benefit
+                    // -- ignoring half/three-quarters cover, plus the bonus
+                    // cantrip -- is meaningless on a save-based one). SPELLS
+                    // has no structured attack/save flag, but every
+                    // attack-roll cantrip's own PHB text spells out making a
+                    // "дальнобойную/рукопашную атаку заклинанием" as the
+                    // resolution mechanic, while a save-based cantrip instead
+                    // calls for a "спасбросок" -- a reliable signal to filter on.
+                    if (preview.spellSniperChoice) cantrips = cantrips.filter((s) => /атаку заклинанием/i.test((s.desc || []).join(" ")));
                     const spells1 = SPELLS.filter((s) => s.level === 1 && s.classes.includes(featChosenSpellClass) && !alreadyKnown.has(s.id));
                     return `
               <div class="row" style="align-items:center;">
@@ -3902,10 +3942,13 @@ export async function renderSheet(id) {
                 preview.magicInitiateChoice
                   ? `
               <p class="muted" style="margin:6px 0 2px;">Выберите заклинание 1-го уровня:</p>
-              <select data-feat-spell1-choice>
-                <option value="">—</option>
-                ${spells1.map((s) => `<option value="${s.id}" ${s.id === featChosenSpell ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
-              </select>`
+              <div class="grid cols-2">
+                ${spells1.map((s) => `
+                <label class="row" style="gap:6px;font-weight:normal;">
+                  <input type="radio" name="feat-spell1-choice" data-feat-spell1-choice value="${s.id}" ${s.id === featChosenSpell ? "checked" : ""} />
+                  ${spellHoverNameHtml(s)}
+                </label>`).join("")}
+              </div>`
                   : ""
               }`;
                   })()
@@ -4015,7 +4058,7 @@ export async function renderSheet(id) {
                   // featureDiceInfo's generic "к20"/"к10" match is
                   // suppressed for both, same treatment as Скрытая атака.
                   const noRollButton =
-                    /^Скрытая атака\b/i.test(f.name || "") ||
+                    /^Скрытая атака(?![a-zа-яё])/i.test(f.name || "") ||
                     BARD_INSPIRATION_FEATURE_NAME.test(f.name || "") ||
                     /^Проклятие ведьмовского клинка$/i.test(f.name || "") ||
                     /^Ужасающий облик$/i.test(f.name || "") ||
@@ -4101,7 +4144,7 @@ export async function renderSheet(id) {
                   // benefits from showing the CURRENT die count somewhere,
                   // since it grows with Rogue level and the desc text can't
                   // bake in a number that would go stale.
-                  const isSneakAttack = /^Скрытая атака\b/i.test(f.name || "");
+                  const isSneakAttack = /^Скрытая атака(?![a-zа-яё])/i.test(f.name || "");
                   const sneakInfo = isSneakAttack ? sneakAttackDice() : null;
                   // Bladesinging's "Песнь клинка" is a bonus-action toggle
                   // lasting 1 minute (or until a two-handed weapon attack,
@@ -4602,7 +4645,7 @@ export async function renderSheet(id) {
     }
     return levels;
   }
-  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead, extraDice, priorRoll) {
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, smiteLevel, useSmiteUndead, extraDice, priorRoll) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
     if (useVersatile) {
@@ -4677,11 +4720,13 @@ export async function renderSheet(id) {
       breakdown.push({ value: 2, label: "боевой стиль: Дуэлянт" });
     }
     // Ярость's flat damage bonus (+2/+3/+4 by Barbarian level, see
-    // rageDamageBonus below) only applies to a Ближний бой Силовой атаке
-    // while actually raging -- the sheet has no "currently raging" state to
-    // check automatically, so, like Дуэлянт, it's a checkbox the player
-    // ticks themselves in startDamageRoll.
-    if (useRage) {
+    // rageDamageBonus below) applies automatically to every Силовая (Str)
+    // Ближний бой attack while the "Ярость" toggle (top of the sheet, see
+    // inspirationWidget) is on -- same automatic pattern as Благословение/
+    // Песнь победы below, now that the sheet actually tracks a "currently
+    // raging" state instead of asking the player to tick a checkbox on
+    // every single damage roll.
+    if (data.rageActive && a.rangeType === "melee" && a.ability === "str") {
       const bonus = rageDamageBonus(data);
       total += bonus;
       parts.push(`${bonus}`);
@@ -4775,7 +4820,7 @@ export async function renderSheet(id) {
       reroll: savageAvailable
         ? {
             label: "Дикий атакующий: перебросить кости урона",
-            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, 0, false, [], { total, detail: parts.join(" + ") }),
+            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, 0, false, [], { total, detail: parts.join(" + ") }),
           }
         : null,
     });
@@ -4796,11 +4841,12 @@ export async function renderSheet(id) {
     const duelist = a.rangeType === "melee" && hasFightingStyle("Дуэлянт");
     const versatileSides = versatileDieSidesForAttack(a);
     const superiorityAvailable = hasBattlemaster() && superiorityDiceAvailable() > 0;
-    // Ярость's damage bonus only applies to a Ближний бой Силовой атаке
-    // (see rageDamageBonus above) -- offered whenever the character has any
-    // Barbarian level at all, same "player confirms the table fact" pattern
-    // as Дуэлянт, since the sheet has no "currently raging" flag to check.
-    const rageAvailable = a.rangeType === "melee" && a.ability === "str" && barbarianLevel(data) > 0;
+    // Ярость's damage bonus (see rageDamageBonus above and its automatic
+    // application in doRollAttackDamage) now applies on its own whenever
+    // the top-of-sheet "Ярость" toggle is on and the attack qualifies, so
+    // there's no separate checkbox to offer here any more -- this flag is
+    // kept only to show a small confirmation note in the modal.
+    const rageApplies = data.rageActive && a.rangeType === "melee" && a.ability === "str";
     // Божественная кара only applies to a melee weapon attack that hit, and
     // needs at least one unspent spell slot to actually offer -- a level with
     // 0 available (all spent, or the character just doesn't have that circle
@@ -4859,16 +4905,13 @@ export async function renderSheet(id) {
           : ""
       }
       ${
-        rageAvailable
-          ? `<label class="row" style="gap:8px;align-items:center;margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable ? "6px" : "0"};">
-        <input type="checkbox" data-use-rage />
-        добавить Ярость (+${rageDamageBonus(data)}) — только пока персонаж в состоянии ярости
-      </label>`
+        rageApplies
+          ? `<p class="muted" style="font-size:0.8rem;margin:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable ? "6px" : "0"} 0 0;">✔ Ярость (+${rageDamageBonus(data)}) добавится автоматически</p>`
           : ""
       }
       ${
         smiteAvailable
-          ? `<div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageAvailable ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
+          ? `<div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageApplies ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
         <label class="row" style="gap:8px;align-items:center;">
           <span>Божественная кара:</span>
           <select data-smite-level style="flex:1;">
@@ -4885,7 +4928,7 @@ export async function renderSheet(id) {
       </div>`
           : ""
       }
-      <div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageAvailable || smiteAvailable ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
+      <div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageApplies || smiteAvailable ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
         <span class="muted" style="font-size:0.82rem;">Дополнительные кубики к урону:</span>
         <div class="row" style="gap:6px;align-items:center;margin-top:4px;">
           <select data-extra-die-sides style="flex:none;">
@@ -4924,13 +4967,12 @@ export async function renderSheet(id) {
       const useDuelist = duelist ? modal.querySelector("[data-use-duelist]").checked : false;
       const useVersatile = versatileSides ? modal.querySelector("[data-use-versatile]").checked : false;
       const useSuperiority = superiorityAvailable ? modal.querySelector("[data-use-superiority]").checked : false;
-      const useRage = rageAvailable ? modal.querySelector("[data-use-rage]").checked : false;
       const smiteLevel = smiteAvailable ? Number(modal.querySelector("[data-smite-level]").value) : 0;
       const useSmiteUndead = smiteAvailable ? modal.querySelector("[data-smite-undead]").checked : false;
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead, extraDice);
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, smiteLevel, useSmiteUndead, extraDice);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
@@ -5039,6 +5081,7 @@ export async function renderSheet(id) {
   });
   on(app, "change", "[data-feat-spell1-choice]", (e, el) => {
     featChosenSpell = el.value;
+    render();
   });
   on(app, "change", "[data-feat-skill-choice]", (e, el) => {
     const v = el.value;
@@ -5122,14 +5165,14 @@ export async function renderSheet(id) {
     if (feat.weaponChoice) {
       const weapons = featChosenWeapons.slice(0, feat.weaponChoice.count);
       data.proficiencies.weapons = data.proficiencies.weapons || [];
-      weapons.forEach((w) => { if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w); });
+      weapons.forEach((w) => { addProficiencyValue(data.proficiencies.weapons, w); });
       entry.grantedWeapons = weapons;
     }
     // «Языковед»: the chosen languages.
     if (feat.languageChoice) {
       const languages = featChosenLanguages.slice(0, feat.languageChoice.count);
       data.proficiencies.languages = data.proficiencies.languages || [];
-      languages.forEach((l) => { if (!data.proficiencies.languages.includes(l)) data.proficiencies.languages.push(l); });
+      languages.forEach((l) => addProficiencyValue(data.proficiencies.languages, l));
       entry.grantedLanguages = languages;
     }
     // «Посвящённый в магию»/«Меткие заклинания»: the chosen cantrips (and,
@@ -5164,8 +5207,8 @@ export async function renderSheet(id) {
     // called directly here since this feat text has no separate "name"
     // wrapper the way a feature card's short blurb does.
     const profGrants = parseProficiencyGrantsFromText(feat.desc);
-    profGrants.armor.forEach((a) => { if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a); });
-    profGrants.weapons.forEach((w) => { if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w); });
+    profGrants.armor.forEach((a) => { addProficiencyValue(data.proficiencies.armor, a); });
+    profGrants.weapons.forEach((w) => { addProficiencyValue(data.proficiencies.weapons, w); });
     // «Воинский адепт»: 2 chosen maneuvers plus its own fixed-size (к6, 1 die)
     // superiority-die pool -- same maneuver cards Battle Master's own pick
     // pushes, plus a dedicated pool card kept separate from Battle Master's
@@ -5296,6 +5339,11 @@ export async function renderSheet(id) {
   });
   on(app, "click", "[data-action=toggle-blessing]", () => {
     data.blessingActive = !data.blessingActive;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-rage]", () => {
+    data.rageActive = !data.rageActive;
     doSave();
     render();
   });
