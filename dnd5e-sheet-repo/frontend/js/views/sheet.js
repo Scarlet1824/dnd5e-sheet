@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -66,12 +66,15 @@ export async function renderSheet(id) {
   let featPreviewId = ""; // currently-highlighted feat in the picker, for description preview before adding
   let featChosenAbility = ""; // ability chosen for a multi-choice abilityIncrease feat, before "Добавить"
   let featChosenSkills = []; // skills chosen for a skillChoice feat (Одарённый), before "Добавить"
+  let featChosenManeuvers = []; // maneuvers chosen for «Воинский адепт», before "Добавить"
   let spellSearch = ""; // free-text filter in the spells tab's "add spell" browser
   let spellLevelFilter = "all"; // "all" | "0" | "1" in the spells tab's "add spell" browser
   let spellBrowseOpen = false; // spells tab: whether the "+ Добавить заклинание" browse panel is open
   let spellPrepMode = false; // spells tab: whether the full prepare-spells picker (all available spells, not just today's prepared ones) is open
   let restState = { tab: "short", message: "" }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
   let restModalEl = null; // the rest modal's root element, once opened -- used to refresh its content in place without closing it
+  let abilityBonusesOpen = false; // main tab: whether the "Откуда бонусы к характеристикам" log is expanded
+  let rollLogPanelOpen = false; // main tab: whether the bottom-right "Журнал бросков" list is expanded (the log itself keeps logging either way)
 
   const saveIndicator = () => $("[data-save-indicator]");
   const doSave = debounce(async () => {
@@ -421,6 +424,24 @@ export async function renderSheet(id) {
     return `<button data-tab="${id2}" class="${activeTab === id2 ? "active" : ""}">${label}</button>`;
   }
 
+  // Row of toggleable PHB condition pills across the bottom of the header
+  // panel -- click to turn a condition on/off, hover (native title
+  // tooltip, same as elsewhere the app keeps a hover explanation lightweight
+  // rather than building a custom popover for it) to read its rules text.
+  // Purely a tracker: the app doesn't derive advantage/disadvantage or any
+  // other mechanical effect from an active condition, the player still
+  // applies those manually when rolling.
+  function conditionsPanelHtml() {
+    const active = new Set(data.conditions || []);
+    return `
+      <div style="margin-top:4px;border-top:1px solid var(--border);padding-top:6px;">
+        <div class="condition-pills">
+          ${CONDITIONS.map(
+            (c) => `<button type="button" class="condition-pill ${active.has(c.id) ? "active" : ""}" data-action="toggle-condition" data-condition="${c.id}" title="${escapeHtml(c.desc)}">${escapeHtml(c.name)}</button>`
+          ).join("")}
+        </div>
+      </div>`;
+  }
   function headerBlock() {
     const lvl = totalLevel(data);
     const pb = proficiencyBonus(data);
@@ -467,6 +488,7 @@ export async function renderSheet(id) {
         <div style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px;">
           ${inspirationWidget()}
         </div>
+        ${conditionsPanelHtml()}
       </div>`;
   }
 
@@ -611,6 +633,8 @@ export async function renderSheet(id) {
     data.hitDice.current = Math.min(hd.total, hd.current + recover);
     restoreFeatureUses(["short", "long", "any"]);
     restoreAllSpellSlots();
+    const luckyEntry = (data.feats || []).find((f) => f.id === LUCKY_FEAT_ID);
+    if (luckyEntry) luckyEntry.luckyUsed = [false, false, false];
     if (data.deathSaves) { data.deathSaves.successes = 0; data.deathSaves.failures = 0; }
     restState.message = "Продолжительный отдых завершён: хиты, кости хитов, умения и ячейки заклинаний восстановлены.";
     doSave();
@@ -1834,6 +1858,11 @@ export async function renderSheet(id) {
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
     if (feat.id === TOUGH_FEAT_ID) applyToughFeatHpGrant();
+    data.proficiencies.armor = data.proficiencies.armor || [];
+    data.proficiencies.weapons = data.proficiencies.weapons || [];
+    const profGrants = parseProficiencyGrantsFromText(feat.desc);
+    profGrants.armor.forEach((a) => { if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a); });
+    profGrants.weapons.forEach((w) => { if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w); });
   }
   // Snapshot of the ENTIRE character taken right before a level-up is
   // applied, so "Откатить уровень" can restore it wholesale -- a level-up
@@ -2300,6 +2329,7 @@ export async function renderSheet(id) {
           <span class="insp-star ${insp.bardStar ? "filled" : ""}" data-action="toggle-bard-star" title="Получена кость вдохновения барда, ещё не потрачена">${insp.bardStar ? "★" : "☆"}</span>
           <button type="button" class="small" data-action="roll-bard-inspiration" ${insp.bardStar ? "" : "disabled"}>🎲 Бросить</button>
         </div>
+        <button type="button" class="small ${data.blessingActive ? "primary" : ""}" data-action="toggle-blessing" title="Пока включено, ко всем броскам атаки, спасброскам и проверкам характеристик автоматически добавляется к4 (эффект заклинания благословение)">${data.blessingActive ? "✔ Благословение" : "Благословение"}</button>
         <button type="button" class="small primary" data-action="open-level-up-modal">⬆ Повысить уровень</button>
         ${Array.isArray(data._levelUpUndoStack) && data._levelUpUndoStack.length ? `<button type="button" class="small" data-action="revert-level-up" title="Отменить последнее повышение уровня">↺ Откатить уровень</button>` : ""}
         ${data.edition === "2024" ? `
@@ -2355,6 +2385,7 @@ export async function renderSheet(id) {
             <div class="grid cols-3 abilities-grid">
               ${ABILITIES.map((a) => abilityBox(a)).join("")}
             </div>
+            ${luckyPointsWidgetHtml()}
             ${abilityBonusSourcesBox()}
           </div>
           <div class="panel panel-tight">
@@ -2489,11 +2520,11 @@ export async function renderSheet(id) {
             </div>
             <button data-action="roll-pool" class="primary" style="width:100%;margin-top:8px;" ${dicePool.length ? "" : "disabled"}>Бросить${dicePool.length ? ` (${dicePool.reduce((s, p) => s + p.count, 0)})` : ""}</button>
             <div class="dice-panel-log">
-              <div class="row between" style="margin-top:10px;">
-                <h3 style="margin:0;font-size:0.9rem;">Журнал бросков</h3>
-                <button class="small" data-action="clear-log" title="Очистить журнал">Очистить</button>
+              <div class="row between" style="margin-top:10px;align-items:center;">
+                <button type="button" class="small" data-action="toggle-roll-log-panel">${rollLogPanelOpen ? "▾" : "▸"} Журнал бросков</button>
+                ${rollLogPanelOpen ? `<button class="small" data-action="clear-log" title="Очистить журнал">Очистить</button>` : ""}
               </div>
-              <div class="roll-log roll-log-inline" data-roll-log>${rollLogEntriesHtml()}</div>
+              ${rollLogPanelOpen ? `<div class="roll-log roll-log-inline" data-roll-log>${rollLogEntriesHtml()}</div>` : ""}
             </div>
           </div>
         </div>
@@ -2602,7 +2633,7 @@ export async function renderSheet(id) {
         <div class="row between"><h2 style="margin:0;">Атаки</h2><button class="small" data-action="add-attack">+ Атака</button></div>
         <p class="muted" style="font-size:0.85rem;margin:-6px 0 10px;">Дальнобойное оружие всегда атакует от ловкости, ближнего боя — от силы, кроме метательного и фехтовального.</p>
         <table class="sheet-table attacks-table">
-          <thead><tr><th style="width:96px;">Название</th><th style="width:64px;">Хар-ка</th><th style="width:38px;">Бонус</th><th style="width:76px;">Урон/тип</th><th style="width:86px;">Дальность</th><th style="width:16%;">Особые свойства</th><th style="width:150px;"></th></tr></thead>
+          <thead><tr><th style="width:96px;">Название</th><th style="width:50px;">Хар-ка</th><th style="width:38px;">Бонус</th><th style="width:68px;">Урон/тип</th><th style="width:86px;">Дальность</th><th style="width:64px;">Рука</th><th style="width:16%;">Особые свойства</th><th style="width:150px;"></th></tr></thead>
           <tbody>
             ${(data.attacks || [])
               .map(
@@ -2622,6 +2653,9 @@ export async function renderSheet(id) {
                     <option value="">—</option>
                     ${Object.entries(WEAPON_RANGE_TYPE_LABELS).map(([id, label]) => `<option value="${id}" ${a.rangeType === id ? "selected" : ""}>${label}</option>`).join("")}
                   </select>
+                </td>
+                <td>
+                  <button type="button" class="small" style="width:100%;" data-action="cycle-attack-hand" data-index="${i}" title="В какой руке оружие — влияет на «Использование двух оружий» и другие подобные умения">${escapeHtml(ATTACK_HAND_LABELS[a.hand] || "—")}</button>
                 </td>
                 <td><input type="text" data-attack-field="special" data-attack-index="${i}" value="${escapeHtml(a.special ?? "")}" placeholder="напр. +1к6 огонь" /></td>
                 <td class="row attack-actions" style="gap:3px;">
@@ -2659,6 +2693,52 @@ export async function renderSheet(id) {
   // the attack's own name up against the catalog by name to find it --
   // works for the common case of an attack added via "→ Атаки" from a
   // matching inventory weapon, or just named the same as a catalog weapon.
+  // "В какой руке оружие" — a manual-override tracker (see the "Рука" column
+  // in attacksTab and the auto-assignment on add-weapon-to-attacks below),
+  // used by Использование двух оружий's AC bonus and available for any
+  // future one-hand/two-hand-dependent mechanic. `a.hand` is one of these
+  // keys, or unset/"" for an attack that was never assigned one (e.g. an
+  // attack typed in by hand rather than added from a weapon).
+  const ATTACK_HAND_CYCLE = ["right", "left", "both", "removed"];
+  const ATTACK_HAND_LABELS = { right: "Правая", left: "Левая", both: "Две руки", removed: "Снято" };
+  // Classifies a weapon's "properties" text into how many hands it needs --
+  // twёручное wins over универсальное (a weapon is never both), and
+  // anything else (including ranged weapons like longbows, which are
+  // themselves двуручное and already caught by the first check) defaults to
+  // one-handed.
+  function weaponHandCategoryFromProperties(properties) {
+    const p = String(properties || "").toLowerCase();
+    if (/двуручное/.test(p)) return "two-handed";
+    if (/универсальное/.test(p)) return "versatile";
+    return "one-handed";
+  }
+  // Auto-assigned hand for a newly-added weapon attack, per the rule the
+  // user asked for: two-handed → both hands; versatile → right hand (it CAN
+  // be wielded two-handed, but defaults to the more common one-handed use);
+  // one-handed → right hand for the first one, left for a second, and
+  // "removed" (nowhere left to hold it) for a third. Looks at whichever
+  // hand slots are already occupied across ALL existing attacks (not just
+  // other one-handed ones), so a versatile/two-handed weapon already
+  // sitting in a hand is correctly treated as "taken".
+  function autoAssignAttackHand(properties) {
+    const category = weaponHandCategoryFromProperties(properties);
+    if (category === "two-handed") return "both";
+    if (category === "versatile") return "right";
+    const takenHands = new Set((data.attacks || []).map((at) => at.hand).filter(Boolean));
+    if (takenHands.has("both")) return "removed";
+    if (!takenHands.has("right")) return "right";
+    if (!takenHands.has("left")) return "left";
+    return "removed";
+  }
+  // «Мастер большого оружия»'s -5/+10 only applies to a "тяжёлое" melee
+  // weapon the character is making a Ближний бой attack with -- looked up
+  // by name against the catalog, same "attacks don't store the weapon's own
+  // properties text" approach versatileDieSidesForAttack uses right below.
+  function weaponIsHeavyMelee(a) {
+    if (!a || !a.name || a.rangeType === "ranged") return false;
+    const w = WEAPONS.find((ww) => ww.name.toLowerCase() === a.name.trim().toLowerCase());
+    return !!(w && /тяжёлое|тяжелое/i.test(w.properties || ""));
+  }
   function versatileDieSidesForAttack(a) {
     if (!a || !a.name) return null;
     const w = WEAPONS.find((w) => w.name.toLowerCase() === a.name.trim().toLowerCase());
@@ -3020,6 +3100,15 @@ export async function renderSheet(id) {
   // both forced from the live Fighter level rather than parsed, same as
   // Ярость's count above.
   const BATTLEMASTER_SUPERIORITY_FEATURE_NAME = /^Боевое превосходство$/i;
+  // «Воинский адепт»'s own superiority-die pool card, deliberately named and
+  // tracked separately from BATTLEMASTER_SUPERIORITY_FEATURE_NAME above --
+  // it's a fixed к6/1-die pool that never scales with Fighter level (its own
+  // text: "кость превосходства останется у вас даже если позже вы получите
+  // новые кости из другого источника"), so merging it into the same card
+  // name would have it wrongly inherit a Battle Master Fighter's bigger die
+  // and level-scaled pool size.
+  const MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME_TEXT = "Боевое превосходство (Воинский адепт)";
+  const MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME = /^Боевое превосходство \(Воинский адепт\)$/i;
   function hasBattlemaster() {
     return (data.features || []).some((f) => BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || ""));
   }
@@ -3073,6 +3162,7 @@ export async function renderSheet(id) {
     if (ARCANE_RECOVERY_FEATURES.some((entry) => entry.match.test(f.name || ""))) return { max: 1, recharge: "long" };
     if (GENIE_VESSEL_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "long" };
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
+    if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
     return parseUsesFromText(f.desc);
   }
   function featureUsesHtml(f, i) {
@@ -3150,17 +3240,48 @@ export async function renderSheet(id) {
   // Small box under Характеристики listing where each ability-score bonus
   // came from (race, feats…) — data.abilityBonuses is a log of already-baked
   // bonuses (see wizard.js finish() and the add-feat handler above).
+  const LUCKY_FEAT_ID = "lucky";
+  // «Везунчик»: 3 luck points, spent to reroll a d20 (or force an
+  // attacker to reroll one against you), restored on a long rest. Shown
+  // right under the ability boxes only while the character actually has
+  // this feat -- state lives on the feat's own data.feats entry
+  // (luckyUsed[i] = true means that point is SPENT), the same "array of
+  // booleans on the entry itself" shape featureResourceHtml's pip trackers
+  // already use for feature cards, just on a feat instead.
+  function luckyPointsWidgetHtml() {
+    const entry = (data.feats || []).find((f) => f.id === LUCKY_FEAT_ID);
+    if (!entry) return "";
+    const used = Array.isArray(entry.luckyUsed) ? entry.luckyUsed.slice(0, 3) : [];
+    while (used.length < 3) used.push(false);
+    const stars = used
+      .map(
+        (spent, i) =>
+          `<span class="insp-star ${spent ? "" : "filled"}" data-action="toggle-lucky-point" data-index="${i}" title="${spent ? "Восстановить единицу удачи" : "Отметить единицу удачи потраченной"}">${spent ? "☆" : "★"}</span>`
+      )
+      .join("");
+    return `
+      <div class="row" style="gap:6px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">
+        <span class="muted" style="font-size:0.8rem;">Везунчик, единицы удачи</span>
+        <span class="row" style="gap:1px;">${stars}</span>
+      </div>`;
+  }
   function abilityBonusSourcesBox() {
     const bonuses = data.abilityBonuses || [];
     if (!bonuses.length) return "";
     return `
       <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:0.8rem;">
-        <div class="muted" style="margin-bottom:4px;">Откуда бонусы к характеристикам:</div>
-        ${bonuses
-          .map(
-            (b) => `<div>${escapeHtml(b.source)}: +${b.amount} ${ABILITIES.find((a) => a.id === b.ability)?.label || b.ability}</div>`
-          )
-          .join("")}
+        <button type="button" class="small" data-action="toggle-ability-bonuses" style="width:100%;text-align:left;">${abilityBonusesOpen ? "▾" : "▸"} Откуда бонусы к характеристикам (${bonuses.length})</button>
+        ${
+          abilityBonusesOpen
+            ? `<div style="margin-top:4px;">
+          ${bonuses
+            .map(
+              (b) => `<div>${escapeHtml(b.source)}: +${b.amount} ${ABILITIES.find((a) => a.id === b.ability)?.label || b.ability}</div>`
+            )
+            .join("")}
+        </div>`
+            : ""
+        }
       </div>`;
   }
 
@@ -3584,7 +3705,7 @@ export async function renderSheet(id) {
             <option value="">Выберите черту…</option>
             ${FEATS.map((f) => `<option value="${f.id}" ${f.id === featPreviewId ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
           </select>
-          <button class="small primary" data-action="add-feat" ${preview ? "" : "disabled"}>+ Добавить</button>
+          <button class="small primary" data-action="add-feat" ${preview && !(preview.id === "martial-adept" && featChosenManeuvers.length < 2) ? "" : "disabled"}>+ Добавить</button>
         </div>
         ${
           preview
@@ -3612,6 +3733,22 @@ export async function renderSheet(id) {
                 ${SKILLS.filter((s) => !(data.proficiencies.skills || []).includes(s.id)).map(
                   (s) => `
                   <label style="font-weight:normal;"><input type="checkbox" data-feat-skill-choice value="${s.id}" ${featChosenSkills.includes(s.id) ? "checked" : ""} /> ${escapeHtml(s.label)}</label>`
+                ).join("")}
+              </div>`
+                : ""
+            }
+            ${
+              preview.id === "martial-adept"
+                ? `
+              <p class="muted" style="margin:6px 0 2px;">Выберите 2 приёма (${featChosenManeuvers.length}/2):</p>
+              <div class="grid cols-2">
+                ${MANEUVERS.map(
+                  (m) => `
+                <label class="row" style="gap:6px;align-items:flex-start;font-weight:normal;">
+                  <input type="checkbox" data-feat-maneuver-choice value="${m.id}" ${featChosenManeuvers.includes(m.id) ? "checked" : ""}
+                    ${!featChosenManeuvers.includes(m.id) && featChosenManeuvers.length >= 2 ? "disabled" : ""} />
+                  <span><strong>${escapeHtml(m.name)}</strong><br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(m.desc)}</span></span>
+                </label>`
                 ).join("")}
               </div>`
                 : ""
@@ -4020,6 +4157,14 @@ export async function renderSheet(id) {
     doSave();
     render();
   });
+  on(app, "click", "[data-action=cycle-attack-hand]", (e, el) => {
+    const a = data.attacks[Number(el.dataset.index)];
+    if (!a) return;
+    const idx = ATTACK_HAND_CYCLE.indexOf(a.hand);
+    a.hand = ATTACK_HAND_CYCLE[(idx + 1) % ATTACK_HAND_CYCLE.length];
+    doSave();
+    render();
+  });
   on(app, "input", "[data-attack-field]", (e, el) => {
     const i = Number(el.dataset.attackIndex);
     data.attacks[i][el.dataset.attackField] = el.value;
@@ -4064,6 +4209,10 @@ export async function renderSheet(id) {
       superiorityDie: hasBattlemaster()
         ? { sides: superiorityDieSides(data), available: superiorityDiceAvailable(), onUse: () => { const used = consumeSuperiorityDie(); if (used) render(); return used; } }
         : null,
+      blessed: !!data.blessingActive,
+      powerAttack: hasFeat(GREAT_WEAPON_MASTER_FEAT_ID) && weaponIsHeavyMelee(a)
+        ? { penalty: 5, label: "-5 к атаке (Мастер большого оружия) — при попадании +10 к урону", onToggle: (used) => { a.useGWM = used; doSave(); } }
+        : null,
     });
     const ammoType = ammoTypeForWeapon(a.name);
     if (ammoType) {
@@ -4105,6 +4254,7 @@ export async function renderSheet(id) {
     return (data.feats || []).some((f) => f.id === featId);
   }
   const SAVAGE_ATTACKER_FEAT_ID = "savage-attacker";
+  const GREAT_WEAPON_MASTER_FEAT_ID = "great-weapon-master";
   // Half-orc's "Свирепые атаки": on a critical hit, one extra weapon damage
   // die (on top of the normal crit doubling) is merged straight into the
   // base weapon die count -- unlike Скрытая атака this is automatic on
@@ -4240,7 +4390,7 @@ export async function renderSheet(id) {
     }
     return levels;
   }
-  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead, priorRoll) {
+  function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead, extraDice, priorRoll) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
     if (useVersatile) {
@@ -4336,6 +4486,30 @@ export async function renderSheet(id) {
       parts.push(`${bonus}`);
       breakdown.push({ value: bonus, label: "Песнь победы" });
     }
+    // «Мастер большого оружия»: the -5/+10 choice was made back at the
+    // ATTACK roll (see the powerAttack option on openD20RollModal in the
+    // roll-attack handler), which stored it on the attack itself since this
+    // damage roll is a separate step -- consumed (reset to false) here so
+    // it doesn't silently reapply to a later, un-chosen damage roll on the
+    // same attack.
+    if (a.useGWM) {
+      total += 10;
+      parts.push("10");
+      breakdown.push({ value: 10, label: "Мастер большого оружия" });
+      a.useGWM = false;
+      doSave();
+    }
+    // Free-form extra dice (see the "Дополнительные кубики к урону" builder
+    // in startDamageRoll) -- rolled and added just like any other bonus,
+    // each die type gets its own breakdown entries.
+    (extraDice || []).forEach(({ sides, count }) => {
+      if (!count || !sides) return;
+      const rolls = rollDice(count, sides);
+      const sum = rolls.reduce((s, v) => s + v, 0);
+      total += sum;
+      parts.push(`${count}к${sides}: [${rolls.join(", ")}]`);
+      rolls.forEach((v) => breakdown.push({ value: v, label: `доп. к${sides}` }));
+    });
     // Божественная кара: spends the chosen slot here (rather than trusting
     // the level picked in the modal alone), same "don't trust the confirmed
     // choice blindly" reasoning as the superiority-die spend right below --
@@ -4389,7 +4563,7 @@ export async function renderSheet(id) {
       reroll: savageAvailable
         ? {
             label: "Дикий атакующий: перебросить кости урона",
-            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, 0, false, { total, detail: parts.join(" + ") }),
+            onClick: () => doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, 0, false, [], { total, detail: parts.join(" + ") }),
           }
         : null,
     });
@@ -4421,10 +4595,14 @@ export async function renderSheet(id) {
     // yet) isn't shown as an option, same "don't offer what can't be used"
     // rule the superiority-die/tool checkboxes above already follow.
     const smiteAvailable = a.rangeType === "melee" && hasDivineSmiteFeature() && availableSmiteSlotLevels().length > 0;
-    if (!bonusDice && !sneak && !duelist && !versatileSides && !superiorityAvailable && !rageAvailable && !smiteAvailable) {
-      doRollAttackDamage(a, false, isCrit, false, false, false, false, false, 0, false);
-      return;
-    }
+    // Free-form extra dice (any type, any count) -- same idea as the "Кубики"
+    // tab's own dice-pool builder (openFreeDiceModal in diceModal.js), just
+    // offered here too so a one-off bonus (an inspiration die, a DM ruling,
+    // a homebrew effect) can be folded straight into the damage total
+    // instead of rolled separately and added by hand. Always offered, so
+    // this modal no longer short-circuits straight to the roll even when no
+    // other bonus applies -- it's the one option that's always on the table.
+    let extraDice = [];
     const oneHandedRaw = parseDiceFromText(a.damage);
     const html = `
       <h3>Урон${isCrit ? " (крит!)" : ""}: ${escapeHtml(a.name || "атака")}</h3>
@@ -4495,10 +4673,39 @@ export async function renderSheet(id) {
       </div>`
           : ""
       }
+      <div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageAvailable || smiteAvailable ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
+        <span class="muted" style="font-size:0.82rem;">Дополнительные кубики к урону:</span>
+        <div class="row" style="gap:6px;align-items:center;margin-top:4px;">
+          <select data-extra-die-sides style="flex:none;">
+            ${[4, 6, 8, 10, 12, 20, 100].map((d) => `<option value="${d}" ${d === 6 ? "selected" : ""}>к${d}</option>`).join("")}
+          </select>
+          <span class="muted">×</span>
+          <input type="number" data-extra-die-count min="1" max="99" value="1" style="width:52px;text-align:center;" />
+          <button type="button" class="small" data-action="add-extra-die">+ Добавить</button>
+        </div>
+        <div class="dice-pool-list" data-extra-dice-list style="margin-top:6px;"></div>
+      </div>
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
         <button data-action="confirm-roll-damage" class="primary">Бросить</button>
       </div>`;
     const modal = openModal(html);
+    const renderExtraDiceChips = () => {
+      const list = modal.querySelector("[data-extra-dice-list]");
+      if (!list) return;
+      list.innerHTML = extraDice.length
+        ? extraDice.map((d, i) => `<span class="dice-pool-chip">${d.count}к${d.sides}<button type="button" data-action="remove-extra-die" data-index="${i}" title="Убрать">✕</button></span>`).join("")
+        : "";
+    };
+    on(modal, "click", "[data-action=add-extra-die]", () => {
+      const sides = Number(modal.querySelector("[data-extra-die-sides]").value);
+      const count = Math.max(1, Math.min(99, Number(modal.querySelector("[data-extra-die-count]").value) || 1));
+      extraDice.push({ sides, count });
+      renderExtraDiceChips();
+    });
+    on(modal, "click", "[data-action=remove-extra-die]", (e, el) => {
+      extraDice.splice(Number(el.dataset.index), 1);
+      renderExtraDiceChips();
+    });
     on(modal, "click", "[data-action=confirm-roll-damage]", () => {
       const useSpecial = bonusDice ? modal.querySelector("[data-use-special]").checked : false;
       const useSneak = sneak ? modal.querySelector("[data-use-sneak]").checked : false;
@@ -4511,7 +4718,7 @@ export async function renderSheet(id) {
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead);
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, useRage, smiteLevel, useSmiteUndead, extraDice);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
@@ -4562,7 +4769,7 @@ export async function renderSheet(id) {
     const w = data.weapons[Number(el.dataset.index)];
     if (!w) return;
     const typeNote = w.type ? ` ${w.type}` : "";
-    data.attacks.push({ name: w.name, bonus: "", damage: `${w.damage || ""}${typeNote}`.trim(), special: w.special || "", useSpecial: false, rangeType: w.rangeType || "" });
+    data.attacks.push({ name: w.name, bonus: "", damage: `${w.damage || ""}${typeNote}`.trim(), special: w.special || "", useSpecial: false, rangeType: w.rangeType || "", hand: autoAssignAttackHand(w.properties) });
     doSave();
     render();
   });
@@ -4590,6 +4797,7 @@ export async function renderSheet(id) {
     const feat = FEATS.find((f) => f.id === featPreviewId);
     featChosenAbility = feat && feat.abilityIncrease ? feat.abilityIncrease.choices[0] : "";
     featChosenSkills = [];
+    featChosenManeuvers = [];
     render();
   });
   on(app, "change", "[data-feat-ability-choice]", (e, el) => {
@@ -4602,6 +4810,15 @@ export async function renderSheet(id) {
     } else {
       featChosenSkills = featChosenSkills.filter((s) => s !== v);
     }
+  });
+  on(app, "change", "[data-feat-maneuver-choice]", (e, el) => {
+    const v = el.value;
+    if (el.checked) {
+      if (!featChosenManeuvers.includes(v) && featChosenManeuvers.length < 2) featChosenManeuvers.push(v);
+    } else {
+      featChosenManeuvers = featChosenManeuvers.filter((m) => m !== v);
+    }
+    render();
   });
   on(app, "click", "[data-action=add-feat]", () => {
     const feat = FEATS.find((f) => f.id === featPreviewId);
@@ -4639,9 +4856,38 @@ export async function renderSheet(id) {
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
     if (feat.id === TOUGH_FEAT_ID) applyToughFeatHpGrant();
+    // Armor/weapon proficiency-granting feats (Знаток лёгких/средних/
+    // тяжёлых доспехов, etc.) -- same text parser class/subclass/race
+    // features already go through via applyFeatureProficiencyGrants, just
+    // called directly here since this feat text has no separate "name"
+    // wrapper the way a feature card's short blurb does.
+    const profGrants = parseProficiencyGrantsFromText(feat.desc);
+    profGrants.armor.forEach((a) => { if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a); });
+    profGrants.weapons.forEach((w) => { if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w); });
+    // «Воинский адепт»: 2 chosen maneuvers plus its own fixed-size (к6, 1 die)
+    // superiority-die pool -- same maneuver cards Battle Master's own pick
+    // pushes, plus a dedicated pool card kept separate from Battle Master's
+    // (see MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME below) since this feat's
+    // die stays к6 forever even if the character is also a high-level Battle
+    // Master with a bigger die from that source.
+    if (feat.id === "martial-adept") {
+      const source = `Черта (${feat.name})`;
+      featChosenManeuvers.forEach((id) => {
+        const m = MANEUVERS.find((mm) => mm.id === id);
+        if (!m) return;
+        if ((data.features || []).some((f) => f.name === m.name && f.source === source)) return;
+        data.features.push({ name: m.name, source, desc: m.desc });
+      });
+      data.features.push({
+        name: MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME_TEXT,
+        source,
+        desc: "Даёт одну кость превосходства к6, используемую для выбранных приёмов. Тратится при использовании, восстанавливается после окончания короткого или продолжительного отдыха.",
+      });
+    }
     featPreviewId = "";
     featChosenAbility = "";
     featChosenSkills = [];
+    featChosenManeuvers = [];
     doSave();
     render();
   });
@@ -4727,6 +4973,38 @@ export async function renderSheet(id) {
   });
   on(app, "click", "[data-action=toggle-bladesong]", () => {
     data.bladesongActive = !data.bladesongActive;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-condition]", (e, el) => {
+    const id = el.dataset.condition;
+    data.conditions = data.conditions || [];
+    if (data.conditions.includes(id)) data.conditions = data.conditions.filter((c) => c !== id);
+    else data.conditions.push(id);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-blessing]", () => {
+    data.blessingActive = !data.blessingActive;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-ability-bonuses]", () => {
+    abilityBonusesOpen = !abilityBonusesOpen;
+    render();
+  });
+  on(app, "click", "[data-action=toggle-roll-log-panel]", () => {
+    rollLogPanelOpen = !rollLogPanelOpen;
+    render();
+  });
+  on(app, "click", "[data-action=toggle-lucky-point]", (e, el) => {
+    const entry = (data.feats || []).find((f) => f.id === LUCKY_FEAT_ID);
+    if (!entry) return;
+    const i = Number(el.dataset.index);
+    const used = Array.isArray(entry.luckyUsed) ? entry.luckyUsed.slice(0, 3) : [];
+    while (used.length < 3) used.push(false);
+    used[i] = !used[i];
+    entry.luckyUsed = used;
     doSave();
     render();
   });
@@ -4916,15 +5194,15 @@ export async function renderSheet(id) {
   on(app, "click", "[data-action=roll-ability]", (e, el) => {
     if (e.target.matches("input")) return;
     const ab = el.dataset.ability;
-    openD20RollModal({ label: `Проверка: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: abilityCheckBonus(data, ab) });
+    openD20RollModal({ label: `Проверка: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: abilityCheckBonus(data, ab), blessed: !!data.blessingActive });
   });
   on(app, "click", "[data-action=roll-save]", (e, el) => {
     const ab = el.dataset.ability;
-    openD20RollModal({ label: `Спасбросок: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: saveBonus(data, ab) });
+    openD20RollModal({ label: `Спасбросок: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: saveBonus(data, ab), blessed: !!data.blessingActive });
   });
   on(app, "click", "[data-action=roll-skill]", (e, el) => {
     const sk = el.dataset.skill;
-    openD20RollModal({ label: `Навык: ${SKILLS.find((s) => s.id === sk).label}`, modifier: skillBonus(data, sk) });
+    openD20RollModal({ label: `Навык: ${SKILLS.find((s) => s.id === sk).label}`, modifier: skillBonus(data, sk), blessed: !!data.blessingActive });
   });
   on(app, "click", "[data-action=roll-initiative]", () => {
     openD20RollModal({ label: "Инициатива", modifier: initiativeBonus(data) });

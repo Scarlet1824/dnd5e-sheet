@@ -117,11 +117,18 @@ export function abilityCheckBonus(data, abilityId) {
   return bonus;
 }
 
+// «Внимательный»: "+5 к пассивной проверке Мудрости (Восприятие) и
+// пассивной проверке Интеллекта (Расследование)" -- Восприятие/Расследование
+// only, NOT Проницательность (Insight), despite the feat's name inviting the
+// mix-up.
+function hasObservantFeat(data) {
+  return (data.feats || []).some((f) => f.id === "observant");
+}
 export function passivePerception(data) {
-  return 10 + skillBonus(data, "perception");
+  return 10 + skillBonus(data, "perception") + (hasObservantFeat(data) ? 5 : 0);
 }
 export function passiveInvestigation(data) {
-  return 10 + skillBonus(data, "investigation");
+  return 10 + skillBonus(data, "investigation") + (hasObservantFeat(data) ? 5 : 0);
 }
 export function passiveInsight(data) {
   return 10 + skillBonus(data, "insight");
@@ -220,6 +227,20 @@ function bladesongACBonus(data, armor) {
   return Math.max(1, getAbilityMod(data, "int"));
 }
 
+// «Использование двух оружий»: "+1 к КД, когда держите в каждой руке по
+// рукопашному оружию" -- reads the attacks tab's own per-attack "hand"
+// tracker (see ATTACK_HAND_CYCLE/autoAssignAttackHand in sheet.js) rather
+// than any global "two-weapon fighting" flag, since that's the sheet's only
+// record of which weapon sits in which hand. `rangeType !== "ranged"` is
+// the same "counts as melee" test the rest of the app already uses for a
+// thrown/finesse weapon.
+function dualWielderACBonus(data) {
+  if (!(data.feats || []).some((f) => f.id === "dual-wielder")) return 0;
+  const attacks = data.attacks || [];
+  const rightMelee = attacks.some((a) => a.hand === "right" && a.rangeType !== "ranged");
+  const leftMelee = attacks.some((a) => a.hand === "left" && a.rangeType !== "ranged");
+  return rightMelee && leftMelee ? 1 : 0;
+}
 export function armorClass(data) {
   const dexMod = getAbilityMod(data, "dex");
   // Backward compatibility for characters saved before the armor/shield model
@@ -248,7 +269,7 @@ export function armorClass(data) {
   }
   const shieldBonus = data.shieldEquipped ? Number(data.shieldACBonus ?? SHIELD_DEFAULT_AC_BONUS) : 0;
   const featureBonus = passiveArmorFeatureACBonus(data, armor);
-  return base + shieldBonus + featureBonus + bladesongACBonus(data, armor);
+  return base + shieldBonus + featureBonus + bladesongACBonus(data, armor) + dualWielderACBonus(data);
 }
 
 export function initiativeBonus(data) {

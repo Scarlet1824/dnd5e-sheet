@@ -551,6 +551,21 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
 .wizard-steps .step.active { background: linear-gradient(180deg, var(--gold-bright), var(--gold)); color: #1a1206; border-color: var(--gold); font-weight: bold; }
 .wizard-steps .step.done { color: var(--green); border-color: var(--green); }
 
+/* PHB condition toggles across the bottom of the header panel -- see
+   conditionsPanelHtml() in sheet.js. Deliberately flat/muted (not gold, the
+   app's usual accent) so an OFF row of 15 buttons doesn't visually compete
+   with the sheet's real accent colour; an active condition switches to the
+   gold accent, same "primary" look every other toggle button in the app
+   uses, so it reads consistently as "this is on" wherever it appears. */
+.condition-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.condition-pill {
+  font-size: 0.8rem; padding: 5px 11px; border-radius: 14px; cursor: pointer;
+  background: var(--bg-panel-2); border: 1px solid var(--border); color: var(--text-dim);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+.condition-pill:hover { border-color: var(--gold-dim); color: var(--text); }
+.condition-pill.active { background: var(--gold); border-color: var(--gold); color: #1a1206; font-weight: 700; }
+
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px;

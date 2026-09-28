@@ -71,7 +71,18 @@ export function showRollResult({ label, detail, total, isCrit, isFumble, breakdo
 // calls `onUse()` to spend it from the character's own pool -- this modal
 // has no character context of its own, so the caller supplies both the die
 // size/remaining count to show and the callback that actually spends one.
-export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null }) {
+// `blessed` (optional) -- true while the "Благословение" toggle (top of the
+// sheet, next to Вдохновение барда) is on: adds a к4 to the roll
+// automatically, no checkbox, since unlike the superiority die it isn't a
+// limited resource the player opts into per-roll.
+// `powerAttack` (optional) -- «Мастер большого оружия»/«Стрелок дальнего
+// боя»: a checkbox that subtracts `penalty` from the ATTACK roll's modifier
+// when checked. The matching damage bonus isn't decided here (this modal
+// only rolls a к20) -- `onToggle(checked)` reports the player's choice back
+// to the caller so it can remember it (on the attack itself) for the
+// damage roll that follows, the same way `a.useSpecial` already persists a
+// choice from one roll to the next.
+export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null }) {
   const showDieOption = superiorityDie && superiorityDie.available > 0;
   const html = `
     <h3>${escapeHtml(label)}</h3>
@@ -81,6 +92,14 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
         ? `<label class="row" style="gap:8px;align-items:center;margin-bottom:10px;">
       <input type="checkbox" data-superiority-die />
       <span>добавить кость превосходства (к${superiorityDie.sides}) — осталось ${superiorityDie.available}</span>
+    </label>`
+        : ""
+    }
+    ${
+      powerAttack
+        ? `<label class="row" style="gap:8px;align-items:center;margin-bottom:10px;">
+      <input type="checkbox" data-power-attack />
+      <span>${escapeHtml(powerAttack.label || `-${powerAttack.penalty} к атаке, +10 к урону при попадании`)}</span>
     </label>`
         : ""
     }
@@ -95,17 +114,25 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
   on(modal, "click", "[data-mode]", (e, el) => {
     const mode = el.dataset.mode;
     const useDie = showDieOption && modal.querySelector("[data-superiority-die]").checked;
-    const r = rollD20({ modifier, mode, label, critMin });
+    const usePower = !!(powerAttack && modal.querySelector("[data-power-attack]").checked);
+    if (powerAttack) powerAttack.onToggle(usePower);
+    const effectiveModifier = modifier - (usePower ? powerAttack.penalty : 0);
+    const r = rollD20({ modifier: effectiveModifier, mode, label, critMin });
     closeModal();
     let detail =
       mode === "normal"
-        ? `к20: [${r.first}] ${formatModifier(modifier)}`
-        : `к20: [${r.first}, ${r.second}] → взято ${r.picked} ${formatModifier(modifier)} (${mode === "advantage" ? "преим." : "помеха"})`;
+        ? `к20: [${r.first}] ${formatModifier(effectiveModifier)}`
+        : `к20: [${r.first}, ${r.second}] → взято ${r.picked} ${formatModifier(effectiveModifier)} (${mode === "advantage" ? "преим." : "помеха"})`;
     let total = r.total;
     if (useDie && superiorityDie.onUse()) {
       const dieRoll = rollDie(superiorityDie.sides);
       total += dieRoll;
       detail += ` + к${superiorityDie.sides}: [${dieRoll}]`;
+    }
+    if (blessed) {
+      const blessRoll = rollDie(4);
+      total += blessRoll;
+      detail += ` + к4: [${blessRoll}]`;
     }
     showRollResult({ label, detail, total, isCrit: r.isCrit, isFumble: r.isFumble });
   });
