@@ -1008,7 +1008,7 @@ export function renderWizard() {
           return `
           <div class="col">
             <label>${a.label}${raceBadge(bonus)}</label>
-            <input type="number" min="1" max="30" data-manual-ability="${a.id}" value="${state.abilities[a.id]}" />
+            <input type="number" min="1" max="20" data-manual-ability="${a.id}" value="${state.abilities[a.id]}" />
             <span class="muted" style="font-size:0.8rem;">Итог: ${state.abilities[a.id] + bonus}</span>
           </div>`;
         }).join("")}
@@ -1825,6 +1825,17 @@ export function renderWizard() {
 
   function wire() {
     const app = $("#app");
+    // The top-left "← ⚔ D&D 5e" home link used to jump straight back to the
+    // character list with no warning, silently discarding whatever progress
+    // the player had made in the wizard (nothing is saved until "Создать
+    // персонажа" on the last step). Any step past the first, or a race/class
+    // already picked on that first step, counts as "progress worth losing".
+    on(app, "click", "a.brand", (e) => {
+      const hasProgress = state.step > 0 || !!state.raceId || !!state.classId;
+      if (hasProgress && !confirm("Прервать создание персонажа? Несохранённый прогресс будет потерян.")) {
+        e.preventDefault();
+      }
+    });
     on(app, "click", "[data-action=back]", () => { state.step = Math.max(0, state.step - 1); render(); });
     on(app, "click", "[data-action=next]", () => { if (!canAdvance()) return; state.step = Math.min(relevantSteps().length - 1, state.step + 1); render(); });
     on(app, "click", "[data-action=finish]", (e, el) => { if (canAdvance()) finish(el); });
@@ -1988,6 +1999,16 @@ export function renderWizard() {
     });
     on(app, "input", "[data-manual-ability]", (e, el) => {
       state.abilities[el.dataset.manualAbility] = Number(el.value) || 1;
+    });
+    // A base ability score at creation can't be typed above 20 (or below 1)
+    // -- clamped on blur/change rather than every keystroke, same reasoning
+    // as the sheet's own ability-score clamp: typing a fresh value after
+    // clearing the field shouldn't get snapped back mid-edit.
+    on(app, "change", "[data-manual-ability]", (e, el) => {
+      const clamped = Math.max(1, Math.min(20, Math.round(Number(el.value) || 1)));
+      el.value = clamped;
+      state.abilities[el.dataset.manualAbility] = clamped;
+      render();
     });
     on(app, "click", "[data-action='roll-dice']", () => {
       state.diceRolls = rollSixAbilityScores();

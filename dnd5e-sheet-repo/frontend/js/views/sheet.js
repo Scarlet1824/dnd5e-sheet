@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -55,6 +55,16 @@ function addProficiencyValue(list, value) {
     if (PROFICIENCY_PLACEHOLDER_RE.test((list[i] || "").trim())) list.splice(i, 1);
   }
   if (!list.includes(value)) list.push(value);
+}
+
+// Clamps a numeric field's raw <input> string to an integer in [min, max],
+// falling back to `fallback` for anything blank/non-numeric -- shared by
+// every number input that got fixed for allowing negative/unbounded values
+// (ability scores, HP, AC-related fields) so they all round the same way.
+function clampInt(raw, min, max, fallback) {
+  const n = raw === "" || raw == null ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
 }
 
 export async function renderSheet(id) {
@@ -114,6 +124,16 @@ export async function renderSheet(id) {
   let restState = { tab: "short", message: "" }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
   let restModalEl = null; // the rest modal's root element, once opened -- used to refresh its content in place without closing it
   let abilityBonusesOpen = false; // main tab: whether the "Откуда бонусы к характеристикам" log is expanded
+  // Header's Раса/Предыстория fields: once RACES/BACKGROUNDS ship a matching
+  // name, most characters just pick one from a dropdown -- but freeform text
+  // (a homebrew race, a personal variant) still needs to work, so a "Своё"
+  // option reveals a plain text input instead. These track "explicitly
+  // switched to custom via the dropdown" so an empty custom field doesn't
+  // immediately snap back to the dropdown on the next render; a character
+  // whose saved name already doesn't match any known entry starts in custom
+  // mode automatically (see raceIsCustom/backgroundIsCustom below).
+  let raceCustomOpen = false;
+  let backgroundCustomOpen = false;
   let rollLogPanelOpen = false; // main tab: whether the bottom-right "Журнал бросков" list is expanded (the log itself keeps logging either way)
 
   const saveIndicator = () => $("[data-save-indicator]");
@@ -476,6 +496,38 @@ export async function renderSheet(id) {
         </div>
       </div>`;
   }
+  // Раса/Предыстория: a dropdown of known RACES/BACKGROUNDS names, plus a
+  // "Своё" option that reveals a plain text field for anything homebrew --
+  // see raceCustomOpen/backgroundCustomOpen above for why a boolean flag
+  // (not just "does the saved name match a known one") decides custom mode.
+  function raceFieldHtml() {
+    const known = RACES.some((r) => r.name === data.raceName);
+    const custom = raceCustomOpen || (!!data.raceName && !known);
+    return `
+      <div class="col">
+        <label>Раса</label>
+        <select data-action="race-select">
+          <option value="">—</option>
+          ${RACES.map((r) => `<option value="${escapeHtml(r.name)}" ${!custom && data.raceName === r.name ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
+          <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
+        </select>
+        ${custom ? `<input type="text" data-bind="raceName" maxlength="30" value="${escapeHtml(data.raceName || "")}" placeholder="своя раса" style="margin-top:4px;" />` : ""}
+      </div>`;
+  }
+  function backgroundFieldHtml() {
+    const known = BACKGROUNDS.some((b) => b.name === data.backgroundName);
+    const custom = backgroundCustomOpen || (!!data.backgroundName && !known);
+    return `
+      <div class="col">
+        <label>Предыстория</label>
+        <select data-action="background-select">
+          <option value="">—</option>
+          ${BACKGROUNDS.map((b) => `<option value="${escapeHtml(b.name)}" ${!custom && data.backgroundName === b.name ? "selected" : ""}>${escapeHtml(b.name)}</option>`).join("")}
+          <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
+        </select>
+        ${custom ? `<input type="text" data-bind="backgroundName" maxlength="30" value="${escapeHtml(data.backgroundName || "")}" placeholder="своя предыстория" style="margin-top:4px;" />` : ""}
+      </div>`;
+  }
   function headerBlock() {
     const lvl = totalLevel(data);
     const pb = proficiencyBonus(data);
@@ -498,14 +550,8 @@ export async function renderSheet(id) {
               </div>
             </div>
             <div class="grid cols-3" style="margin-top:4px;">
-              <div class="col">
-                <label>Раса</label>
-                <input type="text" data-bind="raceName" maxlength="30" value="${escapeHtml(data.raceName || "")}" placeholder="напр. Эльф" />
-              </div>
-              <div class="col">
-                <label>Предыстория</label>
-                <input type="text" data-bind="backgroundName" maxlength="30" value="${escapeHtml(data.backgroundName || "")}" placeholder="напр. Мудрец" />
-              </div>
+              ${raceFieldHtml()}
+              ${backgroundFieldHtml()}
               <div class="col">
                 <label>Мировоззрение</label>
                 <select data-bind="alignment">
@@ -639,13 +685,6 @@ export async function renderSheet(id) {
     return `
       <div class="panel panel-tight" style="margin:0;">
         <p style="margin:0 0 8px;">Кости хитов: <strong class="num">${hd.current}</strong> из ${hd.total} (к${hd.die})</p>
-        <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap;">
-          <label class="row" style="gap:6px;align-items:center;">
-            <span class="muted" style="font-size:0.82rem;">Потратить костей:</span>
-            <input type="number" min="0" max="${hd.current}" value="${Math.min(1, hd.current)}" data-rest-dice-count style="width:60px;" />
-          </label>
-          <button type="button" class="small primary" data-action="spend-hit-dice" ${hd.current <= 0 ? "disabled" : ""}>Бросить и восстановить хиты</button>
-        </div>
         <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">Каждая кость даёт 1к${hd.die} ${formatModifier(getAbilityMod(data, "con"))} (модификатор Телосложения) хитов.</p>
       </div>
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
@@ -781,26 +820,6 @@ export async function renderSheet(id) {
     on(modal, "click", "[data-rest-tab]", (e, el) => {
       restState.tab = el.dataset.restTab;
       restState.message = "";
-      refreshRestModal();
-    });
-    on(modal, "click", "[data-action=spend-hit-dice]", () => {
-      const hd = hitDiceInfo();
-      const input = modal.querySelector("[data-rest-dice-count]");
-      const count = Math.max(0, Math.min(hd.current, Number(input?.value) || 0));
-      if (count <= 0) return;
-      const conMod = getAbilityMod(data, "con");
-      // «Стойкий»: each Hit Die spent this way heals at least 2×Con modifier
-      // (minimum 2), regardless of what the die itself rolled.
-      const durableFloor = hasFeat("durable") ? Math.max(2, 2 * conMod) : 0;
-      const rolls = rollDice(count, hd.die).map((r) => Math.max(r, durableFloor));
-      const healTotal = Math.max(0, rolls.reduce((a, b) => a + b, 0) + count * conMod);
-      data.hitDice.current = hd.current - count;
-      const max = Number(data.hp.max) || 0;
-      data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + healTotal);
-      showRollResult({ label: `Кости хитов (${count}×к${hd.die})`, detail: `${rolls.join("+")} ${formatModifier(conMod * count)}`, total: healTotal });
-      restState.message = "";
-      doSave();
-      render();
       refreshRestModal();
     });
     on(modal, "click", "[data-action=do-short-rest]", () => {
@@ -2430,7 +2449,7 @@ export async function renderSheet(id) {
           </div>
           <div class="col">
             <label>Базовый КД</label>
-            <input type="number" data-bind="customArmor.baseAC" value="${c.baseAC ?? 10}" />
+            <input type="number" min="1" max="20" data-bind="customArmor.baseAC" data-clamp="1:20" value="${c.baseAC ?? 10}" />
           </div>
         </div>
         <div class="grid cols-2" style="margin-top:8px;">
@@ -2444,7 +2463,7 @@ export async function renderSheet(id) {
           </div>
           <div class="col">
             <label>Максимум Ловкости</label>
-            <input type="number" data-bind="customArmor.dexCap" value="${c.dexCap ?? 2}" />
+            <input type="number" min="0" max="20" data-bind="customArmor.dexCap" data-clamp="0:20" value="${c.dexCap ?? 2}" />
           </div>
         </div>
         <div class="col" style="margin-top:8px;">
@@ -2515,7 +2534,7 @@ export async function renderSheet(id) {
               </div>
               <div class="col">
                 <label>Щит, +КД</label>
-                <input type="number" style="width:100%;" data-bind="shieldACBonus" value="${data.shieldACBonus ?? 2}" />
+                <input type="number" style="width:100%;" min="0" max="20" data-bind="shieldACBonus" data-clamp="0:20" value="${data.shieldACBonus ?? 2}" />
               </div>
             </div>
             ${data.armorId === "custom" ? customArmorFields() : ""}
@@ -2530,15 +2549,15 @@ export async function renderSheet(id) {
             <div class="grid cols-3" style="margin-top:10px;">
               <div class="col">
                 <label>Хиты максимум</label>
-                <input type="number" data-bind="hp.max" value="${data.hp.max}" />
+                <input type="number" min="1" max="350" data-bind="hp.max" data-clamp="1:350" value="${data.hp.max}" />
               </div>
               <div class="col">
                 <label>Хиты текущие</label>
-                <input type="number" data-bind="hp.current" value="${data.hp.current}" />
+                <input type="number" min="0" max="350" data-bind="hp.current" data-clamp="0:350" value="${data.hp.current}" />
               </div>
               <div class="col">
                 <label>Временные хиты</label>
-                <input type="number" data-bind="hp.temp" value="${data.hp.temp}" />
+                <input type="number" min="0" max="350" data-bind="hp.temp" data-clamp="0:350" value="${data.hp.temp}" />
               </div>
             </div>
             <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
@@ -3356,7 +3375,7 @@ export async function renderSheet(id) {
     return `
       <div class="ability-box" data-action="roll-ability" data-ability="${a.id}">
         <div class="label">${a.label}</div>
-        <input type="number" class="score-input" data-ability-score="${a.id}" value="${score}" />
+        <input type="number" class="score-input" min="1" max="30" data-ability-score="${a.id}" value="${score}" />
         <div class="mod" data-derived="mod-${a.id}">${formatModifier(mod)}</div>
       </div>`;
   }
@@ -4279,6 +4298,20 @@ export async function renderSheet(id) {
   };
   on(app, "input", "[data-bind]", bindHandler);
   on(app, "change", "select[data-bind]", bindHandler);
+  // Shared min/max guard for the number inputs that used to accept negative
+  // or unbounded values (HP, shield/armor AC fields) -- `data-clamp="min:max"`
+  // on the input, checked on blur/change (not every keystroke, so clearing
+  // the field to type a fresh multi-digit value doesn't get snapped back
+  // mid-edit the way an on-input clamp would).
+  on(app, "change", "[data-clamp]", (e, el) => {
+    const [min, max] = el.dataset.clamp.split(":").map(Number);
+    const fallback = Number.isFinite(min) ? min : 0;
+    const clamped = clampInt(el.value, min, max, fallback);
+    el.value = clamped;
+    set(data, el.dataset.bind, clamped);
+    doSave();
+    recomputeIfNeeded(el.dataset.bind);
+  });
   on(app, "change", "[data-bind-checkbox]", (e, el) => {
     set(data, el.dataset.bindCheckbox, el.checked);
     doSave();
@@ -4292,6 +4325,21 @@ export async function renderSheet(id) {
   on(app, "input", "[data-ability-score]", (e, el) => {
     const ab = el.dataset.abilityScore;
     set(data, `abilities.${ab}`, el.value === "" ? 10 : Number(el.value));
+    doSave();
+    recomputeAll();
+  });
+  // 1-30 is the actual rules ceiling/floor for an ability score (a wish/
+  // magic-item effect can push a score past 20, but nothing pushes it past
+  // 30) -- clamped here on blur/change rather than on every keystroke, so
+  // typing a fresh multi-digit value (clear the field, then type "1", "8")
+  // doesn't get snapped back to the floor mid-edit. Creation/level-up below
+  // stop at 20 instead, since nothing short of a manual sheet edit is meant
+  // to push a score past that.
+  on(app, "change", "[data-ability-score]", (e, el) => {
+    const ab = el.dataset.abilityScore;
+    const clamped = clampInt(el.value, 1, 30, 10);
+    el.value = clamped;
+    set(data, `abilities.${ab}`, clamped);
     doSave();
     recomputeAll();
   });
@@ -5549,8 +5597,19 @@ export async function renderSheet(id) {
   });
 
   // dice / rolls
+  // Selecting the score-input's text (mousedown inside it, drag, release
+  // just past its edge but still inside the surrounding .ability-box) used
+  // to fire the box's own roll-ability click, since the click's target ends
+  // up being the box rather than the input -- the plain `e.target.matches
+  // ("input")` guard only catches a release that lands back on the input
+  // itself. Tracking where the mousedown started instead catches a release
+  // anywhere else in the box too.
+  let abilityRollMousedownOnInput = false;
+  on(app, "mousedown", "[data-ability-score]", () => { abilityRollMousedownOnInput = true; });
   on(app, "click", "[data-action=roll-ability]", (e, el) => {
-    if (e.target.matches("input")) return;
+    const startedOnInput = abilityRollMousedownOnInput;
+    abilityRollMousedownOnInput = false;
+    if (e.target.matches("input") || startedOnInput) return;
     const ab = el.dataset.ability;
     openD20RollModal({ label: `Проверка: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: abilityCheckBonus(data, ab), blessed: !!data.blessingActive });
   });
@@ -5608,6 +5667,29 @@ export async function renderSheet(id) {
     render();
   });
 
+  on(app, "change", "[data-action=race-select]", (e, el) => {
+    if (el.value === "__custom__") {
+      raceCustomOpen = true;
+      data.raceName = "";
+    } else {
+      raceCustomOpen = false;
+      data.raceName = el.value;
+    }
+    doSave();
+    render();
+  });
+  on(app, "change", "[data-action=background-select]", (e, el) => {
+    if (el.value === "__custom__") {
+      backgroundCustomOpen = true;
+      data.backgroundName = "";
+    } else {
+      backgroundCustomOpen = false;
+      data.backgroundName = el.value;
+    }
+    doSave();
+    render();
+  });
+
   // portrait (top-left image box) — click opens the hidden file input, then
   // the chosen image is downscaled via canvas before being stored as a data
   // URL, to avoid bloating the character's JSON blob in D1.
@@ -5618,6 +5700,12 @@ export async function renderSheet(id) {
   on(app, "change", "[data-portrait-input]", (e, el) => {
     const file = el.files && el.files[0];
     if (!file) return;
+    const MAX_PORTRAIT_BYTES = 2 * 1024 * 1024;
+    if (file.size > MAX_PORTRAIT_BYTES) {
+      alert(`Файл слишком большой (${(file.size / (1024 * 1024)).toFixed(1)} МБ) — выберите изображение до 2 МБ.`);
+      el.value = "";
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();

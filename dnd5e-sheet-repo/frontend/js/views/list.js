@@ -71,11 +71,12 @@ export async function renderList() {
   function draw() {
     mount(`
       ${topBar(user)}
+      <h2 class="muted" style="margin:0 0 10px;font-weight:600;">Интерактивный лист персонажа</h2>
       <div class="row between">
         <h1>Мои персонажи</h1>
         <div class="row">
-          <button data-action="new-manual">+ Пустой лист</button>
-          <button data-action="new-wizard" class="primary">+ Мастер создания</button>
+          <button data-action="new-manual">Заполнить вручную</button>
+          <button data-action="new-wizard" class="primary">Мастер создания</button>
         </div>
       </div>
       ${
