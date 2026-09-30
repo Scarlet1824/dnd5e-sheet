@@ -313,8 +313,28 @@ export function speedBonusSources(data) {
   if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
   return sources;
 }
-export function totalSpeed(data) {
+// Exhaustion level 0-6 (data.exhaustion). Old sheets stored it as an
+// "exhaustion" entry in data.conditions (a plain toggle) -- that counts as
+// level 1 until the player picks a level from the new dropdown.
+export function exhaustionLevel(data) {
+  if (data.exhaustion != null) return Math.max(0, Math.min(6, Math.floor(Number(data.exhaustion) || 0)));
+  return (data.conditions || []).includes("exhaustion") ? 1 : 0;
+}
+// Speed before exhaustion (base + bonuses), for the "Итого" breakdown.
+export function speedBeforeExhaustion(data) {
   return (Number(data.speed) || 0) + speedBonusSources(data).reduce((s, b) => s + b.amount, 0);
+}
+export function totalSpeed(data) {
+  const base = speedBeforeExhaustion(data);
+  const ex = exhaustionLevel(data);
+  if (ex >= 5) return 0;
+  if (ex >= 2) return Math.floor(base / 2);
+  return base;
+}
+// Exhaustion 4+ halves the hit point maximum.
+export function effectiveMaxHp(data) {
+  const max = Number(data.hp?.max) || 0;
+  return exhaustionLevel(data) >= 4 ? Math.floor(max / 2) : max;
 }
 
 export function abilityLabel(abilityId) {

@@ -396,6 +396,9 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
   flex: 1; min-width: 0; background: transparent; border: none; padding: 0; font-size: 0.88rem;
   resize: none; overflow-y: auto; height: 100%; line-height: 1.4; color: var(--text);
 }
+/* Big text areas (Личность, Заметки): fixed height, scroll inside, like the
+   feature-card descriptions. */
+textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; min-height: 90px; }
 .feature-card-uses { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
 .feature-card-uses .pip {
   width: 16px; height: 16px; border-radius: 50%; flex: none; cursor: pointer;
@@ -436,6 +439,15 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .spell-card:hover { border-color: var(--gold); }
+.beast-card { height: 620px; }
+.beast-abil { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; text-align: center; font-size: 0.8rem; }
+.beast-abil > div { display: flex; flex-direction: column; gap: 1px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 0; }
+.beast-abil .prop-label { font-size: 0.7rem; }
+.beast-note { font-size: 0.8rem; }
+.beast-ok { color: var(--green); }
+.beast-no { color: var(--red); }
+.beast-section-title { margin: 8px 0 4px; color: var(--gold-bright); font-size: 0.95rem; border-bottom: 1px solid var(--border); }
+.beast-card-actions { display: flex; gap: 8px; flex: none; }
 .spell-card.known { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 0 12px rgba(212, 175, 55, 0.25); }
 .spell-card-header { display: flex; align-items: flex-start; gap: 10px; }
 .spell-card-icon {
@@ -574,6 +586,16 @@ table.sheet-table.attacks-table input, table.sheet-table.attacks-table select { 
 }
 .condition-pill:hover { border-color: var(--gold-dim); color: var(--text); }
 .condition-pill.active { background: var(--gold); border-color: var(--gold); color: #1a1206; font-weight: 700; }
+
+.exh-menu {
+  position: absolute; top: 100%; left: 0; z-index: 20; margin-top: 4px; min-width: 300px; max-width: 92vw;
+  background: var(--bg-panel); border: 1px solid var(--gold-dim); border-radius: 8px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px; box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+}
+.exh-item { text-align: left; font-size: 0.85rem; padding: 6px 10px; border-radius: 6px; background: transparent; border: 1px solid transparent; color: var(--text); cursor: pointer; }
+.exh-item:hover { background: rgba(212, 175, 55, 0.14); border-color: var(--gold-dim); }
+.exh-item.selected { background: var(--gold); color: #1a1206; font-weight: 700; }
+.exh-detail { margin-top: 4px; padding: 8px 10px; border-top: 1px solid var(--border); font-size: 0.82rem; color: var(--text-dim); }
 
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);

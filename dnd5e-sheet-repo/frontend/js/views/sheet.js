@@ -1,12 +1,12 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
   passivePerception, passiveInvestigation, passiveInsight, armorClass, initiativeBonus, spellSaveDC, spellAttackBonus,
-  speedBonusSources, totalSpeed,
+  speedBonusSources, totalSpeed, exhaustionLevel, effectiveMaxHp, speedBeforeExhaustion,
 } from "../character.js";
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
@@ -97,7 +97,7 @@ export async function renderSheet(id) {
   }
 
   const data = character.data;
-  let activeTab = "main"; // main | attacks | spells | inventory | feats | traits | personality | pets
+  let activeTab = "main"; // main | attacks | spells | forms | inventory | feats | traits | personality | pets
   let dicePool = []; // [{sides, count}] -- dice queued in the "Кубики" panel, rolled together and cleared on "Бросить"
   let featPreviewId = ""; // currently-highlighted feat in the picker, for description preview before adding
   let featChosenAbility = ""; // ability chosen for a multi-choice abilityIncrease feat, before "Добавить"
@@ -132,6 +132,15 @@ export async function renderSheet(id) {
   let spellPrepMode = false; // spells tab: whether the full prepare-spells picker (all available spells, not just today's prepared ones) is open
   let restState = { tab: "short", message: "", diceCount: 0, pendingDice: 0 }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
   let restModalEl = null; // the rest modal's root element, once opened -- used to refresh its content in place without closing it
+  // "Облики" tab: beast stat blocks (data/beasts.js, loaded on first open).
+  let beastsData = null;
+  let beastsLoading = false;
+  let formBrowseOpen = false;
+  let formSearch = "";
+  let formCrFilter = "all";
+  let formMoveFilter = "all";
+  let formOnlyAllowed = false;
+  let exhaustionMenuOpen = false; // header: Истощение level dropdown open?
   // Money calculator (inventory tab): which coin is selected, the typed
   // amount, whether the "exchange into which coin?" picker is showing, and
   // the last result/error line. Ephemeral UI state, not saved on the character.
@@ -456,6 +465,7 @@ export async function renderSheet(id) {
         ${tabBtn("main", "Лист")}
         ${tabBtn("attacks", "Атаки")}
         ${tabBtn("spells", "Заклинания")}
+        ${tabBtn("forms", data.forms && data.forms.active ? "Облики 🐾" : "Облики")}
         ${tabBtn("inventory", "Инвентарь")}
         ${tabBtn("feats", "Черты")}
         ${tabBtn("traits", "Умения")}
@@ -466,6 +476,7 @@ export async function renderSheet(id) {
         ${activeTab === "main" ? mainTab() : ""}
         ${activeTab === "attacks" ? attacksTab() : ""}
         ${activeTab === "spells" ? spellsTab() : ""}
+        ${activeTab === "forms" ? formsTab() : ""}
         ${activeTab === "inventory" ? inventoryTab() : ""}
         ${activeTab === "feats" ? featsTab() : ""}
         ${activeTab === "traits" ? traitsTab() : ""}
@@ -498,12 +509,35 @@ export async function renderSheet(id) {
   // Purely a tracker: the app doesn't derive advantage/disadvantage or any
   // other mechanical effect from an active condition, the player still
   // applies those manually when rolling.
+  // Истощение: a 0-6 level dropdown instead of an on/off pill. Hovering a
+  // level shows its rules text (and everything below it, since levels
+  // accumulate) in the detail box at the bottom of the menu; the effects
+  // themselves are applied by exhaustionLevel() callers: rolls (checks/
+  // attacks/saves), speed, max HP -- see character.js.
+  function exhaustionMenuHtml() {
+    const lvl = exhaustionLevel(data);
+    const cur = EXHAUSTION_LEVELS.find((l) => l.level === lvl);
+    return `
+      <div class="exh-dd" style="position:relative;display:inline-block;">
+        <button type="button" class="condition-pill ${lvl > 0 ? "active" : ""}" data-action="toggle-exhaustion-menu" title="${escapeHtml(cur ? cur.short : "Истощение: нет")}">${lvl > 0 ? `Истощение ${lvl}` : "Истощение"} ▾</button>
+        ${
+          exhaustionMenuOpen
+            ? `<div class="exh-menu">
+          <button type="button" class="exh-item ${lvl === 0 ? "selected" : ""}" data-exh-level="0" data-exh-desc="Нет истощения.">Нет</button>
+          ${EXHAUSTION_LEVELS.map((l) => `<button type="button" class="exh-item ${lvl === l.level ? "selected" : ""}" data-exh-level="${l.level}" data-exh-desc="${escapeHtml(l.desc)}" title="${escapeHtml(l.short)}">${l.name} — ${escapeHtml(l.short)}</button>`).join("")}
+          <div class="exh-detail" data-exh-detail>${escapeHtml(cur ? cur.desc : "Наведите на уровень, чтобы увидеть подробности.")}</div>
+        </div>`
+            : ""
+        }
+      </div>`;
+  }
   function conditionsPanelHtml() {
     const active = new Set(data.conditions || []);
     return `
       <div style="margin-top:4px;border-top:1px solid var(--border);padding-top:6px;">
         <div class="condition-pills">
-          ${CONDITIONS.map(
+          ${exhaustionMenuHtml()}
+          ${CONDITIONS.filter((c) => c.id !== "exhaustion").map(
             (c) => `<button type="button" class="condition-pill ${active.has(c.id) ? "active" : ""}" data-action="toggle-condition" data-condition="${c.id}" title="${escapeHtml(c.desc)}">${escapeHtml(c.name)}</button>`
           ).join("")}
         </div>
@@ -604,6 +638,15 @@ export async function renderSheet(id) {
   // broken out per class -- fine for single-class characters and a
   // reasonable simplification for multiclass ones (the player sets total
   // manually already, same as elsewhere on this sheet).
+  // Reason string when exhaustion imposes disadvantage on this kind of roll
+  // ("check": ability checks/skills/initiative from level 1; "attack" and
+  // "save": from level 3), otherwise "".
+  function exhaustionDisadvantage(kind) {
+    const lvl = exhaustionLevel(data);
+    if (kind === "check" && lvl >= 1) return `Истощение ${lvl}`;
+    if ((kind === "attack" || kind === "save") && lvl >= 3) return `Истощение ${lvl}`;
+    return "";
+  }
   function ensureHitDice() {
     if (!data.hitDice) data.hitDice = { die: 8, total: 1, current: 1 };
   }
@@ -718,7 +761,7 @@ export async function renderSheet(id) {
     return `
       <div class="panel panel-tight" style="margin:0;">
         <p style="margin:0;">Кости хитов: <strong class="num">${hd.current}</strong> из ${hd.total} (к${hd.die})</p>
-        <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">Продолжительный отдых восстановит ${recover} ${pluralizeDice(recover)} хитов (половина максимума, минимум 1), все хиты (кроме временных), все ячейки заклинаний и все умения.</p>
+        <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">Продолжительный отдых восстановит ${recover} ${pluralizeBones(recover)} хитов (половина максимума, минимум 1), все хиты (кроме временных), все ячейки заклинаний и все умения.</p>
       </div>
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
         <button type="button" class="primary" data-action="do-long-rest">Отдохнуть (продолжительный отдых)</button>
@@ -741,7 +784,7 @@ export async function renderSheet(id) {
     const rolls = rollDice(count, hd.die).map((r) => Math.max(r, durableFloor));
     const healTotal = Math.max(0, rolls.reduce((a, b) => a + b, 0) + count * conMod);
     data.hitDice.current = hd.current - count;
-    const max = Number(data.hp.max) || 0;
+    const max = effectiveMaxHp(data);
     const before = Number(data.hp.current) || 0;
     const after = Math.min(max, before + healTotal);
     data.hp.current = after;
@@ -759,7 +802,7 @@ export async function renderSheet(id) {
     refreshRestModal();
   }
   function performLongRest() {
-    const max = Number(data.hp.max) || 0;
+    const max = effectiveMaxHp(data);
     const hpBefore = Number(data.hp.current) || 0;
     data.hp.current = max; // temp HP is deliberately left untouched
     const hd = hitDiceInfo();
@@ -2570,8 +2613,8 @@ export async function renderSheet(id) {
               <div class="stat-box"><div class="value" data-derived="ac">${armorClass(data)}</div><div class="label">КД</div></div>
               <div class="stat-box" data-action="roll-initiative" style="cursor:pointer;"><div class="value" data-derived="initiative">${formatModifier(initiativeBonus(data))}</div><div class="label">Инициатива</div></div>
               <div class="stat-box"><input class="value" style="width:100%;text-align:center;background:transparent;border:none;" type="number" data-bind="speed" value="${data.speed}" /><div class="label">Скорость, фт</div>${
-                speedBonusSources(data).length
-                  ? `<div class="muted" style="font-size:0.68rem;" title="${escapeHtml(speedBonusSources(data).map((b) => `+${b.amount} (${b.label})`).join(", "))}">Итого: ${totalSpeed(data)}</div>`
+                speedBonusSources(data).length || exhaustionLevel(data) >= 2
+                  ? `<div class="muted" style="font-size:0.68rem;${exhaustionLevel(data) >= 2 ? "color:var(--red);" : ""}" title="${escapeHtml([...speedBonusSources(data).map((b) => `+${b.amount} (${b.label})`), ...(exhaustionLevel(data) >= 2 ? [`Истощение ${exhaustionLevel(data)}: ${exhaustionLevel(data) >= 5 ? "скорость 0" : "скорость вдвое"}`] : [])].join(", "))}">Итого: ${totalSpeed(data)}${exhaustionLevel(data) >= 2 ? ` (истощение)` : ""}</div>`
                   : ""
               }</div>
             </div>
@@ -2602,6 +2645,7 @@ export async function renderSheet(id) {
               <div class="col">
                 <label>Хиты максимум</label>
                 <input type="number" min="1" max="350" data-bind="hp.max" data-clamp="1:350" value="${data.hp.max}" />
+                ${exhaustionLevel(data) >= 4 ? `<div class="muted" style="font-size:0.68rem;color:var(--red);" title="Истощение ${exhaustionLevel(data)}: максимум хитов уменьшен вдвое">Истощение: макс. ${effectiveMaxHp(data)}</div>` : ""}
               </div>
               <div class="col">
                 <label>Хиты текущие</label>
@@ -2617,6 +2661,7 @@ export async function renderSheet(id) {
               <button class="small danger" data-action="apply-damage">− Урон</button>
               <button class="small primary" data-action="apply-heal">+ Лечение</button>
             </div>
+            ${exhaustionLevel(data) >= 6 ? `<div class="death-banner">Истощение 6 — персонаж мёртв</div>` : ""}
             ${Number(data.hp.current) === 0 ? `<div class="death-banner">Вы находитесь при смерти, в свой ход бросайте спасброски от смерти</div>` : ""}
             ${healingPotionsPanel()}
             <div class="grid cols-2" style="margin-top:10px;">
@@ -3904,6 +3949,192 @@ export async function renderSheet(id) {
       </div>`;
   }
 
+
+  // ---- Облики (звериные облики) --------------------------------------
+  // The character keeps a list of chosen forms (data.forms.known: beast ids)
+  // and at most one active form (data.forms.active) with its own hit point
+  // pool (data.forms.hp), like Wild Shape: damage to the form first, and
+  // when it drops to 0 the character reverts with the overflow carried over.
+  function ensureForms() {
+    if (!data.forms || typeof data.forms !== "object") data.forms = { known: [], active: null, hp: null };
+    if (!Array.isArray(data.forms.known)) data.forms.known = [];
+    return data.forms;
+  }
+  function ensureBeastsLoaded() {
+    if (beastsData || beastsLoading) return;
+    beastsLoading = true;
+    import("../data/beasts.js")
+      .then((m) => { beastsData = m.BEASTS; })
+      .catch(() => { beastsData = []; })
+      .finally(() => { beastsLoading = false; if (activeTab === "forms") render(); });
+  }
+  function beastCrNum(cr) {
+    const s = String(cr || "0");
+    if (s.includes("/")) { const [a, b] = s.split("/").map(Number); return a / b; }
+    return Number(s) || 0;
+  }
+  function beastMoves(b) {
+    const sp = b.speed || "";
+    return { fly: /летая/i.test(sp), swim: /плавая/i.test(sp), climb: /лазая/i.test(sp), burrow: /копая/i.test(sp) };
+  }
+  function beastMaxHp(b) { return parseInt(b.hp, 10) || 1; }
+  // Wild Shape limits by Druid level (PHB): CR 1/4 no fly/swim from 2, CR 1/2
+  // no fly from 4, CR 1 from 8; Circle of the Moon: CR 1 from 2, then
+  // level/3 (rounded down). null when the character has no Druid levels.
+  function wildShapeLimit() {
+    const c = (data.classes || []).find((x) => x.id === "druid");
+    if (!c) return null;
+    const lvl = Number(c.level) || 1;
+    const moon = /лун/i.test(c.subclass || c.subclassName || "");
+    if (moon) {
+      return { maxCr: lvl >= 6 ? Math.floor(lvl / 3) : 1, noFly: lvl < 8, noSwim: false, label: `Круг Луны, ${lvl} ур.` };
+    }
+    if (lvl < 2) return { maxCr: -1, noFly: true, noSwim: true, label: `${lvl} ур.` };
+    if (lvl < 4) return { maxCr: 0.25, noFly: true, noSwim: true, label: `${lvl} ур.` };
+    if (lvl < 8) return { maxCr: 0.5, noFly: true, noSwim: false, label: `${lvl} ур.` };
+    return { maxCr: 1, noFly: false, noSwim: false, label: `${lvl} ур.` };
+  }
+  function beastAllowedByWildShape(b, lim) {
+    if (!lim) return true;
+    const m = beastMoves(b);
+    return beastCrNum(b.cr) <= lim.maxCr && !(lim.noFly && m.fly) && !(lim.noSwim && m.swim);
+  }
+  function beastAbilitiesHtml(b) {
+    return `<div class="beast-abil">${(b.abil || [])
+      .map((a) => {
+        const m = String(a).match(/^([А-Яа-яЁё]+)\s*(\d+)\s*\(([^)]*)\)/);
+        return m
+          ? `<div><span class="prop-label">${escapeHtml(m[1])}</span><strong>${escapeHtml(m[2])}</strong><span class="muted">${escapeHtml(m[3])}</span></div>`
+          : `<div><strong>${escapeHtml(a)}</strong></div>`;
+      })
+      .join("")}</div>`;
+  }
+  function beastCardHtml(b, actionsHtml, { active = false, note = "" } = {}) {
+    const paragraph = (i) => `<p>${i.n ? `<strong>${escapeHtml(i.n)}.</strong> ` : ""}${escapeHtml(i.t)}</p>`;
+    return `
+      <div class="spell-card beast-card ${active ? "known" : ""}" data-beast-id="${b.id}">
+        <div class="spell-card-header">
+          <div class="spell-card-icon" title="Зверь">🐾</div>
+          <div class="spell-card-title-group">
+            <h4 class="spell-card-title">${escapeHtml(b.name)}</h4>
+            <p class="spell-card-subtitle">${escapeHtml(b.sta || "Зверь")} · опасность ${escapeHtml(b.cr)}</p>
+          </div>
+        </div>
+        ${note ? `<div class="beast-note">${note}</div>` : ""}
+        <div class="spell-card-props">
+          <div class="spell-card-prop"><span class="prop-label">Класс доспеха</span><span>${escapeHtml(b.ac || "—")}</span></div>
+          <div class="spell-card-prop"><span class="prop-label">Хиты</span><span>${escapeHtml(b.hp || "—")}</span></div>
+          <div class="spell-card-prop spell-card-classes"><span class="prop-label">Скорость</span><span>${escapeHtml(b.speed || "—")}</span></div>
+        </div>
+        ${beastAbilitiesHtml(b)}
+        <div class="spell-card-desc">
+          ${[["Чувства", b.senses], ...(b.extra || [])].filter(([, v]) => v).map(([l, v]) => `<p><strong>${escapeHtml(l)}:</strong> ${escapeHtml(v)}</p>`).join("")}
+          ${(b.traits || []).map(paragraph).join("")}
+          ${(b.sections || []).map((sec) => `<h5 class="beast-section-title">${escapeHtml(sec.title)}</h5>${(sec.items || []).map(paragraph).join("")}`).join("")}
+          ${b.src ? `<p class="muted" style="font-size:0.78rem;">Источник: ${escapeHtml(b.src)} (dnd.su)</p>` : ""}
+        </div>
+        ${actionsHtml ? `<div class="beast-card-actions">${actionsHtml}</div>` : ""}
+      </div>`;
+  }
+  function formsTab() {
+    ensureBeastsLoaded();
+    const forms = ensureForms();
+    if (!beastsData) {
+      return `<div class="panel"><h2>Облики</h2><p class="muted">Загружаю список зверей…</p></div>`;
+    }
+    const byId = new Map(beastsData.map((b) => [b.id, b]));
+    const lim = wildShapeLimit();
+    const active = forms.active ? byId.get(forms.active) : null;
+    const known = forms.known.map((id) => byId.get(id)).filter(Boolean);
+    const noteFor = (b) => {
+      if (!lim) return "";
+      const ok = beastAllowedByWildShape(b, lim);
+      return ok
+        ? `<span class="beast-ok">✔ доступен по правилам «Дикого облика»</span>`
+        : `<span class="beast-no">✖ не подходит под «Дикий облик» (${escapeHtml(lim.label)})</span>`;
+    };
+    const activeHp = Number(forms.hp) || 0;
+    const activeHtml = active
+      ? `
+      <div class="panel" style="border-color:var(--gold);">
+        <div class="row between"><h2 style="margin:0;">Текущий облик: ${escapeHtml(active.name)}</h2>
+          <button class="small danger" data-action="revert-form">Вернуть обычный облик</button></div>
+        <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0;">
+          <span>Хиты облика:</span>
+          <input type="number" min="0" max="${beastMaxHp(active)}" style="width:72px;" data-form-hp value="${activeHp}" />
+          <span class="muted">из ${beastMaxHp(active)}</span>
+          <input type="number" min="0" data-form-hp-delta style="width:64px;" value="1" />
+          <button class="small danger" data-action="form-damage">− Урон</button>
+          <button class="small primary" data-action="form-heal">+ Лечение</button>
+        </div>
+        <p class="muted" style="font-size:0.82rem;margin:0 0 10px;">Пока вы в облике, урон тратит хиты облика; когда они падают до 0, вы возвращаетесь в свой облик, а лишний урон переходит на ваши хиты. Хиты, КД и скорость в этой панели — зверя.</p>
+        <div class="spell-cards" style="grid-template-columns:minmax(280px,420px);">${beastCardHtml(active, "", { active: true })}</div>
+      </div>`
+      : "";
+    const knownHtml = known.length
+      ? `<div class="spell-cards">${known
+          .map((b) =>
+            beastCardHtml(
+              b,
+              `<button class="small primary" data-action="take-form" data-beast="${b.id}" ${forms.active === b.id ? "disabled" : ""}>${forms.active === b.id ? "Облик принят" : "Принять облик"}</button>
+               <button class="small danger" data-action="remove-form" data-beast="${b.id}" title="Убрать из списка">✕ Убрать</button>`,
+              { active: forms.active === b.id, note: noteFor(b) }
+            )
+          )
+          .join("")}</div>`
+      : `<p class="muted">Пока нет ни одного облика — нажмите «+ Добавить облик» и выберите зверей из списка.</p>`;
+    return `
+      ${activeHtml}
+      <div class="panel">
+        <div class="row between"><h2 style="margin:0;">Мои облики</h2>
+          <button class="small primary" data-action="toggle-form-browse">${formBrowseOpen ? "✕ Закрыть подбор" : "+ Добавить облик"}</button></div>
+        ${lim ? `<p class="muted" style="font-size:0.85rem;">«Дикий облик» (${escapeHtml(lim.label)}): ${lim.maxCr < 0 ? "облики пока недоступны (с 2 уровня друида)" : `опасность не выше ${lim.maxCr === 0.25 ? "1/4" : lim.maxCr === 0.5 ? "1/2" : lim.maxCr}${lim.noFly ? ", без скорости полёта" : ""}${lim.noSwim ? ", без скорости плавания" : ""}`}.</p>` : ""}
+        ${knownHtml}
+      </div>
+      ${formBrowseOpen ? formBrowsePanelHtml(forms, lim, noteFor) : ""}`;
+  }
+  function formBrowsePanelHtml(forms, lim, noteFor) {
+    const q = formSearch.trim().toLowerCase();
+    const crOptions = ["0", "1/8", "1/4", "1/2", "1", "2", "3", "4", "5", "6", "8"];
+    const filtered = beastsData.filter((b) => {
+      if (forms.known.includes(b.id)) return false;
+      if (q && !(b.name.toLowerCase().includes(q) || (b.en || "").toLowerCase().includes(q))) return false;
+      if (formCrFilter !== "all" && beastCrNum(b.cr) > beastCrNum(formCrFilter)) return false;
+      const m = beastMoves(b);
+      if (formMoveFilter === "fly" && !m.fly) return false;
+      if (formMoveFilter === "swim" && !m.swim) return false;
+      if (formMoveFilter === "climb" && !m.climb) return false;
+      if (formMoveFilter === "burrow" && !m.burrow) return false;
+      if (formMoveFilter === "ground" && (m.fly || m.swim || m.climb || m.burrow)) return false;
+      if (formOnlyAllowed && lim && !beastAllowedByWildShape(b, lim)) return false;
+      return true;
+    });
+    return `
+      <div class="panel">
+        <h3>Выбор облика</h3>
+        <p class="muted">Существа типа «Зверь» из бестиария dnd.su (${beastsData.length}). Найдено: ${filtered.length}.</p>
+        <div class="row spell-filters" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+          <input type="text" data-form-search placeholder="Поиск по названию…" value="${escapeHtml(formSearch)}" style="flex:1;min-width:160px;" />
+          <select data-form-cr-filter style="flex:none;width:auto;">
+            <option value="all">Любая опасность</option>
+            ${crOptions.map((c) => `<option value="${c}" ${formCrFilter === c ? "selected" : ""}>Опасность до ${c}</option>`).join("")}
+          </select>
+          <select data-form-move-filter style="flex:none;width:auto;">
+            ${[["all", "Любое движение"], ["ground", "Только по земле"], ["fly", "Летает"], ["swim", "Плавает"], ["climb", "Лазает"], ["burrow", "Копает"]].map(([v, l]) => `<option value="${v}" ${formMoveFilter === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+          ${lim ? `<label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-form-only-allowed ${formOnlyAllowed ? "checked" : ""} /> <span>Только доступные по «Дикому облику»</span></label>` : ""}
+        </div>
+        ${
+          filtered.length
+            ? `<div class="spell-cards">${filtered
+                .slice(0, 60)
+                .map((b) => beastCardHtml(b, `<button class="small primary" data-action="add-form" data-beast="${b.id}">+ Добавить</button>`, { note: noteFor(b) }))
+                .join("")}</div>${filtered.length > 60 ? `<p class="muted">Показаны первые 60 — уточните поиск или фильтры.</p>` : ""}`
+            : '<p class="muted">Ничего не найдено — измените фильтры.</p>'
+        }
+      </div>`;
+  }
+
   function inventoryTab() {
     const weapons = data.weapons || [];
     // Wrapped in .inventory-panels so its four panels (Деньги/Оружие/
@@ -4232,6 +4463,10 @@ export async function renderSheet(id) {
                     // generic "к20" match would otherwise add a bogus
                     // "🎲 Бросить 1к20" button.
                     /^Надёжный талант$/i.test(f.name || "") ||
+                    // Плут «Каприз судьбы» (20 ур.) turns a failed d20 into a
+                    // 20 -- the "к20" in its text is the roll being
+                    // rewritten, not something to roll from this card.
+                    /^Каприз судьбы$/i.test(f.name || "") ||
                     // Лечащий свет already gets its own dice-count-adjustable
                     // roll button from featureResourceHtml's pool tracker above --
                     // this would otherwise add a second, fixed "🎲 Бросить к6".
@@ -4377,10 +4612,13 @@ export async function renderSheet(id) {
 
   function personalityTab() {
     const p = data.personality || {};
-    const field = (key, label, rows = 2) => `
+    // Fixed-height boxes that scroll inside themselves once the text outgrows
+    // them (same behaviour as a feature card's description), instead of a
+    // tiny 2-row box or a page that keeps stretching.
+    const field = (key, label, height = 130) => `
       <div class="col" style="margin-bottom:8px;">
         <label>${label}</label>
-        <textarea data-bind="personality.${key}" rows="${rows}">${escapeHtml(p[key] || "")}</textarea>
+        <textarea class="scroll-text" data-bind="personality.${key}" style="height:${height}px;">${escapeHtml(p[key] || "")}</textarea>
       </div>`;
     return `
       <div class="panel">
@@ -4389,11 +4627,11 @@ export async function renderSheet(id) {
         ${field("ideals", "Идеалы")}
         ${field("bonds", "Привязанности")}
         ${field("flaws", "Слабости")}
-        ${field("backstory", "История персонажа", 6)}
+        ${field("backstory", "История персонажа", 320)}
       </div>
       <div class="panel">
         <h2>Заметки</h2>
-        <textarea data-bind="notes" rows="6">${escapeHtml(data.notes || "")}</textarea>
+        <textarea class="scroll-text" data-bind="notes" style="height:260px;">${escapeHtml(data.notes || "")}</textarea>
       </div>`;
   }
 
@@ -4650,6 +4888,7 @@ export async function renderSheet(id) {
     openD20RollModal({
       label: `Атака: ${a.name || "без названия"}${archeryBonus ? " (+2 Стрельба из лука)" : ""}`,
       modifier: bonus,
+      forcedDisadvantage: exhaustionDisadvantage("attack"),
       critMin: attackCritRange(),
       superiorityDie: hasBattlemaster()
         ? { sides: superiorityDieSides(data), available: superiorityDiceAvailable(), onUse: () => { const used = consumeSuperiorityDie(); if (used) render(); return used; } }
@@ -5512,7 +5751,7 @@ export async function renderSheet(id) {
   });
   on(app, "click", "[data-action=apply-survivor-heal]", (e, el) => {
     const amount = 5 + getAbilityMod(data, "con");
-    const max = Number(data.hp.max) || 0;
+    const max = effectiveMaxHp(data);
     data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + amount);
     doSave();
     render();
@@ -5529,6 +5768,34 @@ export async function renderSheet(id) {
     else data.conditions.push(id);
     doSave();
     render();
+  });
+  on(app, "click", "[data-action=toggle-exhaustion-menu]", () => {
+    exhaustionMenuOpen = !exhaustionMenuOpen;
+    render();
+  });
+  on(app, "mouseover", "[data-exh-desc]", (e, el) => {
+    const box = app.querySelector("[data-exh-detail]");
+    if (box) box.textContent = el.dataset.exhDesc;
+  });
+  on(app, "click", "[data-exh-level]", (e, el) => {
+    const lvl = Number(el.dataset.exhLevel) || 0;
+    data.exhaustion = lvl;
+    data.conditions = (data.conditions || []).filter((c) => c !== "exhaustion");
+    // Level 4+: hit point maximum is halved -- current HP can't exceed it.
+    const effMax = effectiveMaxHp(data);
+    if (lvl >= 4 && (Number(data.hp.current) || 0) > effMax) data.hp.current = effMax;
+    exhaustionMenuOpen = false;
+    doSave();
+    render();
+  });
+  // Clicking anywhere outside the open exhaustion menu closes it (removed
+  // straight from the DOM rather than via render(), so the click that closed
+  // it still reaches whatever it landed on).
+  app.addEventListener("click", (e) => {
+    if (exhaustionMenuOpen && !e.target.closest(".exh-dd")) {
+      exhaustionMenuOpen = false;
+      app.querySelector(".exh-menu")?.remove();
+    }
   });
   on(app, "click", "[data-action=toggle-blessing]", () => {
     data.blessingActive = !data.blessingActive;
@@ -5563,8 +5830,9 @@ export async function renderSheet(id) {
     const f = data.features[Number(el.dataset.index)];
     const bonus = spellAttackBonus(data);
     if (bonus === null) return;
-    const r = rollD20({ modifier: bonus });
-    showRollResult({ label: `${f.name || "Умение"} — атака`, detail: `к20: [${r.first}] ${formatModifier(bonus)}`, total: r.total, isCrit: r.isCrit, isFumble: r.isFumble });
+    const dis = exhaustionDisadvantage("attack");
+    const r = rollD20({ modifier: bonus, mode: dis ? "disadvantage" : "normal" });
+    showRollResult({ label: `${f.name || "Умение"} — атака`, detail: dis ? `к20: [${r.first}, ${r.second}] → взято ${r.picked} ${formatModifier(bonus)} (помеха: ${dis})` : `к20: [${r.first}] ${formatModifier(bonus)}`, total: r.total, isCrit: r.isCrit, isFumble: r.isFumble });
   });
   on(app, "click", "[data-action=roll-superiority-die]", () => {
     const sides = superiorityDieSides(data);
@@ -5751,6 +6019,81 @@ export async function renderSheet(id) {
   // anywhere else in the box too.
   let abilityRollMousedownOnInput = false;
   on(app, "mousedown", "[data-ability-score]", () => { abilityRollMousedownOnInput = true; });
+
+  // Облики
+  on(app, "click", "[data-action=toggle-form-browse]", () => { formBrowseOpen = !formBrowseOpen; render(); });
+  on(app, "input", "[data-form-search]", (e, el) => {
+    formSearch = el.value;
+    const pos = el.selectionStart;
+    render();
+    const n = $("[data-form-search]", app);
+    if (n) { n.focus(); n.setSelectionRange(pos, pos); }
+  });
+  on(app, "change", "[data-form-cr-filter]", (e, el) => { formCrFilter = el.value; render(); });
+  on(app, "change", "[data-form-move-filter]", (e, el) => { formMoveFilter = el.value; render(); });
+  on(app, "change", "[data-form-only-allowed]", (e, el) => { formOnlyAllowed = el.checked; render(); });
+  on(app, "click", "[data-action=add-form]", (e, el) => {
+    const forms = ensureForms();
+    const id = Number(el.dataset.beast);
+    if (!forms.known.includes(id)) forms.known.push(id);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=remove-form]", (e, el) => {
+    const forms = ensureForms();
+    const id = Number(el.dataset.beast);
+    forms.known = forms.known.filter((x) => x !== id);
+    if (forms.active === id) { forms.active = null; forms.hp = null; }
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=take-form]", (e, el) => {
+    const forms = ensureForms();
+    const id = Number(el.dataset.beast);
+    const b = (beastsData || []).find((x) => x.id === id);
+    if (!b) return;
+    forms.active = id;
+    forms.hp = beastMaxHp(b);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=revert-form]", () => {
+    const forms = ensureForms();
+    forms.active = null;
+    forms.hp = null;
+    doSave();
+    render();
+  });
+  on(app, "change", "[data-form-hp]", (e, el) => {
+    const forms = ensureForms();
+    const b = (beastsData || []).find((x) => x.id === forms.active);
+    if (!b) return;
+    forms.hp = clampInt(el.value, 0, beastMaxHp(b), 0);
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=form-damage]", () => {
+    const forms = ensureForms();
+    const delta = Math.max(0, Math.floor(Number($("[data-form-hp-delta]", app)?.value) || 0));
+    if (!forms.active || !delta) return;
+    const left = (Number(forms.hp) || 0) - delta;
+    if (left > 0) { forms.hp = left; doSave(); render(); return; }
+    // Form drops to 0: revert, and the excess damage lands on the character.
+    forms.active = null;
+    forms.hp = null;
+    if (left < 0) applyDamage(-left);
+    else { doSave(); render(); }
+  });
+  on(app, "click", "[data-action=form-heal]", () => {
+    const forms = ensureForms();
+    const delta = Math.max(0, Math.floor(Number($("[data-form-hp-delta]", app)?.value) || 0));
+    const b = (beastsData || []).find((x) => x.id === forms.active);
+    if (!b || !delta) return;
+    forms.hp = Math.min(beastMaxHp(b), (Number(forms.hp) || 0) + delta);
+    doSave();
+    render();
+  });
+
   // Money calculator
   on(app, "click", "[data-coin-pick]", (e, el) => {
     coinCalc.coin = el.dataset.coinPick;
@@ -5773,18 +6116,18 @@ export async function renderSheet(id) {
     abilityRollMousedownOnInput = false;
     if (e.target.matches("input") || startedOnInput) return;
     const ab = el.dataset.ability;
-    openD20RollModal({ label: `Проверка: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: abilityCheckBonus(data, ab), blessed: !!data.blessingActive });
+    openD20RollModal({ label: `Проверка: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: abilityCheckBonus(data, ab), blessed: !!data.blessingActive, forcedDisadvantage: exhaustionDisadvantage("check") });
   });
   on(app, "click", "[data-action=roll-save]", (e, el) => {
     const ab = el.dataset.ability;
-    openD20RollModal({ label: `Спасбросок: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: saveBonus(data, ab), blessed: !!data.blessingActive });
+    openD20RollModal({ label: `Спасбросок: ${ABILITIES.find((a) => a.id === ab).label}`, modifier: saveBonus(data, ab), blessed: !!data.blessingActive, forcedDisadvantage: exhaustionDisadvantage("save") });
   });
   on(app, "click", "[data-action=roll-skill]", (e, el) => {
     const sk = el.dataset.skill;
-    openD20RollModal({ label: `Навык: ${SKILLS.find((s) => s.id === sk).label}`, modifier: skillBonus(data, sk), blessed: !!data.blessingActive });
+    openD20RollModal({ label: `Навык: ${SKILLS.find((s) => s.id === sk).label}`, modifier: skillBonus(data, sk), blessed: !!data.blessingActive, forcedDisadvantage: exhaustionDisadvantage("check") });
   });
   on(app, "click", "[data-action=roll-initiative]", () => {
-    openD20RollModal({ label: "Инициатива", modifier: initiativeBonus(data) });
+    openD20RollModal({ label: "Инициатива", modifier: initiativeBonus(data), forcedDisadvantage: exhaustionDisadvantage("check") });
   });
   // Dice-pool builder: queue up any mix of dice (e.g. 2к6 + 1к8), see what's
   // queued, remove entries, then roll everything together at once. Clicking
@@ -5949,7 +6292,7 @@ export async function renderSheet(id) {
     render();
   }
   function applyHeal(delta) {
-    const max = Number(data.hp.max) || 0;
+    const max = effectiveMaxHp(data);
     data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + delta);
     doSave();
     render();

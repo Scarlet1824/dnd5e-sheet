@@ -82,7 +82,11 @@ export function showRollResult({ label, detail, total, isCrit, isFumble, breakdo
 // to the caller so it can remember it (on the attack itself) for the
 // damage roll that follows, the same way `a.useSpecial` already persists a
 // choice from one roll to the next.
-export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null }) {
+// `forcedDisadvantage` (optional) -- a reason string (e.g. "Истощение 3")
+// when a condition already imposes disadvantage on this roll: the plain roll
+// becomes a disadvantage roll, and picking advantage instead just cancels the
+// two out into a normal roll (PHB: advantage and disadvantage cancel).
+export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null, forcedDisadvantage = "" }) {
   const showDieOption = superiorityDie && superiorityDie.available > 0;
   const html = `
     <h3>${escapeHtml(label)}</h3>
@@ -103,12 +107,18 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
     </label>`
         : ""
     }
+    ${forcedDisadvantage ? `<p style="color:var(--red);margin:0 0 10px;">Помеха: ${escapeHtml(forcedDisadvantage)}</p>` : ""}
     <div class="col" style="gap:8px;">
-      <button data-mode="normal" class="primary" style="width:100%;">Обычный бросок</button>
+      ${
+        forcedDisadvantage
+          ? `<button data-mode="disadvantage" class="primary" style="width:100%;">Бросок с помехой</button>
+      <button data-mode="normal" style="width:100%;">С преимуществом (гасит помеху) — обычный бросок</button>`
+          : `<button data-mode="normal" class="primary" style="width:100%;">Обычный бросок</button>
       <div class="row" style="gap:8px;flex-wrap:nowrap;">
         <button data-mode="disadvantage" style="flex:1;">С помехой</button>
         <button data-mode="advantage" style="flex:1;">С преимуществом</button>
-      </div>
+      </div>`
+      }
     </div>`;
   const modal = openModal(html);
   on(modal, "click", "[data-mode]", (e, el) => {
