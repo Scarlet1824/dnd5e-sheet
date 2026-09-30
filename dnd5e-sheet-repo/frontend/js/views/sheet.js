@@ -452,7 +452,43 @@ export async function renderSheet(id) {
     if (changed) doSave();
   })();
 
+  // Spells that a class/subclass feature grants outright (ritual casting,
+  // free casts, extra cantrips) go straight into the character's spell list
+  // so they show up in the Заклинания tab. Idempotent; runs on every render.
+  const FEATURE_GRANTED_SPELLS = {
+    "Искатель духов": ["beast-sense", "speak-with-animals"],
+    "Гуляющий с духами": ["commune-with-nature"],
+    "Совет предков": ["augury", "clairvoyance"],
+    "Драконий дар": ["thaumaturgy"],
+    "Магия хранителя роя": ["mage-hand"],
+    "Туманный странник": ["misty-step"],
+    "Подкрепление фей": ["summon-fey"],
+    "Эфирный шаг": ["etherealness"],
+    "Техника тени": ["darkness", "darkvision", "pass-without-trace", "silence"],
+    "Среди мёртвых": ["spare-the-dying"],
+    "Глаза тьмы": ["darkness"],
+  };
+  function ensureFeatureSpells() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      const ids = FEATURE_GRANTED_SPELLS[f.name];
+      if (!ids) return;
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      const sc = data.spellcasting;
+      if (!sc.cantrips) sc.cantrips = [];
+      if (!sc.known) sc.known = [];
+      ids.forEach((id) => {
+        const sp = SPELLS.find((x) => x.id === id);
+        if (!sp) return;
+        if (sc.cantrips.includes(id) || sc.known.includes(id) || (sc.prepared || []).includes(id)) return;
+        (sp.level === 0 ? sc.cantrips : sc.known).push(id);
+        changed = true;
+      });
+    });
+    return changed;
+  }
   function render() {
+    if (ensureFeatureSpells()) doSave();
     mount(`
       <div class="top-bar">
         <a href="#/characters" class="brand">← ⚔ D&D 5e</a>
@@ -4069,48 +4105,135 @@ export async function renderSheet(id) {
       .join("")}</div>`;
   }
   // Attack/damage buttons for a beast action: «+N к попаданию» becomes an
-  // attack roll with that bonus, and the dice in parentheses after
-  // «Попадание:» become the damage roll.
+  // attack roll with that bonus. The text after «Попадание:» is split into
+  // sentences: the first is the fixed damage ("2к6+2 колющего", or a flat
+  // number like "Колющий урон 1"), later sentences that mention damage are
+  // situational extras (charge, pounce, ...) offered as checkboxes.
+  function beastDamageParts(sentence) {
+    const parts = [];
+    let m;
+    // "14 (4к6) … или 7 (2к6), если у роя половина хитов" -- keep the first option only.
+    const cut = sentence.search(/\s+или\s+\d+\s*\(/i);
+    const src = cut > 0 ? sentence.slice(0, cut) : sentence;
+    const TYPE = /(колющ|дробящ|рубящ|огнен|огнём|холод|кислот|ядом|ядовит|некротическ|излучени|звуков|звуком|психическ|силов|электр|молни)[а-яё]*/i;
+    const dice = /\((\d*)к(\d+)(?:\s*([+\-−–])\s*(\d+))?\)/gi;
+    while ((m = dice.exec(src))) {
+      const after = src.slice(m.index + m[0].length, m.index + m[0].length + 40);
+      const t = after.match(TYPE);
+      parts.push({ expr: `${m[1] || 1}d${m[2]}${m[3] ? (m[3] === "+" ? "+" : "-") + m[4] : ""}`, type: t ? t[0] : "" });
+    }
+    if (!parts.length) {
+      const flat = src.match(/(?:урон\s+(\d+))|(?:(\d+)\s+(?:[а-яё]+\s+)?урон)/i);
+      if (flat) {
+        const t = src.match(TYPE);
+        parts.push({ flat: parseInt(flat[1] || flat[2], 10), type: t ? t[0] : "" });
+      }
+    }
+    return parts;
+  }
   function parseBeastAction(item) {
     const t = String(item.t || "");
     const atk = t.match(/([+-]\s?\d+)\s*к попаданию/);
-    const hitIdx = t.search(/Попадание/);
-    const dmg = [];
+    const hitIdx = t.search(/Попадание:/);
+    let base = [];
+    const conds = [];
     if (hitIdx >= 0) {
-      const re = /\((\d*)к(\d+)(?:\s*([+-])\s*(\d+))?\)/g;
-      let m;
-      const tail = t.slice(hitIdx);
-      while ((m = re.exec(tail))) dmg.push(`${m[1] || 1}d${m[2]}${m[3] ? m[3] + m[4] : ""}`);
+      const tail = t.slice(hitIdx + "Попадание:".length).trim();
+      // sentence split on ". " followed by a capital letter
+      const sentences = tail.split(/\.\s+(?=[А-ЯЁ])/).map((x) => x.replace(/\.$/, "").trim()).filter(Boolean);
+      if (sentences.length) base = beastDamageParts(sentences[0]);
+      sentences.slice(1).forEach((sent) => {
+        const parts = beastDamageParts(sent);
+        if (parts.length) conds.push({ text: sent, parts });
+      });
     }
-    return { bonus: atk ? parseInt(atk[1].replace(/\s/g, ""), 10) : null, dmg };
+    return { bonus: atk ? parseInt(atk[1].replace(/\s/g, ""), 10) : null, base, conds };
+  }
+  function beastPartLabel(p) {
+    return `${p.expr ? toCyrillicDice(p.expr) : p.flat}${p.type ? " " + p.type : ""}`;
   }
   function beastRollButtons(item) {
-    const { bonus, dmg } = parseBeastAction(item);
-    if (bonus === null && !dmg.length) return "";
+    const act = parseBeastAction(item);
+    if (act.bonus === null && !act.base.length && !act.conds.length) return "";
+    const name = item.n || "Атака";
     return `<div class="beast-roll-row">${
-      bonus !== null ? `<button class="small primary" data-beast-atk="${bonus}" data-beast-name="${escapeHtml(item.n || "Атака")}">🎲 Атака ${formatModifier(bonus)}</button>` : ""
+      act.bonus !== null ? `<button class="small primary" data-beast-atk="${act.bonus}" data-beast-name="${escapeHtml(name)}">🎲 Атака ${formatModifier(act.bonus)}</button>` : ""
     }${
-      dmg.length ? `<button class="small danger" data-beast-dmg="${dmg.join(";")}" data-beast-name="${escapeHtml(item.n || "Атака")}">💥 Урон ${escapeHtml(dmg.map(toCyrillicDice).join(" + "))}</button>` : ""
+      act.base.length || act.conds.length ? `<button class="small danger" data-beast-dmg="${escapeHtml(JSON.stringify({ base: act.base, conds: act.conds }))}" data-beast-name="${escapeHtml(name)}">💥 Урон${act.base.length ? " " + escapeHtml(act.base.map(beastPartLabel).join(" + ")) : ""}</button>` : ""
     }</div>`;
   }
-  function rollBeastDamage(name, exprs, crit) {
-    const parts = [];
+  // Damage window for a beast attack (same layout as a weapon's damage
+  // window): the fixed damage from the stat block, situational extras as
+  // checkboxes, own extra dice, a crit checkbox, and a roll button whose
+  // result has an expandable log.
+  function startBeastDamage(name, act) {
+    let extraDice = [];
+    const html = `
+      <h3>Урон: ${escapeHtml(name)}</h3>
+      <p style="margin:0 0 8px;"><strong>Фиксированный урон:</strong> ${act.base.length ? escapeHtml(act.base.map(beastPartLabel).join(" + ")) : '<span class="muted">не указан</span>'}</p>
+      ${act.conds.length ? `<div style="border-top:1px solid var(--border);padding-top:8px;"><span class="muted" style="font-size:0.82rem;">Урон по условиям (из описания зверя):</span>
+        ${act.conds.map((c, i) => `<label class="row" style="gap:8px;align-items:flex-start;margin-top:6px;"><input type="checkbox" data-beast-cond="${i}" style="margin-top:4px;" /><span>${escapeHtml(c.text)} <strong>(+${escapeHtml(c.parts.map(beastPartLabel).join(" + "))})</strong></span></label>`).join("")}</div>` : ""}
+      <label class="row" style="gap:8px;align-items:center;margin-top:10px;"><input type="checkbox" data-beast-crit /> критическое попадание (кубики ×2)</label>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">
+        <span class="muted" style="font-size:0.82rem;">Дополнительные кубики к урону:</span>
+        <div class="row" style="gap:6px;align-items:center;margin-top:4px;">
+          <select data-extra-die-sides style="flex:none;">${[4, 6, 8, 10, 12, 20, 100].map((d) => `<option value="${d}" ${d === 6 ? "selected" : ""}>к${d}</option>`).join("")}</select>
+          <span class="muted">×</span>
+          <input type="number" data-extra-die-count min="1" max="99" value="1" style="width:52px;text-align:center;" />
+          <button type="button" class="small" data-action="add-extra-die">+ Добавить</button>
+        </div>
+        <div class="dice-pool-list" data-extra-dice-list style="margin-top:6px;"></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px;"><button data-action="confirm-beast-damage" class="primary">🎲 Бросить</button></div>`;
+    const modal = openModal(html);
+    const chips = () => {
+      const list = modal.querySelector("[data-extra-dice-list]");
+      list.innerHTML = extraDice.map((d, i) => `<span class="dice-pool-chip">${d.count}к${d.sides}<button type="button" data-action="remove-extra-die" data-index="${i}" title="Убрать">✕</button></span>`).join("");
+    };
+    on(modal, "click", "[data-action=add-extra-die]", () => {
+      const sides = Number(modal.querySelector("[data-extra-die-sides]").value);
+      const count = Math.max(1, Math.min(99, Number(modal.querySelector("[data-extra-die-count]").value) || 1));
+      extraDice.push({ sides, count });
+      chips();
+    });
+    on(modal, "click", "[data-action=remove-extra-die]", (e, el) => { extraDice.splice(Number(el.dataset.index), 1); chips(); });
+    on(modal, "click", "[data-action=confirm-beast-damage]", () => {
+      const parts = [...act.base];
+      const used = [];
+      modal.querySelectorAll("[data-beast-cond]").forEach((cb) => {
+        if (cb.checked) { const c = act.conds[Number(cb.dataset.beastCond)]; parts.push(...c.parts); used.push(c.text); }
+      });
+      const crit = modal.querySelector("[data-beast-crit]").checked;
+      closeModal();
+      rollBeastDamage(name, parts, extraDice, crit);
+    });
+  }
+  function rollBeastDamage(name, parts, extraDice, crit) {
+    const lines = [];
     const breakdown = [];
     let total = 0;
-    exprs.forEach((e) => {
-      const ex = crit ? doubleDiceCount(e) : e;
+    const addRoll = (expr, label) => {
+      const ex = crit ? doubleDiceCount(expr) : expr;
       const r = rollExpr(ex);
       total += r.total;
-      parts.push(`${toCyrillicDice(ex)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`);
-      r.rolls.forEach((v) => breakdown.push({ value: v, label: `к${r.sides}` }));
-      if (r.modifier) breakdown.push({ value: r.modifier, label: "модификатор" });
+      lines.push(`${toCyrillicDice(ex)}${label ? " " + label : ""} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`);
+      r.rolls.forEach((v) => breakdown.push({ value: v, label: `к${r.sides}${label ? " · " + label : ""}` }));
+      if (r.modifier) breakdown.push({ value: r.modifier, label: `модификатор${label ? " · " + label : ""}` });
+    };
+    parts.forEach((p) => {
+      if (p.expr) addRoll(p.expr, p.type);
+      else if (p.flat != null) {
+        total += p.flat;
+        lines.push(`${p.flat}${p.type ? " " + p.type : ""}`);
+        breakdown.push({ value: p.flat, label: `фиксированный урон${p.type ? " · " + p.type : ""}` });
+      }
     });
+    (extraDice || []).forEach((d) => addRoll(`${d.count}d${d.sides}`, "доп. кубики"));
     showRollResult({
       label: `${name}: урон${crit ? " (крит)" : ""}`,
-      detail: parts.join("; "),
+      detail: lines.join("; ") || "нет кубиков урона",
       total,
       breakdown,
-      reroll: crit ? undefined : { label: "Критический урон", onClick: () => rollBeastDamage(name, exprs, true) },
     });
   }
   function beastCardHtml(b, actionsHtml, { active = false, note = "" } = {}) {
@@ -4721,7 +4844,7 @@ export async function renderSheet(id) {
       : [];
     const shown = key === "init" ? (value >= 0 ? "+" + value : String(value)) : String(value);
     return `<div class="stat-box${manual ? " manual" : ""}" title="${escapeHtml(notes.join(", "))}">
-      <input class="value" type="text" inputmode="numeric" data-override="${key}" data-auto="${key === "init" ? formatModifier(auto) : auto}" value="${shown}" />
+      <input class="value" type="text" inputmode="numeric" style="width:100%;min-width:0;box-sizing:border-box;text-align:center;background:transparent;border:none;padding:0;color:var(--gold-bright);font-weight:800;" data-override="${key}" data-auto="${key === "init" ? formatModifier(auto) : auto}" value="${shown}" />
       <div class="label">${label}${rollAction ? ` <button class="btn small ghost" data-action="${rollAction}" title="Бросить">🎲</button>` : ""}${manual ? ` <button class="btn small ghost" data-override-reset="${key}" title="Сбросить к расчётному (${key === "init" ? formatModifier(auto) : auto})">↺</button>` : ""}</div>
     </div>`;
   }
@@ -6211,7 +6334,9 @@ export async function renderSheet(id) {
     openD20RollModal({ label: `${el.dataset.beastName}: атака`, modifier: Number(el.dataset.beastAtk) || 0 });
   });
   on(app, "click", "[data-beast-dmg]", (e, el) => {
-    rollBeastDamage(el.dataset.beastName, el.dataset.beastDmg.split(";"), false);
+    let act;
+    try { act = JSON.parse(el.dataset.beastDmg); } catch { return; }
+    startBeastDamage(el.dataset.beastName, act);
   });
   on(app, "click", "[data-action=form-damage]", () => {
     const forms = ensureForms();
