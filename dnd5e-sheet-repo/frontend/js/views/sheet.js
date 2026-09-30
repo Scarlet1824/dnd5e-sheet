@@ -389,6 +389,22 @@ export async function renderSheet(id) {
     if (changed) doSave();
   })();
 
+  // «Скрыться на виду» was stored with its whole description in the NAME
+  // (nested parentheses broke the name/description split) -- fix old cards.
+  (function fixLongRangerNames() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (/^Скрыться на виду\s*\(/.test(f.name || "")) {
+        const full = (f.name.match(/\((.*)\)\s*$/) || [])[1] || "";
+        const known = findKnownFeatureText("Скрыться на виду", f.source);
+        f.name = "Скрыться на виду";
+        f.desc = known || full;
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+
   // Ranger's level-1 features ("Избранный враг"/"Природный следопыт") used to
   // have no description at all (the raw features[1] entry had no parenthetical
   // to split text out of) -- fills in the now-added classFeatureText, but only
@@ -482,6 +498,8 @@ export async function renderSheet(id) {
         if (!sp) return;
         if (sc.cantrips.includes(id) || sc.known.includes(id) || (sc.prepared || []).includes(id)) return;
         (sp.level === 0 ? sc.cantrips : sc.known).push(id);
+        if (!sc.granted) sc.granted = {};
+        sc.granted[id] = f.name;
         changed = true;
       });
     });
@@ -1757,6 +1775,97 @@ export async function renderSheet(id) {
     if (sub && sub.slug === "eldritch-knigh" && (sc.cantripIds.length < 2 || sc.spellIds.length < 3)) return true;
     return false;
   }
+  // ---- Extra level-up picks ---------------------------------------------
+  // "Choose one" subclass features (Охотник: Добыча охотника / Оборонительная
+  // тактика / Множественная атака / Превосходная защита охотника) and the
+  // Следопыт's recurring enemy/terrain choices (levels 6, 10, 14).
+  const OPTION_PICK_FEATURES = ["Добыча охотника", "Оборонительная тактика", "Множественная атака", "Превосходная защита охотника"];
+  const RANGER_ENEMY_TYPES = ["Аберрации", "Зверолюды", "Звери", "Драконы", "Элементали", "Феи", "Нежить", "Великаны", "Гуманоиды", "Монстры", "Растения", "Порождения"];
+  const RANGER_TERRAIN_TYPES = ["Арктика", "Горы", "Леса", "Побережье", "Пустоши", "Пустыня", "Равнины", "Подземье", "Болота"];
+  function featureOptionsOf(sub, featureName) {
+    const f = (sub.features || []).find((x) => x.name === featureName);
+    if (!f) return [];
+    return (f.desc || []).slice(1).map((par) => {
+      const m = String(par).match(/^([А-Яа-яЁё][А-Яа-яЁё\s]*?)\.\s*([\s\S]*)$/);
+      return m ? { name: m[1].trim(), text: m[2] } : null;
+    }).filter(Boolean);
+  }
+  function currentLevelUpPicks() {
+    const c = levelUpEligibleClasses()[levelUpState.classIndex];
+    const cls = c && getClass(c.id);
+    if (!cls) return [];
+    const newLevel = (c.level || 1) + 1;
+    const subName = c.subclass || (levelUpState.subclassChoice && levelUpState.subclassChoice.name) || "";
+    const sub = subName ? (cls.subclasses || []).find((x) => x.name.toLowerCase() === subName.toLowerCase()) : null;
+    const picks = [];
+    if (sub) {
+      (sub.features || []).filter((f) => f.level === newLevel && OPTION_PICK_FEATURES.includes(f.name)).forEach((f) => {
+        picks.push({ id: `opt:${f.name}`, type: "option", featureName: f.name, options: featureOptionsOf(sub, f.name), sub });
+      });
+    }
+    if (cls.id === "ranger") {
+      const names = (cls.features?.[newLevel] || []).map((x) => splitFeatureText(x).name);
+      if (names.some((n) => /^Улучшенный избранный враг/.test(n))) picks.push({ id: "enemy", type: "enemy" });
+      if (names.some((n) => /^Более опытный следопыт/.test(n))) picks.push({ id: "terrain", type: "terrain" });
+    }
+    return picks;
+  }
+  function pickVal(id) {
+    if (!levelUpState.pickVals) levelUpState.pickVals = {};
+    if (!levelUpState.pickVals[id]) levelUpState.pickVals[id] = { value: "", h1: "", h2: "", lang: "", langCustom: "" };
+    return levelUpState.pickVals[id];
+  }
+  function levelUpPicksIncomplete() {
+    return currentLevelUpPicks().some((p) => {
+      const v = pickVal(p.id);
+      if (!v.value) return true;
+      if (p.type === "enemy") {
+        if (v.value === "Гуманоиды" && (!v.h1.trim() || !v.h2.trim())) return true;
+        if (v.lang === "custom" && !v.langCustom.trim()) return true;
+      }
+      return false;
+    });
+  }
+  function levelUpPicksPanelHtml() {
+    return currentLevelUpPicks().map((p) => {
+      const v = pickVal(p.id);
+      if (p.type === "option") {
+        return `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">${escapeHtml(p.featureName)}: выберите один приём</h4>
+          <div class="col" style="gap:6px;">${p.options.map((o) => `<label class="card selectable ${v.value === o.name ? "selected" : ""}" style="cursor:pointer;">
+            <input type="radio" name="pick-${escapeHtml(p.id)}" data-pick-opt="${escapeHtml(p.id)}" value="${escapeHtml(o.name)}" ${v.value === o.name ? "checked" : ""} style="margin-right:6px;" />
+            <strong>${escapeHtml(o.name)}</strong> <span class="muted">${escapeHtml(o.text)}</span></label>`).join("")}</div></div>`;
+      }
+      if (p.type === "terrain") {
+        return `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Более опытный следопыт: ещё один тип местности</h4>
+          <div class="row" style="gap:6px;flex-wrap:wrap;">${RANGER_TERRAIN_TYPES.map((t) => `<label class="card selectable ${v.value === t ? "selected" : ""}" style="cursor:pointer;padding:6px 10px;">
+            <input type="radio" name="pick-terrain" data-pick-opt="terrain" value="${escapeHtml(t)}" ${v.value === t ? "checked" : ""} style="margin-right:6px;" />${escapeHtml(t)}</label>`).join("")}</div></div>`;
+      }
+      return `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Улучшенный избранный враг: ещё один вид врага</h4>
+        <div class="row" style="gap:6px;flex-wrap:wrap;">${RANGER_ENEMY_TYPES.map((t) => `<label class="card selectable ${v.value === t ? "selected" : ""}" style="cursor:pointer;padding:6px 10px;">
+          <input type="radio" name="pick-enemy" data-pick-opt="enemy" value="${escapeHtml(t)}" ${v.value === t ? "checked" : ""} style="margin-right:6px;" />${escapeHtml(t)}</label>`).join("")}</div>
+        ${v.value === "Гуманоиды" ? `<div class="row" style="gap:8px;margin-top:8px;"><input type="text" data-pick-field="h1" placeholder="первый вид, напр. гноллы" value="${escapeHtml(v.h1)}" /><input type="text" data-pick-field="h2" placeholder="второй вид, напр. орки" value="${escapeHtml(v.h2)}" /></div>` : ""}
+        ${v.value ? `<div class="row" style="gap:8px;margin-top:8px;align-items:center;"><span>Язык:</span><select data-pick-lang><option value="">— без языка —</option>${LANGUAGE_GROUPS.map((g) => `<optgroup label="${escapeHtml(g.label)}">${g.items.map((l) => `<option value="${escapeHtml(l)}" ${v.lang === l ? "selected" : ""}>${escapeHtml(l)}</option>`).join("")}</optgroup>`).join("")}<option value="custom" ${v.lang === "custom" ? "selected" : ""}>Другой…</option></select>
+          ${v.lang === "custom" ? `<input type="text" data-pick-field="langCustom" placeholder="язык" value="${escapeHtml(v.langCustom)}" />` : ""}</div>` : ""}</div>`;
+    }).join("");
+  }
+  function applyLevelUpPicks(cls, newLevel, picks) {
+    picks.forEach((p) => {
+      const v = pickVal(p.id);
+      if (!v.value) return;
+      if (p.type === "option") {
+        const opt = p.options.find((o) => o.name === v.value);
+        const card = (data.features || []).find((f) => f.name === p.featureName && f.source === subclassFeatureSource(cls, p.sub.name));
+        if (opt && card) { card.name = `${p.featureName}: ${opt.name}`; card.desc = `${opt.name}. ${opt.text}`; }
+      } else if (p.type === "terrain") {
+        data.features.push({ name: `Более опытный следопыт: ${v.value}`, source: cls.name, desc: `Вы выбрали ещё один тип избранной местности: ${v.value}. В избранной местности вы получаете все преимущества «Природного следопыта».` });
+      } else {
+        const label = v.value === "Гуманоиды" ? `Гуманоиды (${v.h1.trim()}, ${v.h2.trim()})` : v.value;
+        const lang = v.lang === "custom" ? v.langCustom.trim() : v.lang;
+        data.features.push({ name: `Избранный враг (${newLevel} ур.): ${label}`, source: cls.name, desc: `Вы выбрали ещё один вид избранного врага: ${label}. Вы получаете преимущество на проверки Мудрости (Выживание) для выслеживания и Интеллекта для вспоминания информации о них${lang ? `.\n\nЯзык избранного врага: ${lang}.` : "."}` });
+        if (lang && !(data.proficiencies.languages || []).includes(lang)) data.proficiencies.languages.push(lang);
+      }
+    });
+  }
   function levelUpModalBodyHtml() {
     const classes = levelUpEligibleClasses();
     const c = classes[levelUpState.classIndex];
@@ -1841,6 +1950,7 @@ export async function renderSheet(id) {
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
+      ${levelUpPicksPanelHtml()}
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
       ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
@@ -1854,6 +1964,7 @@ export async function renderSheet(id) {
           (levelUpState.hpMethod === "roll" && levelUpState.rolledAmount === null) ||
           asiChoiceIncomplete() ||
           subclassChoiceIncomplete(cls) ||
+          levelUpPicksIncomplete() ||
           fightingStyleChoiceIncomplete() ||
           baseFightingStyleChoiceIncomplete() ||
           toolChoiceIncomplete() ||
@@ -1884,6 +1995,7 @@ export async function renderSheet(id) {
     });
     on(modal, "change", "[data-level-up-class]", (e, el) => {
       levelUpState.classIndex = Number(el.value);
+      levelUpState.pickVals = {};
       levelUpState.hpMethod = "average";
       levelUpState.rolledAmount = null;
       const cc = levelUpEligibleClasses()[levelUpState.classIndex];
@@ -1915,6 +2027,18 @@ export async function renderSheet(id) {
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       refreshLevelUpModal();
     });
+    on(modal, "change", "[data-pick-opt]", (e, el) => {
+      const v = pickVal(el.dataset.pickOpt);
+      v.value = el.value;
+      if (el.dataset.pickOpt !== "enemy") { /* keep */ } else if (el.value !== "Гуманоиды") { v.h1 = ""; v.h2 = ""; }
+      refreshLevelUpModal();
+    });
+    on(modal, "input", "[data-pick-field]", (e, el) => {
+      const id = currentLevelUpPicks().find((p) => p.type === "enemy");
+      if (id) pickVal("enemy")[el.dataset.pickField] = el.value;
+    });
+    on(modal, "change", "[data-pick-field]", () => refreshLevelUpModal());
+    on(modal, "change", "[data-pick-lang]", (e, el) => { pickVal("enemy").lang = el.value; refreshLevelUpModal(); });
     on(modal, "change", "[data-level-up-totem]", (e, el) => {
       levelUpState.subclassChoice.totem = el.value;
       refreshLevelUpModal();
@@ -2124,6 +2248,7 @@ export async function renderSheet(id) {
   // stack stays a flat list instead of nesting a copy of itself inside
   // every entry.
   function applyLevelUp() {
+    const picksSnapshot = currentLevelUpPicks();
     const classes = levelUpEligibleClasses();
     const c = classes[levelUpState.classIndex];
     const cls = c && getClass(c.id);
@@ -2171,7 +2296,9 @@ export async function renderSheet(id) {
           f.name !== ARCHETYPE_FEATURE_MARKER &&
           !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name) &&
           !SPELLCASTING_INTRO_FEATURE_NAME.test(f.name) &&
-          !(FIRST_FIGHTING_STYLE_FEATURE_NAME.test(f.name) && !cls.level1Choice)
+          !(FIRST_FIGHTING_STYLE_FEATURE_NAME.test(f.name) && !cls.level1Choice) &&
+          !(picksSnapshot.some((p) => p.type === "enemy") && /^Улучшенный избранный враг/.test(f.name)) &&
+          !(picksSnapshot.some((p) => p.type === "terrain") && /^Более опытный следопыт/.test(f.name))
       )
       .forEach((f) => {
         if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) return;
@@ -2253,6 +2380,7 @@ export async function renderSheet(id) {
         }
       }
     }
+    applyLevelUpPicks(cls, newLevel, picksSnapshot);
     if (levelUpState.toolChoice && levelUpState.toolChoice.name) {
       addProficiencyValue(data.proficiencies.tools, levelUpState.toolChoice.name);
     }
@@ -3931,7 +4059,20 @@ export async function renderSheet(id) {
   // extra ✕ to strike the spell from the spellbook entirely. Cantrips are
   // never rationed by preparation, so they always keep the plain remove
   // button regardless of prepCtx.
+  // A spell that came from a class/subclass feature (see
+  // FEATURE_GRANTED_SPELLS) is cast without spending a spell slot -- the
+  // card shows a badge instead of a remove button. Future casting mechanics
+  // should check this map (data.spellcasting.granted[spellId] = feature name).
+  function spellGrantedBy(spId) {
+    const g = data.spellcasting && data.spellcasting.granted;
+    const name = g && g[spId];
+    return name && (data.features || []).some((f) => f.name === name) ? name : null;
+  }
   function spellCardControlHtml(sp, prepCtx) {
+    const grantedBy = spellGrantedBy(sp.id);
+    if (grantedBy) {
+      return `<span class="spell-card-badge spell-card-badge-domain" title="Даётся умением «${escapeHtml(grantedBy)}» — накладывается без траты ячеек заклинаний">✦ ${escapeHtml(grantedBy)} · без ячейки</span>`;
+    }
     if (!prepCtx || sp.level === 0) {
       return `<button class="small danger" data-action="toggle-spell" data-spell="${sp.id}" title="Убрать из листа">✕</button>`;
     }
@@ -4720,7 +4861,10 @@ export async function renderSheet(id) {
                     // any other weapon (1к6 + характеристика, «фехтовальное,
                     // метательное»), which already has its own attack/damage/
                     // crit roll buttons, rather than duplicated here.
-                    /^Психические клинки$/i.test(f.name || "");
+                    /^Психические клинки$/i.test(f.name || "") ||
+                    // Бонусные кубики урона следопыта -- предлагаются в окне
+                    // урона оружия (см. damageRiders), а не отдельной кнопкой.
+                    /^(Планарный воин|Добыча охотника|Победитель чудовищ|Угроза из засады|Добыча убийцы|Ужасающие удары)/i.test(f.name || "");
                   const dice = noRollButton
                     ? null
                     : PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
@@ -5444,13 +5588,13 @@ export async function renderSheet(id) {
     // Free-form extra dice (see the "Дополнительные кубики к урону" builder
     // in startDamageRoll) -- rolled and added just like any other bonus,
     // each die type gets its own breakdown entries.
-    (extraDice || []).forEach(({ sides, count }) => {
+    (extraDice || []).forEach(({ sides, count, label }) => {
       if (!count || !sides) return;
       const rolls = rollDice(count, sides);
       const sum = rolls.reduce((s, v) => s + v, 0);
       total += sum;
-      parts.push(`${count}к${sides}: [${rolls.join(", ")}]`);
-      rolls.forEach((v) => breakdown.push({ value: v, label: `доп. к${sides}` }));
+      parts.push(`${label ? label + " " : ""}${count}к${sides}: [${rolls.join(", ")}]`);
+      rolls.forEach((v) => breakdown.push({ value: v, label: label ? `${label} (к${sides})` : `доп. к${sides}` }));
     });
     // Божественная кара: spends the chosen slot here (rather than trusting
     // the level picked in the modal alone), same "don't trust the confirmed
@@ -5516,7 +5660,25 @@ export async function renderSheet(id) {
   // a Rogue with Скрытая атака always gets asked (даже без "особых
   // свойств"), since sneak attack is situational (needs advantage or an
   // ally in melee) rather than automatic on every hit.
+  // Once-per-turn / conditional bonus damage dice from class & subclass
+  // features (Следопыт etc.): offered as checkboxes in the damage window
+  // instead of a roll button on the feature card.
+  function damageRiders() {
+    const names = (data.features || []).map((f) => f.name || "");
+    const has = (re) => names.some((n) => re.test(n));
+    const rangerLvl = ((data.classes || []).find((c) => c.id === "ranger") || {}).level || 0;
+    const list = [];
+    if (has(/Губитель исполинов/)) list.push({ id: "giant-killer", label: "Губитель исполинов", note: "цель Большого размера или крупнее", sides: 8, count: 1 });
+    if (has(/Истребитель колоссов/)) list.push({ id: "colossus", label: "Истребитель колоссов", note: "раз в ход, у цели уже есть рана", sides: 8, count: 1 });
+    if (has(/^Победитель чудовищ/)) list.push({ id: "foe-slayer", label: "Победитель чудовищ", note: "раз за ход, по избранному врагу", sides: 8, count: 1 });
+    if (has(/^Планарный воин$/)) list.push({ id: "planar", label: "Планарный воин", note: "цель отмечена бонусным действием; весь урон атаки становится силовым", sides: 8, count: rangerLvl >= 11 ? 2 : 1 });
+    if (has(/^Угроза из засады$/)) list.push({ id: "ambush", label: "Угроза из засады", note: "дополнительная атака в первый ход боя", sides: 8, count: 1 });
+    if (has(/^Добыча убийцы$/)) list.push({ id: "slayer-prey", label: "Добыча убийцы", note: "первое попадание за ход по выбранной цели", sides: 6, count: 1 });
+    if (has(/^Ужасающие удары$/)) list.push({ id: "dread-strikes", label: "Ужасающие удары", note: "психическая энергия, раз в ход", sides: rangerLvl >= 11 ? 6 : 4, count: 1 });
+    return list;
+  }
   function startDamageRoll(a, isCrit) {
+    const riders = damageRiders();
     const bonusDice = parseDiceFromText(a.special);
     const sneak = sneakAttackDice();
     // Дуэлянт only applies to a Ближний бой weapon (see hasFightingStyle
@@ -5594,6 +5756,9 @@ export async function renderSheet(id) {
           ? `<p class="muted" style="font-size:0.8rem;margin:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable ? "6px" : "0"} 0 0;">✔ Ярость (+${rageDamageBonus(data)}) добавится автоматически</p>`
           : ""
       }
+      ${riders
+        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" /> добавить «${escapeHtml(r.label)}» (${isCrit ? r.count * 2 : r.count}к${r.sides}) — ${escapeHtml(r.note)}</label>`)
+        .join("")}
       ${
         smiteAvailable
           ? `<div style="margin-top:${versatileSides || bonusDice || sneak || duelist || superiorityAvailable || rageApplies ? "10px" : "0"};padding-top:8px;border-top:1px solid var(--border);">
@@ -5657,7 +5822,11 @@ export async function renderSheet(id) {
       a.useSpecial = useSpecial;
       doSave();
       closeModal();
-      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, smiteLevel, useSmiteUndead, extraDice);
+      const riderDice = [];
+      modal.querySelectorAll("[data-use-rider]").forEach((cb) => {
+        if (cb.checked) { const r = riders[Number(cb.dataset.useRider)]; riderDice.push({ sides: r.sides, count: isCrit ? r.count * 2 : r.count, label: r.label }); }
+      });
+      doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, smiteLevel, useSmiteUndead, [...extraDice, ...riderDice]);
     });
   }
   on(app, "click", "[data-action=roll-attack-damage]", (e, el) => {
