@@ -749,3 +749,12 @@ textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; mi
   white-space: normal;
 }
 .eq-tip:hover .eq-tip-bubble, .eq-tip:focus .eq-tip-bubble { display: block; }
+
+/* Round 57: race cards in the wizard -- text +4pt (~0.33rem) */
+.race-card h4 { font-size: 1.38rem; }
+.race-card p { font-size: 1.28rem; }
+.race-card p.muted { font-size: 1.15rem; }
+.wizard-steps button.step { font: inherit; cursor: pointer; background: var(--bg-panel-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: 999px; padding: 4px 10px; }
+.wizard-steps button.step:disabled { opacity: 0.5; cursor: default; }
+.wizard-steps button.step.active { background: linear-gradient(180deg, var(--gold-bright), var(--gold)); color: #1a1206; border-color: var(--gold); font-weight: bold; }
+.wizard-steps button.step.done { color: var(--green); border-color: var(--green); }

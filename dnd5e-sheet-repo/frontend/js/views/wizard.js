@@ -12,6 +12,7 @@ import {
 import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
+import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras } from "../featChoices.js";
 
 // Следопыт's own 1st-level choices (Избранный враг / Природный следопыт):
 // not a subclass and not shaped like Воин's level1Choice (a single named
@@ -73,6 +74,7 @@ export function renderWizard() {
     raceLanguageCustom: {}, // index -> free-text language name, when chosenRaceLanguages[index] === "custom"
     chosenRaceFeatId: "", // FEATS id picked for a race/subrace's own feat-choice grant (Human (альтернативный)'s "Черта")
     raceFeatAbility: "", // ability chosen for that feat, when it's a multi-choice abilityIncrease feat
+    raceFeatSel: newFeatSel(), // extra choices (spells, languages, weapons, element, maneuvers) of that feat
     raceFeatSkills: [], // skills chosen for that feat, when it's a skillChoice feat (Одарённый)
     chosenCantrips: [],
     chosenSpells: [],
@@ -133,6 +135,10 @@ export function renderWizard() {
       if (raceGrant && state.chosenRaceSkills.length < raceGrant.count) return false;
       const featGrant = raceFeatChoiceGrant();
       if (featGrant && !state.chosenRaceFeatId) return false;
+      if (featGrant) {
+        const rf = FEATS.find((f) => f.id === state.chosenRaceFeatId);
+        if (rf && featExtrasIncomplete(rf, state.raceFeatSel)) return false;
+      }
       const cls = CLASSES.find((c) => c.id === state.classId);
       if (cls && cls.toolChoice && state.chosenClassTools.length < cls.toolChoice.count) return false;
     }
@@ -155,7 +161,7 @@ export function renderWizard() {
       </div>
       <h1>Создание персонажа</h1>
       <div class="wizard-steps">
-        ${steps.map((s, i) => `<span class="step ${i === state.step ? "active" : i < state.step ? "done" : ""}">${i + 1}. ${s.label}</span>`).join("")}
+        ${steps.map((s, i) => `<button type="button" class="step ${i === state.step ? "active" : i < state.step ? "done" : ""}" data-goto-step="${i}" ${i > (state.maxStep || 0) ? "disabled" : ""}>${i + 1}. ${s.label}</button>`).join("")}
       </div>
       <div class="row between" style="margin-bottom:14px;">
         <button data-action="back" ${state.step === 0 ? "disabled" : ""}>← Назад</button>
@@ -312,7 +318,7 @@ export function renderWizard() {
           <p class="muted" style="font-size:0.8rem;">Источник: ${escapeHtml(race.source || "—")}</p>
           <div class="grid cols-2" style="margin-top:8px;">
             ${race.subraces.map((sr) => `
-              <div class="card selectable ${state.subraceId === sr.id ? "selected" : ""}" data-subrace="${sr.id}">
+              <div class="card selectable race-card ${state.subraceId === sr.id ? "selected" : ""}" data-subrace="${sr.id}">
                 <h4>${escapeHtml(sr.name)}</h4>
                 ${state.edition === "2014" && sr.abilityBonuses ? `<p>Бонусы: ${raceBonusSummary(sr)}</p>` : ""}
                 ${sr.speed ? `<p>Скорость: ${sr.speed} фт</p>` : ""}
@@ -333,15 +339,15 @@ export function renderWizard() {
         <div class="grid cols-2">
           ${visibleRaces().map(
             (r) => `
-            <div class="card selectable ${state.raceId === r.id ? "selected" : ""}" data-race="${r.id}">
+            <div class="card selectable race-card ${state.raceId === r.id ? "selected" : ""}" data-race="${r.id}">
               ${racePortraitBannerHtml(r.id)}
               <h4>${escapeHtml(r.name)}</h4>
-              <p class="muted" style="font-size:0.8rem;">Источник: ${escapeHtml(r.source || "—")}</p>
+              <p class="muted">Источник: ${escapeHtml(r.source || "—")}</p>
               <p>Скорость ${r.speed} фт · Размер: ${r.size}</p>
               ${state.edition === "2014" ? `<p>Бонусы: ${raceBonusSummary(r)}</p>` : ""}
               ${r.traits.map((t) => `<p><strong>${escapeHtml(t.name)}:</strong> ${escapeHtml(t.desc)}</p>`).join("")}
-              ${r.languages ? `<p class="muted" style="font-size:0.85rem;">Языки: ${r.languages.map(escapeHtml).join(", ")}</p>` : ""}
-              ${r.subraces && r.subraces.length ? `<p class="muted" style="font-size:0.85rem;">Есть разновидности — откроются после выбора.</p>` : ""}
+              ${r.languages ? `<p class="muted">Языки: ${r.languages.map(escapeHtml).join(", ")}</p>` : ""}
+              ${r.subraces && r.subraces.length ? `<p class="muted">Есть разновидности — откроются после выбора.</p>` : ""}
             </div>`
           ).join("")}
         </div>
@@ -1311,6 +1317,7 @@ export function renderWizard() {
                   })()
                 : ""
             }
+            ${featExtrasHtml(feat, state.raceFeatSel, { proficiencies: { weapons: [], languages: [] }, spellcasting: { cantrips: [], known: [] } })}
           </div>`
             : ""
         }
@@ -1836,11 +1843,18 @@ export function renderWizard() {
         e.preventDefault();
       }
     });
+    on(app, "click", "[data-goto-step]", (e, el) => {
+      const i = Number(el.dataset.gotoStep);
+      if (Number.isNaN(i) || i === state.step || i > (state.maxStep || 0)) return;
+      state.step = i;
+      render();
+    });
     on(app, "click", "[data-action=back]", () => { state.step = Math.max(0, state.step - 1); render(); });
-    on(app, "click", "[data-action=next]", () => { if (!canAdvance()) return; state.step = Math.min(relevantSteps().length - 1, state.step + 1); render(); });
+    on(app, "click", "[data-action=next]", () => { if (!canAdvance()) return; state.step = Math.min(relevantSteps().length - 1, state.step + 1); state.maxStep = Math.max(state.maxStep || 0, state.step); render(); });
     on(app, "click", "[data-action=finish]", (e, el) => { if (canAdvance()) finish(el); });
     on(app, "click", "[data-action=change-race]", () => {
       state.raceId = null;
+      state.maxStep = state.step;
       state.subraceId = null;
       state.raceChoiceAbilities = [];
       state.raceFlexibleAlloc = {};
@@ -1850,12 +1864,14 @@ export function renderWizard() {
       state.chosenRaceFeatId = "";
       state.raceFeatAbility = "";
       state.raceFeatSkills = [];
+      state.raceFeatSel = newFeatSel();
       render();
     });
 
     on(app, "click", "[data-edition]", (e, el) => { state.edition = el.dataset.edition; render(); });
     on(app, "click", "[data-race]", (e, el) => {
       state.raceId = el.dataset.race;
+      state.maxStep = state.step;
       state.subraceId = null;
       state.raceChoiceAbilities = [];
       state.raceFlexibleAlloc = {};
@@ -1865,6 +1881,7 @@ export function renderWizard() {
       state.chosenRaceFeatId = "";
       state.raceFeatAbility = "";
       state.raceFeatSkills = [];
+      state.raceFeatSel = newFeatSel();
       render();
     });
     on(app, "click", "[data-subrace]", (e, el) => {
@@ -1877,12 +1894,14 @@ export function renderWizard() {
       state.chosenRaceFeatId = "";
       state.raceFeatAbility = "";
       state.raceFeatSkills = [];
+      state.raceFeatSel = newFeatSel();
       render();
     });
     on(app, "click", "[data-race-source]", (e, el) => { state.raceSourceFilter = el.dataset.raceSource; render(); });
     on(app, "click", "[data-background-source]", (e, el) => { state.backgroundSourceFilter = el.dataset.backgroundSource; render(); });
     on(app, "click", "[data-class]", (e, el) => {
       state.classId = el.dataset.class;
+      state.maxStep = state.step;
       state.chosenSkills = [];
       state.equipmentSelections = {};
       state.classEquipmentDeclined = false;
@@ -1901,6 +1920,7 @@ export function renderWizard() {
     });
     on(app, "click", "[data-action=change-class]", () => {
       state.classId = null;
+      state.maxStep = state.step;
       state.level1ChoiceIndex = null;
       state.chosenSubclassSkills = [];
       state.chosenSubclassLanguages = [];
@@ -2093,8 +2113,10 @@ export function renderWizard() {
       const feat = FEATS.find((f) => f.id === state.chosenRaceFeatId);
       state.raceFeatAbility = feat && feat.abilityIncrease ? feat.abilityIncrease.choices[0] : "";
       state.raceFeatSkills = [];
+      state.raceFeatSel = newFeatSel();
       render();
     });
+    wireFeatExtras(app, () => state.raceFeatSel, () => FEATS.find((f) => f.id === state.chosenRaceFeatId), render);
     on(app, "change", "[data-race-feat-ability-choice]", (e, el) => {
       state.raceFeatAbility = el.value;
     });
@@ -2407,6 +2429,7 @@ export function renderWizard() {
           skills.forEach((s) => { if (!data.proficiencies.skills.includes(s)) data.proficiencies.skills.push(s); });
           entry.grantedSkills = skills;
         }
+        applyFeatExtras(data, feat, entry, state.raceFeatSel);
         data.feats.push(entry);
       }
     }

@@ -11,6 +11,7 @@ import {
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
+import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras } from "../featChoices.js";
 
 // showRollResult() (diceModal.js) fires this on `document` after every roll
 // anywhere in the app, so the inline roll-log on the sheet's main tab can
@@ -128,6 +129,10 @@ export async function renderSheet(id) {
   ];
   let spellSearch = ""; // free-text filter in the spells tab's "add spell" browser
   let spellLevelFilter = "all"; // "all" | "0" | "1" in the spells tab's "add spell" browser
+  let extraBrowseOpen = false; // spells tab: "any class, over the limit" browse panel
+  let extraSpellSearch = "";
+  let extraSpellLevel = "all";
+  let extraSpellClass = "all";
   let spellBrowseOpen = false; // spells tab: whether the "+ Добавить заклинание" browse panel is open
   let spellPrepMode = false; // spells tab: whether the full prepare-spells picker (all available spells, not just today's prepared ones) is open
   let restState = { tab: "short", message: "", diceCount: 0, pendingDice: 0 }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
@@ -1050,7 +1055,7 @@ export async function renderSheet(id) {
     return !!(raw || []).some((f) => ASI_FEATURE_NAME.test(f));
   }
   function freshAsiState() {
-    return { mode: "asi", singleAbility: true, abilities: ["str", ""], featId: "", featAbility: "", featSkills: [] };
+    return { mode: "asi", singleAbility: true, abilities: ["str", ""], featId: "", featAbility: "", featSkills: [], sel: newFeatSel() };
   }
   // "Боевой архетип" (Воин 3-й уровень, and the same idea under other names
   // for most other classes -- Rogue's "Архетип плута", Barbarian's "Путь",
@@ -1616,7 +1621,8 @@ export async function renderSheet(id) {
                 ${SKILLS.filter((s) => !(data.proficiencies.skills || []).includes(s.id)).map((s) => `<label style="font-weight:normal;"><input type="checkbox" data-asi-feat-skill value="${s.id}" ${asi.featSkills.includes(s.id) ? "checked" : ""} /> ${escapeHtml(s.label)}</label>`).join("")}
               </div>`
                 : ""
-            }`
+            }
+            ${featExtrasHtml(feat, asi.sel, data)}`
               : ""
           }
         </div>`
@@ -1630,7 +1636,12 @@ export async function renderSheet(id) {
   function asiChoiceIncomplete() {
     if (!levelUpState.asi) return false;
     const asi = levelUpState.asi;
-    if (asi.mode === "feat") return !asi.featId;
+    if (asi.mode === "feat") {
+      if (!asi.featId) return true;
+      const f = FEATS.find((x) => x.id === asi.featId);
+      if (f && f.skillChoice && asi.featSkills.length < f.skillChoice.count) return true;
+      return featExtrasIncomplete(f, asi.sel);
+    }
     return !asi.abilities[0] || (!asi.singleAbility && !asi.abilities[1]);
   }
   // Мастер боевых искусств picks 3 приёма (maneuvers) the moment the
@@ -2132,8 +2143,10 @@ export async function renderSheet(id) {
       const feat = FEATS.find((f) => f.id === el.value);
       levelUpState.asi.featAbility = feat && feat.abilityIncrease ? feat.abilityIncrease.choices[0] : "";
       levelUpState.asi.featSkills = [];
+      levelUpState.asi.sel = newFeatSel();
       refreshLevelUpModal();
     });
+    wireFeatExtras(modal, () => levelUpState.asi.sel, () => FEATS.find((f) => f.id === levelUpState.asi.featId), refreshLevelUpModal);
     on(modal, "change", "[data-asi-feat-ability]", (e, el) => {
       levelUpState.asi.featAbility = el.value;
     });
@@ -2225,6 +2238,7 @@ export async function renderSheet(id) {
       skills.forEach((s) => { if (!data.proficiencies.skills.includes(s)) data.proficiencies.skills.push(s); });
       entry.grantedSkills = skills;
     }
+    applyFeatExtras(data, feat, entry, asi.sel);
     data.feats = data.feats || [];
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
@@ -2771,7 +2785,7 @@ export async function renderSheet(id) {
           </div>
           <div class="col">
             <label>Базовый КД</label>
-            <input type="number" min="1" max="20" data-bind="customArmor.baseAC" data-clamp="1:20" value="${c.baseAC ?? 10}" />
+            <input type="number" min="1" max="35" data-bind="customArmor.baseAC" data-clamp="1:35" value="${c.baseAC ?? 10}" />
           </div>
         </div>
         <div class="grid cols-2" style="margin-top:8px;">
@@ -2785,7 +2799,7 @@ export async function renderSheet(id) {
           </div>
           <div class="col">
             <label>Максимум Ловкости</label>
-            <input type="number" min="0" max="20" data-bind="customArmor.dexCap" data-clamp="0:20" value="${c.dexCap ?? 2}" />
+            <input type="number" min="0" max="35" data-bind="customArmor.dexCap" data-clamp="0:35" value="${c.dexCap ?? 2}" />
           </div>
         </div>
         <div class="col" style="margin-top:8px;">
@@ -2852,7 +2866,7 @@ export async function renderSheet(id) {
               </div>
               <div class="col">
                 <label>Щит, +КД</label>
-                <input type="number" style="width:100%;" min="0" max="20" data-bind="shieldACBonus" data-clamp="0:20" value="${data.shieldACBonus ?? 2}" />
+                <input type="number" style="width:100%;" min="0" max="35" data-bind="shieldACBonus" data-clamp="0:35" value="${data.shieldACBonus ?? 2}" />
               </div>
             </div>
             ${data.armorId === "custom" ? customArmorFields() : ""}
@@ -4012,7 +4026,65 @@ export async function renderSheet(id) {
           </div>
         </div>
       </div>
-      ${listSectionHtml}`;
+      ${listSectionHtml}
+      ${extraSpellsPanelHtml(sc)}`;
+  }
+
+  // «Дополнительные заклинания»: any cantrip/spell of ANY class, added on top
+  // of (and never counted against) the class's own known/prepared limits --
+  // for magic items, DM rulings, multiclass leftovers, etc. Stored as ids in
+  // data.spellcasting.extra.
+  function extraSpellsPanelHtml(sc) {
+    const extraIds = new Set(sc.extra || []);
+    const extraSpells = SPELLS.filter((sp) => extraIds.has(sp.id)).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
+    const removeBtn = (sp) => `<button class="small danger" data-action="toggle-extra-spell" data-spell="${sp.id}" title="Убрать">✕</button>`;
+    let listHtml = extraSpells.length
+      ? [...new Set(extraSpells.map((sp) => sp.level))].map((lvl) => `
+        <div class="spell-level-section">
+          <div class="spell-level-header"><h4>${lvl === 0 ? "Заговоры" : `${lvl}-й круг`}</h4></div>
+          <div class="spell-level-divider"></div>
+          <div class="spell-cards">${extraSpells.filter((sp) => sp.level === lvl).map((sp) => spellCardHtml(sp, removeBtn(sp), { known: true })).join("")}</div>
+        </div>`).join("")
+      : '<p class="muted">Здесь можно добавить заговор или заклинание любого класса сверх лимита — они не занимают места среди известных/подготовленных.</p>';
+    let browseHtml = "";
+    if (extraBrowseOpen) {
+      const known = new Set([...(sc.cantrips || []), ...(sc.known || []), ...(sc.prepared || []), ...extraIds]);
+      const q = extraSpellSearch.trim().toLowerCase();
+      const pool = SPELLS.filter((sp) => {
+        if (known.has(sp.id)) return false;
+        if (extraSpellLevel !== "all" && String(sp.level) !== extraSpellLevel) return false;
+        if (extraSpellClass !== "all" && !sp.classes.includes(extraSpellClass)) return false;
+        if (q && !sp.name.toLowerCase().includes(q)) return false;
+        return true;
+      });
+      const shown = pool.slice(0, 60);
+      browseHtml = `
+        <div class="panel" style="margin-top:10px;">
+          <h4 style="margin-top:0;">Выбор заклинания (любой класс)</h4>
+          <div class="row spell-filters" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+            <input type="text" data-extra-search placeholder="Поиск по названию…" value="${escapeHtml(extraSpellSearch)}" style="flex:1;min-width:160px;" />
+            <select data-extra-class style="flex:none;width:auto;">
+              <option value="all">Все классы</option>
+              ${CLASSES.filter((c) => SPELLS.some((sp) => sp.classes.includes(c.id))).map((c) => `<option value="${c.id}" ${extraSpellClass === c.id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}
+            </select>
+            <select data-extra-level style="flex:none;width:auto;">
+              <option value="all">Все уровни</option>
+              <option value="0" ${extraSpellLevel === "0" ? "selected" : ""}>Заговоры</option>
+              ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((l) => `<option value="${l}" ${extraSpellLevel === String(l) ? "selected" : ""}>${l}-й круг</option>`).join("")}
+            </select>
+          </div>
+          ${shown.length ? `<div class="spell-cards">${shown.map((sp) => spellCardHtml(sp, `<button class="small primary" data-action="toggle-extra-spell" data-spell="${sp.id}" title="Добавить сверх лимита">+ Добавить</button>`)).join("")}</div>${pool.length > shown.length ? `<p class="muted">Показаны первые ${shown.length} из ${pool.length} — уточните поиск.</p>` : ""}` : '<p class="muted">Ничего не найдено — измените фильтры.</p>'}
+        </div>`;
+    }
+    return `
+      <div class="panel">
+        <div class="row between" style="align-items:center;flex-wrap:wrap;gap:8px;">
+          <h3 style="margin:0;">Дополнительные заклинания (сверх лимита)</h3>
+          <button class="small primary" data-action="toggle-extra-browse">${extraBrowseOpen ? "✕ Закрыть подбор" : "+ Заговор / заклинание любого класса"}</button>
+        </div>
+        ${listHtml}
+        ${browseHtml}
+      </div>`;
   }
 
   // Known spells grouped into a section per circle (0 = заговоры, no
@@ -5074,7 +5146,7 @@ export async function renderSheet(id) {
     const n = parseInt(String(el.value).replace(/[^\d+-]/g, ""), 10);
     data.overrides = data.overrides || {};
     if (!Number.isFinite(n) || String(n) === String(parseInt(String(el.dataset.auto).replace("+", ""), 10))) delete data.overrides[key];
-    else data.overrides[key] = Math.max(-99, Math.min(999, n));
+    else data.overrides[key] = Math.max(1, Math.min(35, n));
     doSave();
     render();
   });
@@ -6387,6 +6459,25 @@ export async function renderSheet(id) {
     spellPrepMode = !spellPrepMode;
     render();
   });
+  on(app, "click", "[data-action=toggle-extra-browse]", () => { extraBrowseOpen = !extraBrowseOpen; render(); });
+  on(app, "click", "[data-action=toggle-extra-spell]", (e, el) => {
+    const sc = data.spellcasting || (data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} });
+    const list = sc.extra || (sc.extra = []);
+    const i = list.indexOf(el.dataset.spell);
+    if (i >= 0) list.splice(i, 1);
+    else list.push(el.dataset.spell);
+    doSave();
+    render();
+  });
+  on(app, "input", "[data-extra-search]", (e, el) => {
+    extraSpellSearch = el.value;
+    const pos = el.selectionStart;
+    render();
+    const n = $("[data-extra-search]", app);
+    if (n) { n.focus(); n.setSelectionRange(pos, pos); }
+  });
+  on(app, "change", "[data-extra-class]", (e, el) => { extraSpellClass = el.value; render(); });
+  on(app, "change", "[data-extra-level]", (e, el) => { extraSpellLevel = el.value; render(); });
   on(app, "click", "[data-action=toggle-spell-browse]", () => {
     spellBrowseOpen = !spellBrowseOpen;
     render();
@@ -6630,6 +6721,60 @@ export async function renderSheet(id) {
     render();
   });
 
+  // Crop window for the character portrait: drag the picture and use the
+  // slider to zoom, so the player chooses which part of it is shown.
+  function openPortraitCropper(img) {
+    const VIEW = 280;
+    const st = { zoom: 1, ox: 0, oy: 0 };
+    const base = Math.max(VIEW / img.width, VIEW / img.height);
+    const modal = openModal(`
+      <h3 style="margin-top:0;">Область изображения</h3>
+      <p class="muted" style="font-size:0.85rem;margin:0 0 8px;">Перетащите картинку и настройте масштаб — в портрете будет видна выбранная область.</p>
+      <div style="display:flex;justify-content:center;"><canvas data-crop-canvas width="${VIEW}" height="${VIEW}" style="width:${VIEW}px;height:${VIEW}px;border:2px solid var(--gold);border-radius:8px;cursor:grab;touch-action:none;background:#000;"></canvas></div>
+      <label class="row" style="gap:8px;align-items:center;margin-top:10px;"><span>Масштаб</span><input type="range" data-crop-zoom min="1" max="4" step="0.01" value="1" style="flex:1;" /></label>
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px;"><button data-action="close-modal">Отмена</button><button class="primary" data-crop-ok>Готово</button></div>`);
+    const cv = modal.querySelector("[data-crop-canvas]");
+    const ctx = cv.getContext("2d");
+    const clamp = () => {
+      const w = img.width * base * st.zoom, h = img.height * base * st.zoom;
+      st.ox = Math.min(0, Math.max(VIEW - w, st.ox));
+      st.oy = Math.min(0, Math.max(VIEW - h, st.oy));
+    };
+    const draw = () => {
+      clamp();
+      ctx.clearRect(0, 0, VIEW, VIEW);
+      ctx.drawImage(img, st.ox, st.oy, img.width * base * st.zoom, img.height * base * st.zoom);
+    };
+    st.ox = (VIEW - img.width * base) / 2;
+    st.oy = (VIEW - img.height * base) / 2;
+    draw();
+    let drag = null;
+    cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.setPointerCapture(e.pointerId); cv.style.cursor = "grabbing"; });
+    cv.addEventListener("pointermove", (e) => { if (!drag) return; st.ox = drag.ox + (e.clientX - drag.x); st.oy = drag.oy + (e.clientY - drag.y); draw(); });
+    const end = () => { drag = null; cv.style.cursor = "grab"; };
+    cv.addEventListener("pointerup", end);
+    cv.addEventListener("pointercancel", end);
+    modal.querySelector("[data-crop-zoom]").addEventListener("input", (e) => {
+      const old = st.zoom, nz = Number(e.target.value);
+      // zoom around the centre of the viewport
+      const cx = (VIEW / 2 - st.ox) / old, cy = (VIEW / 2 - st.oy) / old;
+      st.zoom = nz;
+      st.ox = VIEW / 2 - cx * nz;
+      st.oy = VIEW / 2 - cy * nz;
+      draw();
+    });
+    on(modal, "click", "[data-action=close-modal]", closeModal);
+    on(modal, "click", "[data-crop-ok]", () => {
+      const size = 256, k = size / VIEW;
+      const out = document.createElement("canvas");
+      out.width = size; out.height = size;
+      out.getContext("2d").drawImage(img, st.ox * k, st.oy * k, img.width * base * st.zoom * k, img.height * base * st.zoom * k);
+      data.portraitDataUrl = out.toDataURL("image/jpeg", 0.85);
+      closeModal();
+      doSave();
+      render();
+    });
+  }
   // portrait (top-left image box) — click opens the hidden file input, then
   // the chosen image is downscaled via canvas before being stored as a data
   // URL, to avoid bloating the character's JSON blob in D1.
@@ -6649,19 +6794,7 @@ export async function renderSheet(id) {
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
-      img.onload = () => {
-        const size = 256;
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d");
-        const scale = Math.max(size / img.width, size / img.height);
-        const w = img.width * scale, h = img.height * scale;
-        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
-        data.portraitDataUrl = canvas.toDataURL("image/jpeg", 0.85);
-        doSave();
-        render();
-      };
+      img.onload = () => { openPortraitCropper(img); el.value = ""; };
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
