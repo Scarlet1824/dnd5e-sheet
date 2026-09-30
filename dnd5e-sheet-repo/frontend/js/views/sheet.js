@@ -5146,7 +5146,7 @@ export async function renderSheet(id) {
     const n = parseInt(String(el.value).replace(/[^\d+-]/g, ""), 10);
     data.overrides = data.overrides || {};
     if (!Number.isFinite(n) || String(n) === String(parseInt(String(el.dataset.auto).replace("+", ""), 10))) delete data.overrides[key];
-    else data.overrides[key] = Math.max(1, Math.min(35, n));
+    else data.overrides[key] = Math.max(1, Math.min(key === "speed" ? 100 : 35, n));
     doSave();
     render();
   });
