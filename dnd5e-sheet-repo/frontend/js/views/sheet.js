@@ -19,6 +19,15 @@ import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
 // instead of stacking a new one on top of the old.
 let rollLogRefreshHandler = null;
 
+// Russian plural forms for "кость хитов" (1 кость, 2-4 кости, 5+/11-14 костей).
+function pluralizeBones(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "кость";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "кости";
+  return "костей";
+}
+
 // Russian plural forms for "кубик" (1 кубик, 2-4 кубика, 5+/11-14 кубиков).
 function pluralizeDice(n) {
   const mod10 = n % 10;
@@ -121,8 +130,12 @@ export async function renderSheet(id) {
   let spellLevelFilter = "all"; // "all" | "0" | "1" in the spells tab's "add spell" browser
   let spellBrowseOpen = false; // spells tab: whether the "+ Добавить заклинание" browse panel is open
   let spellPrepMode = false; // spells tab: whether the full prepare-spells picker (all available spells, not just today's prepared ones) is open
-  let restState = { tab: "short", message: "" }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
+  let restState = { tab: "short", message: "", diceCount: 0, pendingDice: 0 }; // rest modal: active tab ("short"|"long") + a transient status line shown after resting
   let restModalEl = null; // the rest modal's root element, once opened -- used to refresh its content in place without closing it
+  // Money calculator (inventory tab): which coin is selected, the typed
+  // amount, whether the "exchange into which coin?" picker is showing, and
+  // the last result/error line. Ephemeral UI state, not saved on the character.
+  let coinCalc = { coin: "gp", amount: "", exchangeOpen: false, msg: "", err: false };
   let abilityBonusesOpen = false; // main tab: whether the "Откуда бонусы к характеристикам" log is expanded
   // Header's Раса/Предыстория fields: once RACES/BACKGROUNDS ship a matching
   // name, most characters just pick one from a dropdown -- but freeform text
@@ -681,7 +694,7 @@ export async function renderSheet(id) {
         <button type="button" data-rest-tab="long" class="${restState.tab === "long" ? "active" : ""}">Продолжительный отдых</button>
       </div>
       ${restState.tab === "short" ? shortRestTabHtml() : longRestTabHtml()}
-      ${restState.message ? `<p class="muted" style="margin-top:10px;">${escapeHtml(restState.message)}</p>` : ""}
+      ${restState.message ? `<div class="panel panel-tight" style="margin:12px 0 0;border-color:var(--accent, currentColor);"><p style="margin:0;font-size:0.9rem;">${escapeHtml(restState.message)}</p></div>` : ""}
     `;
   }
   function shortRestTabHtml() {
@@ -689,6 +702,10 @@ export async function renderSheet(id) {
     return `
       <div class="panel panel-tight" style="margin:0;">
         <p style="margin:0 0 8px;">Кости хитов: <strong class="num">${hd.current}</strong> из ${hd.total} (к${hd.die})</p>
+        <label class="row" style="gap:8px;align-items:center;">
+          <span>Потратить костей хитов:</span>
+          <input type="number" min="0" max="${hd.current}" value="${Math.min(restState.diceCount || 0, hd.current)}" data-rest-dice-count style="width:70px;" ${hd.current <= 0 ? "disabled" : ""} />
+        </label>
         <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">Каждая кость даёт 1к${hd.die} ${formatModifier(getAbilityMod(data, "con"))} (модификатор Телосложения) хитов.</p>
       </div>
       <div class="row" style="justify-content:flex-end;margin-top:14px;">
@@ -711,26 +728,51 @@ export async function renderSheet(id) {
   // (or "any") rest, plus Pact Magic slots for a Warlock. Called either
   // directly (no pending Arcane Recovery choice) or after that choice modal
   // confirms/skips.
+  // Spends `count` Hit Dice (rolled here, PHB p.186), heals, and returns a
+  // human-readable summary line for the rest window ("" when count is 0).
+  function spendHitDiceForRest(count) {
+    const hd = hitDiceInfo();
+    count = Math.max(0, Math.min(hd.current, count));
+    if (count <= 0) return "";
+    const conMod = getAbilityMod(data, "con");
+    // «Стойкий»: each Hit Die spent this way heals at least 2×Con modifier
+    // (minimum 2), regardless of what the die itself rolled.
+    const durableFloor = hasFeat("durable") ? Math.max(2, 2 * conMod) : 0;
+    const rolls = rollDice(count, hd.die).map((r) => Math.max(r, durableFloor));
+    const healTotal = Math.max(0, rolls.reduce((a, b) => a + b, 0) + count * conMod);
+    data.hitDice.current = hd.current - count;
+    const max = Number(data.hp.max) || 0;
+    const before = Number(data.hp.current) || 0;
+    const after = Math.min(max, before + healTotal);
+    data.hp.current = after;
+    return `Потрачено ${count} ${pluralizeBones(count)} хитов (${rolls.map((r) => `${r}`).join(" + ")} ${formatModifier(conMod * count)}): восстановлено ${after - before} хитов (${before} → ${after} из ${max}).`;
+  }
   function finishShortRest() {
+    const hdSummary = spendHitDiceForRest(restState.pendingDice || 0);
+    restState.pendingDice = 0;
+    restState.diceCount = 0;
     restoreFeatureUses(["short", "any"]);
     if (isPactCaster()) restoreAllSpellSlots();
-    restState.message = "Короткий отдых завершён: умения и заклинания, восстанавливающиеся на коротком отдыхе, обновлены.";
+    restState.message = (hdSummary ? hdSummary + " " : "") + "Короткий отдых завершён: умения и заклинания, восстанавливающиеся на коротком отдыхе, обновлены.";
     doSave();
     render();
     refreshRestModal();
   }
   function performLongRest() {
     const max = Number(data.hp.max) || 0;
+    const hpBefore = Number(data.hp.current) || 0;
     data.hp.current = max; // temp HP is deliberately left untouched
     const hd = hitDiceInfo();
     const recover = Math.max(1, Math.floor(hd.total / 2));
-    data.hitDice.current = Math.min(hd.total, hd.current + recover);
+    const diceAfter = Math.min(hd.total, hd.current + recover);
+    const diceGained = diceAfter - hd.current;
+    data.hitDice.current = diceAfter;
     restoreFeatureUses(["short", "long", "any"]);
     restoreAllSpellSlots();
     const luckyEntry = (data.feats || []).find((f) => f.id === LUCKY_FEAT_ID);
     if (luckyEntry) luckyEntry.luckyUsed = [false, false, false];
     if (data.deathSaves) { data.deathSaves.successes = 0; data.deathSaves.failures = 0; }
-    restState.message = "Продолжительный отдых завершён: хиты, кости хитов, умения и ячейки заклинаний восстановлены.";
+    restState.message = `Продолжительный отдых завершён: хиты восстановлены (${hpBefore} → ${max}), кости хитов: +${diceGained} ${pluralizeBones(diceGained)} (теперь ${diceAfter} из ${hd.total}), умения и ячейки заклинаний обновлены.`;
     doSave();
     render();
     refreshRestModal();
@@ -826,7 +868,13 @@ export async function renderSheet(id) {
       restState.message = "";
       refreshRestModal();
     });
+    on(modal, "input", "[data-rest-dice-count]", (e, el) => {
+      restState.diceCount = Math.max(0, Math.floor(Number(el.value) || 0));
+    });
     on(modal, "click", "[data-action=do-short-rest]", () => {
+      const hdNow = hitDiceInfo();
+      const input = modal.querySelector("[data-rest-dice-count]");
+      restState.pendingDice = Math.max(0, Math.min(hdNow.current, Math.floor(Number(input?.value) || 0)));
       const recovery = findArcaneRecovery();
       if (recovery) { openArcaneRecoveryModal(recovery); return; }
       finishShortRest();
@@ -836,7 +884,7 @@ export async function renderSheet(id) {
     });
   }
   function openRestModal() {
-    restState = { tab: "short", message: "" };
+    restState = { tab: "short", message: "", diceCount: 0, pendingDice: 0 };
     restModalEl = openModal(restModalBodyHtml());
     wireRestModal(restModalEl);
   }
@@ -2705,6 +2753,98 @@ export async function renderSheet(id) {
     { id: "darts", name: "Дротики" },
   ];
 
+  // ---- Money calculator ---------------------------------------------
+  // 10 copper = 1 silver, 10 silver = 1 gold, 10 gold = 1 platinum. Every
+  // operation works on data.money directly (the same cells the inputs above
+  // are bound to), so the cells always reflect the result.
+  const COINS = [
+    { id: "cp", name: "медная", nameGen: "медных", label: "М", fill: "#b87333", ring: "#7a4a1d", text: "#3b210a", value: 1 },
+    { id: "sp", name: "серебряная", nameGen: "серебряных", label: "С", fill: "#c9ced4", ring: "#7c838c", text: "#3a4048", value: 10 },
+    { id: "gp", name: "золотая", nameGen: "золотых", label: "З", fill: "#e2b93b", ring: "#9a7414", text: "#4a3608", value: 100 },
+    { id: "pp", name: "платиновая", nameGen: "платиновых", label: "П", fill: "#e8f0f6", ring: "#6f95b3", text: "#2c4a63", value: 1000 },
+  ];
+  function coinSvg(c) {
+    return `<svg viewBox="0 0 40 40" width="38" height="38" aria-hidden="true">
+      <circle cx="20" cy="20" r="18" fill="${c.fill}" stroke="${c.ring}" stroke-width="2"/>
+      <circle cx="20" cy="20" r="13.5" fill="none" stroke="${c.ring}" stroke-width="1" stroke-dasharray="2 2"/>
+      <text x="20" y="25.5" text-anchor="middle" font-size="15" font-weight="700" font-family="Manrope, sans-serif" fill="${c.text}">${c.label}</text>
+    </svg>`;
+  }
+  function moneyCalculatorHtml() {
+    const src = COINS.find((c) => c.id === coinCalc.coin) || COINS[2];
+    return `
+      <div class="coin-calc">
+        <div class="coin-calc-coins">
+          ${COINS.map((c) => `
+            <button type="button" class="coin-btn ${c.id === coinCalc.coin ? "selected" : ""}" data-coin-pick="${c.id}" title="${c.name[0].toUpperCase() + c.name.slice(1)} монета">
+              ${coinSvg(c)}
+              <span class="num">${Number(data.money[c.id]) || 0}</span>
+            </button>`).join("")}
+        </div>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;">
+          <input type="number" min="1" step="1" placeholder="Сколько" data-coin-amount value="${escapeHtml(coinCalc.amount)}" style="width:96px;" />
+          <button type="button" class="small ${coinCalc.exchangeOpen ? "primary" : ""}" data-coin-op="exchange">Размен</button>
+          <button type="button" class="small" data-coin-op="spend">Потратить</button>
+          <button type="button" class="small" data-coin-op="gain">Получить</button>
+        </div>
+        ${coinCalc.exchangeOpen ? `
+          <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+            <span class="muted" style="font-size:0.85rem;">Разменять ${escapeHtml(src.nameGen)} на:</span>
+            ${COINS.filter((c) => c.id !== src.id).map((c) => `
+              <button type="button" class="coin-btn small-coin" data-coin-exchange-to="${c.id}" title="Получить ${c.nameGen} монеты">${coinSvg(c)}</button>`).join("")}
+          </div>` : ""}
+        ${coinCalc.msg ? `<p class="coin-calc-msg ${coinCalc.err ? "err" : ""}">${escapeHtml(coinCalc.msg)}</p>` : ""}
+      </div>`;
+  }
+  function coinCalcAmount() {
+    const n = Math.floor(Number(coinCalc.amount));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  function coinCalcFinish(msg, err) {
+    coinCalc.msg = msg;
+    coinCalc.err = !!err;
+    if (!err) { coinCalc.amount = ""; coinCalc.exchangeOpen = false; }
+    doSave();
+    render();
+  }
+  function coinCalcSpend() {
+    const c = COINS.find((x) => x.id === coinCalc.coin);
+    const n = coinCalcAmount();
+    if (!n) return coinCalcFinish("Введите число монет (от 1).", true);
+    const have = Number(data.money[c.id]) || 0;
+    if (n > have) return coinCalcFinish(`Недостаточно: в кошельке ${have} ${c.nameGen}, а нужно ${n}. Сначала разменяйте другие монеты.`, true);
+    data.money[c.id] = have - n;
+    coinCalcFinish(`Потрачено: ${n} ${c.nameGen}.`);
+  }
+  function coinCalcGain() {
+    const c = COINS.find((x) => x.id === coinCalc.coin);
+    const n = coinCalcAmount();
+    if (!n) return coinCalcFinish("Введите число монет (от 1).", true);
+    data.money[c.id] = (Number(data.money[c.id]) || 0) + n;
+    coinCalcFinish(`Получено: ${n} ${c.nameGen}.`);
+  }
+  function coinCalcExchange(toId) {
+    const from = COINS.find((x) => x.id === coinCalc.coin);
+    const to = COINS.find((x) => x.id === toId);
+    const n = coinCalcAmount();
+    if (!n) return coinCalcFinish("Введите число монет (от 1).", true);
+    const have = Number(data.money[from.id]) || 0;
+    if (n > have) return coinCalcFinish(`Недостаточно: в кошельке ${have} ${from.nameGen}, а нужно разменять ${n}.`, true);
+    if (from.value > to.value) {
+      const gained = n * (from.value / to.value);
+      data.money[from.id] = have - n;
+      data.money[to.id] = (Number(data.money[to.id]) || 0) + gained;
+      return coinCalcFinish(`Разменяно ${n} ${from.nameGen} на ${gained} ${to.nameGen}.`);
+    }
+    const ratio = to.value / from.value;
+    const gained = Math.floor(n / ratio);
+    if (gained < 1) return coinCalcFinish(`Чтобы получить 1 ${to.name} монету, нужно ${ratio} ${from.nameGen}.`, true);
+    const used = gained * ratio;
+    data.money[from.id] = have - used;
+    data.money[to.id] = (Number(data.money[to.id]) || 0) + gained;
+    coinCalcFinish(`Разменяно ${used} ${from.nameGen} на ${gained} ${to.nameGen}${used < n ? ` (остаток ${n - used} не хватает на целую монету и остаётся у вас)` : ""}.`);
+  }
+
   function ammoPanel() {
     const ammo = data.ammo || {};
     return `
@@ -3781,6 +3921,7 @@ export async function renderSheet(id) {
               <input type="number" data-bind="money.${coin}" value="${data.money[coin] || 0}" />
             </div>`).join("")}
         </div>
+        ${moneyCalculatorHtml()}
       </div>
       <div class="panel">
         <div class="row between"><h2 style="margin:0;">Оружие</h2></div>
@@ -5610,6 +5751,23 @@ export async function renderSheet(id) {
   // anywhere else in the box too.
   let abilityRollMousedownOnInput = false;
   on(app, "mousedown", "[data-ability-score]", () => { abilityRollMousedownOnInput = true; });
+  // Money calculator
+  on(app, "click", "[data-coin-pick]", (e, el) => {
+    coinCalc.coin = el.dataset.coinPick;
+    coinCalc.msg = "";
+    render();
+  });
+  on(app, "input", "[data-coin-amount]", (e, el) => { coinCalc.amount = el.value; });
+  on(app, "click", "[data-coin-op]", (e, el) => {
+    const op = el.dataset.coinOp;
+    if (op === "exchange") {
+      coinCalc.exchangeOpen = !coinCalc.exchangeOpen;
+      coinCalc.msg = "";
+      render();
+    } else if (op === "spend") coinCalcSpend();
+    else if (op === "gain") coinCalcGain();
+  });
+  on(app, "click", "[data-coin-exchange-to]", (e, el) => { coinCalcExchange(el.dataset.coinExchangeTo); });
   on(app, "click", "[data-action=roll-ability]", (e, el) => {
     const startedOnInput = abilityRollMousedownOnInput;
     abilityRollMousedownOnInput = false;
