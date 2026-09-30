@@ -6,7 +6,7 @@ import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
   passivePerception, passiveInvestigation, passiveInsight, armorClass, initiativeBonus, spellSaveDC, spellAttackBonus,
-  speedBonusSources, totalSpeed, exhaustionLevel, effectiveMaxHp, speedBeforeExhaustion,
+  speedBonusSources, totalSpeed, manualOverride, armorClassAuto, initiativeBonusAuto, totalSpeedAuto, exhaustionLevel, effectiveMaxHp, speedBeforeExhaustion,
 } from "../character.js";
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
@@ -140,6 +140,7 @@ export async function renderSheet(id) {
   let formCrFilter = "all";
   let formMoveFilter = "all";
   let formOnlyAllowed = false;
+  let formShown = 30;
   let exhaustionMenuOpen = false; // header: Истощение level dropdown open?
   // Money calculator (inventory tab): which coin is selected, the typed
   // amount, whether the "exchange into which coin?" picker is showing, and
@@ -1033,7 +1034,7 @@ export async function renderSheet(id) {
     return raw.some((f) => SUBCLASS_CHOICE_FEATURE_NAME.test(f));
   }
   function freshSubclassChoiceState() {
-    return { name: "", maneuverIds: [], cantripIds: [], spellIds: [] };
+    return { name: "", maneuverIds: [], cantripIds: [], spellIds: [], totem: "" };
   }
   // A spellbook caster (Волшебник today -- "prepared" type with no
   // preparedFormula, i.e. the character picks which spells go INTO the book
@@ -1682,15 +1683,40 @@ export async function renderSheet(id) {
       // every card.
       if (picked.slug === "battlemaster") html += maneuverChooserHtml(sc);
       else if (picked.slug === "eldritch-knigh") html += eldritchKnightChooserHtml(sc);
+      else if (picked.slug === "totem-warrior") html += totemChooserHtml(sc, picked);
     }
     html += `</div>`;
     return html;
+  }
+  // «Путь тотемного воина»: the «Тотемный дух» feature lists one paragraph per
+  // animal ("Волк. …"); the player picks one when choosing the subclass.
+  function totemSpiritOptions(sub) {
+    const f = (sub.features || []).find((x) => x.name === "Тотемный дух");
+    if (!f) return [];
+    return (f.desc || []).slice(1).map((par) => {
+      const m = String(par).match(/^([А-Яа-яЁё]+)(?:\s*\([^)]*\))?\.\s*([\s\S]*)$/);
+      return m ? { name: m[1], text: m[2] } : null;
+    }).filter(Boolean);
+  }
+  function totemChooserHtml(sc, sub) {
+    const opts = totemSpiritOptions(sub);
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Тотемный дух</h4>
+        <div class="col" style="gap:6px;">
+          ${opts.map((o) => `<label class="card selectable ${sc.totem === o.name ? "selected" : ""}" style="cursor:pointer;">
+            <input type="radio" name="level-up-totem" data-level-up-totem value="${escapeHtml(o.name)}" ${sc.totem === o.name ? "checked" : ""} style="margin-right:6px;" />
+            <strong>${escapeHtml(o.name)}</strong> <span class="muted">${escapeHtml(o.text)}</span>
+          </label>`).join("")}
+        </div>
+      </div>`;
   }
   function subclassChoiceIncomplete(cls) {
     const sc = levelUpState.subclassChoice;
     if (!sc) return false;
     if (!sc.name) return true;
     const sub = (cls.subclasses || []).find((s) => s.name === sc.name);
+    if (sub && sub.slug === "totem-warrior" && !sc.totem) return true;
     if (sub && sub.slug === "battlemaster" && sc.maneuverIds.length < 3) return true;
     if (sub && sub.slug === "eldritch-knigh" && (sc.cantripIds.length < 2 || sc.spellIds.length < 3)) return true;
     return false;
@@ -1844,12 +1870,17 @@ export async function renderSheet(id) {
       levelUpState.subclassChoice.maneuverIds = [];
       levelUpState.subclassChoice.cantripIds = [];
       levelUpState.subclassChoice.spellIds = [];
+      levelUpState.subclassChoice.totem = "";
       const c = levelUpEligibleClasses()[levelUpState.classIndex];
       const cls = c && getClass(c.id);
       const newLevel = (c.level || 1) + 1;
       levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState(cls, levelUpState.subclassChoice.name, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-totem]", (e, el) => {
+      levelUpState.subclassChoice.totem = el.value;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-tool-choice]", (e, el) => {
@@ -2121,6 +2152,14 @@ export async function renderSheet(id) {
       if (sub) {
         c.subclass = sub.name;
         applySubclassFeaturesAtLevel(cls, sub, newLevel, { withIntro: true });
+        if (sub.slug === "totem-warrior" && levelUpState.subclassChoice.totem) {
+          const opt = totemSpiritOptions(sub).find((o) => o.name === levelUpState.subclassChoice.totem);
+          const card = (data.features || []).find((f) => f.name === "Тотемный дух" && f.source === subclassFeatureSource(cls, sub.name));
+          if (opt && card) {
+            card.name = `Тотемный дух: ${opt.name}`;
+            card.desc = `${opt.name}. ${opt.text}`;
+          }
+        }
         if (sub.slug === "battlemaster") {
           // Same source string subclassFeatureSource()/removeSubclassFeatures()
           // use for every other subclass-granted card, so switching away from
@@ -2412,11 +2451,33 @@ export async function renderSheet(id) {
     if (!opt) return;
     data.features.push({ name: `${cls.level1Choice.label}: ${opt.name}`, source: cls.name, desc: opt.desc });
   }
+  // «Броня бушующего в бою» (Путь бушующего в бою): the spikes of the armour
+  // are a weapon -- 1к4 колющего, Сила -- so they go into Оружие and Атаки.
+  const SPIKES_NAME = "Шипы доспеха";
+  function ensureBattleragerSpikes() {
+    if (!(data.features || []).some((f) => f.name === "Броня бушующего в бою")) return false;
+    let changed = false;
+    if (!data.weapons) data.weapons = [];
+    if (!data.attacks) data.attacks = [];
+    if (!data.weapons.some((w) => w.name === SPIKES_NAME)) {
+      data.weapons.push({ name: SPIKES_NAME, damage: "1к4", type: "колющий", properties: "Бонусное действие, в ярости и в шипованном доспехе", special: "", equipped: true, rangeType: "melee" });
+      changed = true;
+    }
+    if (!data.attacks.some((a) => a.name === SPIKES_NAME)) {
+      data.attacks.push({ name: SPIKES_NAME, bonus: "", damage: "1к4 колющий", special: "", useSpecial: false, rangeType: "melee", ability: "str", hand: "" });
+      changed = true;
+    }
+    return changed;
+  }
   function removeSubclassFeatures(cls, subName) {
     if (!subName) return;
     const source = subclassFeatureSource(cls, subName);
     const introName = subclassIntroName(cls, subName);
     data.features = (data.features || []).filter((f) => f.source !== source && !(f.source === cls.name && f.name === introName));
+    if (!(data.features || []).some((f) => f.name === "Броня бушующего в бою")) {
+      data.weapons = (data.weapons || []).filter((w) => w.name !== SPIKES_NAME);
+      data.attacks = (data.attacks || []).filter((a) => a.name !== SPIKES_NAME);
+    }
   }
   function applySubclassFeatures(cls, sub, uptoLevel) {
     if (!sub) return;
@@ -2429,6 +2490,7 @@ export async function renderSheet(id) {
       data.features.push({ name: sf.name, source, desc });
       applyFeatureProficiencyGrants(sf.name, desc);
     });
+    ensureBattleragerSpikes();
   }
   // Level-up-specific sibling of applySubclassFeatures() above: that one is
   // built for the classesEditor dropdown (wholesale swap — remove everything
@@ -2454,6 +2516,7 @@ export async function renderSheet(id) {
       data.features.push({ name: sf.name, source, desc });
       applyFeatureProficiencyGrants(sf.name, desc);
     });
+    ensureBattleragerSpikes();
   }
   // A subclass can widen the pool of pickable spells beyond its class's own
   // list (characterExpandedSpellIds() below reads this live off
@@ -2610,13 +2673,9 @@ export async function renderSheet(id) {
           <div class="panel">
             <h2>Боевые параметры</h2>
             <div class="grid cols-3 combat-stats">
-              <div class="stat-box"><div class="value" data-derived="ac">${armorClass(data)}</div><div class="label">КД</div></div>
-              <div class="stat-box" data-action="roll-initiative" style="cursor:pointer;"><div class="value" data-derived="initiative">${formatModifier(initiativeBonus(data))}</div><div class="label">Инициатива</div></div>
-              <div class="stat-box"><input class="value" style="width:100%;text-align:center;background:transparent;border:none;" type="number" data-bind="speed" value="${data.speed}" /><div class="label">Скорость, фт</div>${
-                speedBonusSources(data).length || exhaustionLevel(data) >= 2
-                  ? `<div class="muted" style="font-size:0.68rem;${exhaustionLevel(data) >= 2 ? "color:var(--red);" : ""}" title="${escapeHtml([...speedBonusSources(data).map((b) => `+${b.amount} (${b.label})`), ...(exhaustionLevel(data) >= 2 ? [`Истощение ${exhaustionLevel(data)}: ${exhaustionLevel(data) >= 5 ? "скорость 0" : "скорость вдвое"}`] : [])].join(", "))}">Итого: ${totalSpeed(data)}${exhaustionLevel(data) >= 2 ? ` (истощение)` : ""}</div>`
-                  : ""
-              }</div>
+              ${combatStatBox("ac", "КД", armorClass(data), armorClassAuto(data), "")}
+              ${combatStatBox("init", "Инициатива", initiativeBonus(data), initiativeBonusAuto(data), "roll-initiative")}
+              ${combatStatBox("speed", "Скорость, фт", totalSpeed(data), totalSpeedAuto(data), "")}
             </div>
             <div class="grid" style="grid-template-columns: 3fr 1fr; gap:10px; margin-top:8px;">
               <div class="col">
@@ -4009,8 +4068,53 @@ export async function renderSheet(id) {
       })
       .join("")}</div>`;
   }
+  // Attack/damage buttons for a beast action: «+N к попаданию» becomes an
+  // attack roll with that bonus, and the dice in parentheses after
+  // «Попадание:» become the damage roll.
+  function parseBeastAction(item) {
+    const t = String(item.t || "");
+    const atk = t.match(/([+-]\s?\d+)\s*к попаданию/);
+    const hitIdx = t.search(/Попадание/);
+    const dmg = [];
+    if (hitIdx >= 0) {
+      const re = /\((\d*)к(\d+)(?:\s*([+-])\s*(\d+))?\)/g;
+      let m;
+      const tail = t.slice(hitIdx);
+      while ((m = re.exec(tail))) dmg.push(`${m[1] || 1}d${m[2]}${m[3] ? m[3] + m[4] : ""}`);
+    }
+    return { bonus: atk ? parseInt(atk[1].replace(/\s/g, ""), 10) : null, dmg };
+  }
+  function beastRollButtons(item) {
+    const { bonus, dmg } = parseBeastAction(item);
+    if (bonus === null && !dmg.length) return "";
+    return `<div class="beast-roll-row">${
+      bonus !== null ? `<button class="small primary" data-beast-atk="${bonus}" data-beast-name="${escapeHtml(item.n || "Атака")}">🎲 Атака ${formatModifier(bonus)}</button>` : ""
+    }${
+      dmg.length ? `<button class="small danger" data-beast-dmg="${dmg.join(";")}" data-beast-name="${escapeHtml(item.n || "Атака")}">💥 Урон ${escapeHtml(dmg.map(toCyrillicDice).join(" + "))}</button>` : ""
+    }</div>`;
+  }
+  function rollBeastDamage(name, exprs, crit) {
+    const parts = [];
+    const breakdown = [];
+    let total = 0;
+    exprs.forEach((e) => {
+      const ex = crit ? doubleDiceCount(e) : e;
+      const r = rollExpr(ex);
+      total += r.total;
+      parts.push(`${toCyrillicDice(ex)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`);
+      r.rolls.forEach((v) => breakdown.push({ value: v, label: `к${r.sides}` }));
+      if (r.modifier) breakdown.push({ value: r.modifier, label: "модификатор" });
+    });
+    showRollResult({
+      label: `${name}: урон${crit ? " (крит)" : ""}`,
+      detail: parts.join("; "),
+      total,
+      breakdown,
+      reroll: crit ? undefined : { label: "Критический урон", onClick: () => rollBeastDamage(name, exprs, true) },
+    });
+  }
   function beastCardHtml(b, actionsHtml, { active = false, note = "" } = {}) {
-    const paragraph = (i) => `<p>${i.n ? `<strong>${escapeHtml(i.n)}.</strong> ` : ""}${escapeHtml(i.t)}</p>`;
+    const paragraph = (i) => `<p>${i.n ? `<strong>${escapeHtml(i.n)}.</strong> ` : ""}${escapeHtml(i.t)}</p>${beastRollButtons(i)}`;
     return `
       <div class="spell-card beast-card ${active ? "known" : ""}" data-beast-id="${b.id}">
         <div class="spell-card-header">
@@ -4127,9 +4231,9 @@ export async function renderSheet(id) {
         ${
           filtered.length
             ? `<div class="spell-cards">${filtered
-                .slice(0, 60)
+                .slice(0, formShown)
                 .map((b) => beastCardHtml(b, `<button class="small primary" data-action="add-form" data-beast="${b.id}">+ Добавить</button>`, { note: noteFor(b) }))
-                .join("")}</div>${filtered.length > 60 ? `<p class="muted">Показаны первые 60 — уточните поиск или фильтры.</p>` : ""}`
+                .join("")}</div>${filtered.length > formShown ? `<div class="row" style="justify-content:center;margin-top:12px;"><button class="primary" data-action="form-more">Показать ещё (${Math.min(30, filtered.length - formShown)} из ${filtered.length - formShown} оставшихся)</button></div>` : ""}`
             : '<p class="muted">Ничего не найдено — измените фильтры.</p>'
         }
       </div>`;
@@ -4610,15 +4714,27 @@ export async function renderSheet(id) {
     return "✦";
   }
 
+  function combatStatBox(key, label, value, auto, rollAction) {
+    const manual = manualOverride(data, key) !== null;
+    const notes = key === "speed"
+      ? [...speedBonusSources(data).map((b) => `+${b.amount} (${b.label})`), ...(exhaustionLevel(data) >= 2 ? [`Истощение ${exhaustionLevel(data)}: ${exhaustionLevel(data) >= 5 ? "скорость 0" : "скорость вдвое"}`] : [])]
+      : [];
+    const shown = key === "init" ? (value >= 0 ? "+" + value : String(value)) : String(value);
+    return `<div class="stat-box${manual ? " manual" : ""}" title="${escapeHtml(notes.join(", "))}">
+      <input class="value" type="text" inputmode="numeric" data-override="${key}" data-auto="${key === "init" ? formatModifier(auto) : auto}" value="${shown}" />
+      <div class="label">${label}${rollAction ? ` <button class="btn small ghost" data-action="${rollAction}" title="Бросить">🎲</button>` : ""}${manual ? ` <button class="btn small ghost" data-override-reset="${key}" title="Сбросить к расчётному (${key === "init" ? formatModifier(auto) : auto})">↺</button>` : ""}</div>
+    </div>`;
+  }
+
   function personalityTab() {
     const p = data.personality || {};
     // Fixed-height boxes that scroll inside themselves once the text outgrows
     // them (same behaviour as a feature card's description), instead of a
     // tiny 2-row box or a page that keeps stretching.
-    const field = (key, label, height = 130) => `
+    const field = (key, label, height = 72) => `
       <div class="col" style="margin-bottom:8px;">
         <label>${label}</label>
-        <textarea class="scroll-text" data-bind="personality.${key}" style="height:${height}px;">${escapeHtml(p[key] || "")}</textarea>
+        <textarea class="scroll-text" data-bind="personality.${key}" style="height:${height}px;min-height:56px;">${escapeHtml(p[key] || "")}</textarea>
       </div>`;
     return `
       <div class="panel">
@@ -4686,6 +4802,20 @@ export async function renderSheet(id) {
   // on the input, checked on blur/change (not every keystroke, so clearing
   // the field to type a fresh multi-digit value doesn't get snapped back
   // mid-edit the way an on-input clamp would).
+  on(app, "change", "[data-override]", (e, el) => {
+    const key = el.dataset.override;
+    const n = parseInt(String(el.value).replace(/[^\d+-]/g, ""), 10);
+    data.overrides = data.overrides || {};
+    if (!Number.isFinite(n) || String(n) === String(parseInt(String(el.dataset.auto).replace("+", ""), 10))) delete data.overrides[key];
+    else data.overrides[key] = Math.max(-99, Math.min(999, n));
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-override-reset]", (e, el) => {
+    if (data.overrides) delete data.overrides[el.dataset.overrideReset];
+    doSave();
+    render();
+  });
   on(app, "change", "[data-clamp]", (e, el) => {
     const [min, max] = el.dataset.clamp.split(":").map(Number);
     const fallback = Number.isFinite(min) ? min : 0;
@@ -5421,11 +5551,15 @@ export async function renderSheet(id) {
     if (!id) return;
     const preset = WEAPONS.find((w) => w.id === id);
     if (!preset) return;
-    data.weapons.push(
-      id === "custom"
-        ? { name: "Новое оружие", damage: "", type: "", properties: "", special: "", equipped: true, rangeType: "" }
-        : { name: preset.name, damage: preset.damage, type: preset.type, properties: preset.properties, special: "", equipped: true, rangeType: weaponRangeType(preset) }
-    );
+    const newWeapon = id === "custom"
+      ? { name: "Новое оружие", damage: "", type: "", properties: "", special: "", equipped: true, rangeType: "" }
+      : { name: preset.name, damage: preset.damage, type: preset.type, properties: preset.properties, special: "", equipped: true, rangeType: weaponRangeType(preset) };
+    data.weapons.push(newWeapon);
+    // A weapon from the catalogue goes into Атаки straight away.
+    if (id !== "custom") {
+      const typeNote = newWeapon.type ? ` ${newWeapon.type}` : "";
+      data.attacks.push({ name: newWeapon.name, bonus: "", damage: `${newWeapon.damage || ""}${typeNote}`.trim(), special: "", useSpecial: false, rangeType: newWeapon.rangeType || "", hand: autoAssignAttackHand(newWeapon.properties) });
+    }
     doSave();
     render();
   });
@@ -6023,15 +6157,15 @@ export async function renderSheet(id) {
   // Облики
   on(app, "click", "[data-action=toggle-form-browse]", () => { formBrowseOpen = !formBrowseOpen; render(); });
   on(app, "input", "[data-form-search]", (e, el) => {
-    formSearch = el.value;
+    formSearch = el.value; formShown = 30;
     const pos = el.selectionStart;
     render();
     const n = $("[data-form-search]", app);
     if (n) { n.focus(); n.setSelectionRange(pos, pos); }
   });
-  on(app, "change", "[data-form-cr-filter]", (e, el) => { formCrFilter = el.value; render(); });
-  on(app, "change", "[data-form-move-filter]", (e, el) => { formMoveFilter = el.value; render(); });
-  on(app, "change", "[data-form-only-allowed]", (e, el) => { formOnlyAllowed = el.checked; render(); });
+  on(app, "change", "[data-form-cr-filter]", (e, el) => { formCrFilter = el.value; formShown = 30; render(); });
+  on(app, "change", "[data-form-move-filter]", (e, el) => { formMoveFilter = el.value; formShown = 30; render(); });
+  on(app, "change", "[data-form-only-allowed]", (e, el) => { formOnlyAllowed = el.checked; formShown = 30; render(); });
   on(app, "click", "[data-action=add-form]", (e, el) => {
     const forms = ensureForms();
     const id = Number(el.dataset.beast);
@@ -6071,6 +6205,13 @@ export async function renderSheet(id) {
     forms.hp = clampInt(el.value, 0, beastMaxHp(b), 0);
     doSave();
     render();
+  });
+  on(app, "click", "[data-action=form-more]", () => { formShown += 30; render(); });
+  on(app, "click", "[data-beast-atk]", (e, el) => {
+    openD20RollModal({ label: `${el.dataset.beastName}: атака`, modifier: Number(el.dataset.beastAtk) || 0 });
+  });
+  on(app, "click", "[data-beast-dmg]", (e, el) => {
+    rollBeastDamage(el.dataset.beastName, el.dataset.beastDmg.split(";"), false);
   });
   on(app, "click", "[data-action=form-damage]", () => {
     const forms = ensureForms();
@@ -6377,5 +6518,6 @@ export async function renderSheet(id) {
     if (initEl) initEl.textContent = formatModifier(initiativeBonus(data));
   }
 
+  if (ensureBattleragerSpikes()) doSave();
   render();
 }

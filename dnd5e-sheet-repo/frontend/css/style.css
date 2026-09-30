@@ -256,9 +256,13 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
 /* КД / Инициатива / Скорость: -4pt off the shared .stat-box value size, with
    the box's own padding trimmed to match so it hugs the now-smaller text
    instead of leaving the original box mostly empty. */
-.combat-stats .stat-box { padding: 7px 6px; }
-.combat-stats .stat-box .value { font-size: 1.45rem; }
-.combat-stats .stat-box .label { font-size: 0.96rem; }
+.combat-stats .stat-box { padding: 3px 4px; }
+.combat-stats .stat-box .value { font-size: 1.2rem; line-height: 1.2; }
+.combat-stats .stat-box .label { font-size: 0.72rem; }
+.combat-stats input.value { width: 100%; text-align: center; background: transparent; border: none; padding: 0; color: var(--gold-bright); font-weight: 800; }
+.combat-stats input.value:focus { outline: 1px solid var(--gold); background: var(--bg-panel); }
+.combat-stats .stat-box.manual { border-color: var(--gold); }
+.combat-stats .stat-box .label .btn { padding: 0 4px; font-size: 0.7rem; line-height: 1.2; min-height: 0; }
 
 .hp-circles, .dot-track { display: flex; flex-wrap: wrap; gap: 6px; }
 .hp-circles .circle, .dot-track .circle {
@@ -439,11 +443,19 @@ textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; mi
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .spell-card:hover { border-color: var(--gold); }
-.beast-card { height: 620px; }
+.beast-card { height: 680px; }
 .beast-abil { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; text-align: center; font-size: 0.8rem; }
 .beast-abil > div { display: flex; flex-direction: column; gap: 1px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 0; }
 .beast-abil .prop-label { font-size: 0.7rem; }
 .beast-note { font-size: 0.8rem; }
+.beast-roll-row { display: flex; gap: 6px; flex-wrap: wrap; margin: -2px 0 6px; }
+.beast-roll-row button { padding: 2px 8px; font-size: 0.8rem; }
+.beast-card .spell-card-prop { font-size: 1.15rem; font-weight: 700; color: var(--text); }
+.beast-card .spell-card-prop .prop-label { font-size: 0.8rem; font-weight: 600; }
+.beast-card .beast-abil { font-size: 1rem; gap: 5px; }
+.beast-card .beast-abil strong { font-size: 1.3rem; color: var(--gold-bright); line-height: 1.1; }
+.beast-card .beast-abil .prop-label { font-size: 0.8rem; }
+.beast-card .beast-abil .muted { font-size: 1rem; }
 .beast-ok { color: var(--green); }
 .beast-no { color: var(--red); }
 .beast-section-title { margin: 8px 0 4px; color: var(--gold-bright); font-size: 0.95rem; border-bottom: 1px solid var(--border); }

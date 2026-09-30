@@ -2503,6 +2503,21 @@ export function renderWizard() {
       rangeType: weaponRangeType(w),
     }));
 
+    // ...and straight into Атаки too, with the same auto-assigned hand as the
+    // "→ Атаки" button on the sheet: two-handed -> both, otherwise right,
+    // then left, then "removed" when both hands are already full.
+    data.attacks = [];
+    const usedHands = [];
+    data.weapons.forEach((w) => {
+      const pr = String(w.properties || "").toLowerCase();
+      let hand;
+      if (/двуручное/.test(pr)) hand = "both";
+      else if (/универсальное/.test(pr)) hand = "right";
+      else hand = !usedHands.includes("right") && !usedHands.includes("both") ? "right" : !usedHands.includes("left") && !usedHands.includes("both") ? "left" : "removed";
+      if (hand !== "removed") usedHands.push(hand);
+      data.attacks.push({ name: w.name, bonus: "", damage: `${w.damage || ""}${w.type ? " " + w.type : ""}`.trim(), special: "", useSpecial: false, rangeType: w.rangeType || "", hand });
+    });
+
     // Starting ammo counts mentioned in the chosen equipment ("колчан из 20
     // стрел", "20 болтов"…) pre-fill the ammo tracker instead of starting at 0.
     data.ammo = { arrows: 0, bolts: 0, javelins: 0, darts: 0, ...detectAmmoInText(classEquipText) };

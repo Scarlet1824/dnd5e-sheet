@@ -241,7 +241,17 @@ function dualWielderACBonus(data) {
   const leftMelee = attacks.some((a) => a.hand === "left" && a.rangeType !== "ranged");
   return rightMelee && leftMelee ? 1 : 0;
 }
+// Manual overrides (data.overrides.{ac,init,speed}): when set, the player has
+// typed the final value into the box themselves, so it replaces the computed one.
+export function manualOverride(data, key) {
+  const v = data.overrides?.[key];
+  return v === undefined || v === null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+}
 export function armorClass(data) {
+  const o = manualOverride(data, "ac");
+  return o !== null ? o : armorClassAuto(data);
+}
+export function armorClassAuto(data) {
   const dexMod = getAbilityMod(data, "dex");
   // Backward compatibility for characters saved before the armor/shield model
   // (they carry the old acBase/acOverride fields instead of armorId).
@@ -282,6 +292,10 @@ export function armorClass(data) {
 }
 
 export function initiativeBonus(data) {
+  const o = manualOverride(data, "init");
+  return o !== null ? o : initiativeBonusAuto(data);
+}
+export function initiativeBonusAuto(data) {
   const alert = (data.feats || []).some((f) => f.id === "alert") ? 5 : 0;
   // Плут, Дуэлянт (Swashbuckler) «Лихая удаль»: "Вы добавляете свой
   // модификатор Харизмы к результату броска инициативы."
@@ -325,6 +339,10 @@ export function speedBeforeExhaustion(data) {
   return (Number(data.speed) || 0) + speedBonusSources(data).reduce((s, b) => s + b.amount, 0);
 }
 export function totalSpeed(data) {
+  const o = manualOverride(data, "speed");
+  return o !== null ? o : totalSpeedAuto(data);
+}
+export function totalSpeedAuto(data) {
   const base = speedBeforeExhaustion(data);
   const ex = exhaustionLevel(data);
   if (ex >= 5) return 0;
