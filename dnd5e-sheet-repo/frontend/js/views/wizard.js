@@ -318,7 +318,7 @@ export function renderWizard() {
           <p class="muted" style="font-size:0.8rem;">Источник: ${escapeHtml(race.source || "—")}</p>
           <div class="grid cols-2" style="margin-top:8px;">
             ${race.subraces.map((sr) => `
-              <div class="card selectable race-card ${state.subraceId === sr.id ? "selected" : ""}" data-subrace="${sr.id}">
+              <div class="card selectable ${state.subraceId === sr.id ? "selected" : ""}" data-subrace="${sr.id}">
                 <h4>${escapeHtml(sr.name)}</h4>
                 ${state.edition === "2014" && sr.abilityBonuses ? `<p>Бонусы: ${raceBonusSummary(sr)}</p>` : ""}
                 ${sr.speed ? `<p>Скорость: ${sr.speed} фт</p>` : ""}
@@ -339,15 +339,15 @@ export function renderWizard() {
         <div class="grid cols-2">
           ${visibleRaces().map(
             (r) => `
-            <div class="card selectable race-card ${state.raceId === r.id ? "selected" : ""}" data-race="${r.id}">
+            <div class="card selectable ${state.raceId === r.id ? "selected" : ""}" data-race="${r.id}">
               ${racePortraitBannerHtml(r.id)}
               <h4>${escapeHtml(r.name)}</h4>
-              <p class="muted">Источник: ${escapeHtml(r.source || "—")}</p>
+              <p class="muted" style="font-size:0.8rem;">Источник: ${escapeHtml(r.source || "—")}</p>
               <p>Скорость ${r.speed} фт · Размер: ${r.size}</p>
               ${state.edition === "2014" ? `<p>Бонусы: ${raceBonusSummary(r)}</p>` : ""}
               ${r.traits.map((t) => `<p><strong>${escapeHtml(t.name)}:</strong> ${escapeHtml(t.desc)}</p>`).join("")}
-              ${r.languages ? `<p class="muted">Языки: ${r.languages.map(escapeHtml).join(", ")}</p>` : ""}
-              ${r.subraces && r.subraces.length ? `<p class="muted">Есть разновидности — откроются после выбора.</p>` : ""}
+              ${r.languages ? `<p class="muted" style="font-size:0.85rem;">Языки: ${r.languages.map(escapeHtml).join(", ")}</p>` : ""}
+              ${r.subraces && r.subraces.length ? `<p class="muted" style="font-size:0.85rem;">Есть разновидности — откроются после выбора.</p>` : ""}
             </div>`
           ).join("")}
         </div>
