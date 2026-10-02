@@ -27,12 +27,12 @@ export function classLabel(id) {
 // `checkboxHtml` is the caller's own <input>/markup for the top-right
 // toggle (each caller wires its own selection logic and limits), and
 // `known` just controls the card's gold-highlight border.
-export function spellCardHtml(sp, checkboxHtml, { known = false } = {}) {
+export function spellCardHtml(sp, checkboxHtml, { known = false, domain = false } = {}) {
   const descParagraphs = Array.isArray(sp.desc) ? sp.desc : [sp.desc].filter(Boolean);
   const subtitle = `${sp.level === 0 ? "Заговор" : `${sp.level}-й круг`}, ${escapeHtml(sp.school || "")}` +
     (sp.ritual ? " (ритуал)" : "");
   return `
-    <div class="spell-card ${known ? "known" : ""}" data-spell-id="${sp.id}">
+    <div class="spell-card ${known ? "known" : ""} ${domain ? "domain-spell" : ""}" data-spell-id="${sp.id}">
       <div class="spell-card-header">
         <div class="spell-card-icon" title="${escapeHtml(sp.school || "")}">${schoolIcon(sp.school)}</div>
         <div class="spell-card-title-group">

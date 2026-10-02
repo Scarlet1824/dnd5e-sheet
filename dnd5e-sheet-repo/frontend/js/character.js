@@ -187,6 +187,12 @@ function unarmoredDefenseBonusAbility(data) {
     if (!/защита без брони/i.test(f.name || "")) continue;
     const m = /класс\s+доспеха\s+равен\s+10\s*\+\s*модификатор\s+Ловкости\s*\+\s*модификатор\s+(Силы|Ловкости|Телосложения|Интеллекта|Мудрости|Харизмы)/i.exec(f.desc || "");
     if (m) return UNARMORED_DEFENSE_ABILITY_WORDS[m[1].toLowerCase()];
+    // Card text missing/empty (older characters): fall back to the class's own formula.
+    if (/защита без брони/i.test(f.name || "")) {
+      const cls = (data.classes || []).map((c) => c.id);
+      if (cls.includes("monk") && !data.shieldEquipped) return "wis";
+      if (cls.includes("barbarian")) return "con";
+    }
   }
   return null;
 }

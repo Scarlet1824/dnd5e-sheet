@@ -744,12 +744,19 @@ export async function renderSheet(id) {
   // Resets usesState -> all-available for every feature whose parsed/forced
   // recharge matches one of the given recharge kinds ("short"/"long"/"any").
   // Infinite-use features (Rage at 20) have nothing to reset.
+  function restoreArtifactUses(rechargeKinds) {
+    (data.artifacts || []).forEach((a) => {
+      const u = a.uses;
+      if (u && u.enabled && rechargeKinds.includes(u.recharge === "dawn" ? "long" : u.recharge || "long")) a.usesState = Array(Math.max(1, Number(u.max) || 1)).fill(true);
+    });
+  }
   function restoreFeatureUses(rechargeKinds) {
+    restoreArtifactUses(rechargeKinds);
     (data.features || []).forEach((f) => {
       const uses = resolveFeatureUses(f);
       if (!uses || uses.max <= 0 || uses.max === Infinity) return;
       if (!uses.recharge || !rechargeKinds.includes(uses.recharge)) return;
-      f.usesState = Array(uses.max).fill(true);
+      setFeatureUsesState(f, Array(uses.max).fill(true));
     });
   }
   // Refills every spell-slot circle at every level that currently has slots.
@@ -1179,6 +1186,12 @@ export async function renderSheet(id) {
   // their own level-up support yet either).
   const KNOWN_CANTRIPS_BY_LEVEL = {
     bard: { 1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4, 19: 4, 20: 4 },
+    cleric: { 1: 3, 2: 3, 3: 3, 4: 4, 5: 4, 6: 4, 7: 4, 8: 4, 9: 4, 10: 5, 11: 5, 12: 5, 13: 5, 14: 5, 15: 5, 16: 5, 17: 5, 18: 5, 19: 5, 20: 5 },
+    druid: { 1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4, 19: 4, 20: 4 },
+    wizard: { 1: 3, 2: 3, 3: 3, 4: 4, 5: 4, 6: 4, 7: 4, 8: 4, 9: 4, 10: 5, 11: 5, 12: 5, 13: 5, 14: 5, 15: 5, 16: 5, 17: 5, 18: 5, 19: 5, 20: 5 },
+    sorcerer: { 1: 4, 2: 4, 3: 4, 4: 5, 5: 5, 6: 5, 7: 5, 8: 5, 9: 5, 10: 6, 11: 6, 12: 6, 13: 6, 14: 6, 15: 6, 16: 6, 17: 6, 18: 6, 19: 6, 20: 6 },
+    warlock: { 1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3, 9: 3, 10: 4, 11: 4, 12: 4, 13: 4, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4, 19: 4, 20: 4 },
+    artificer: { 1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 2, 10: 3, 11: 3, 12: 3, 13: 3, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4, 19: 4, 20: 4 },
   };
   // Следопыт is a half-caster with its own (slower) max-circle progression --
   // distinct from maxSpellCircleForLevel()'s full-caster formula used above
@@ -1963,6 +1976,7 @@ export async function renderSheet(id) {
                     : `<p class="muted">На этом уровне класс не получает новых умений.</p>`
                   : `<p class="muted">Нет данных об умениях класса «${escapeHtml(cls.name)}» на ${newLevel} уровне в базе — добавьте их вручную на вкладке «Умения» после повышения.</p>`
         }
+        ${cls.scalingNotes && cls.scalingNotes[newLevel] && (allFeatures.length || levelUpState.asi || levelUpState.subclassChoice) ? `<p class="muted" style="margin-top:8px;">Растут уже имеющиеся: ${escapeHtml(cls.scalingNotes[newLevel])}</p>` : ""}
       </div>
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
@@ -3546,8 +3560,32 @@ export async function renderSheet(id) {
   // an array of booleans on the feature itself (data.features[i].usesState),
   // resized on the fly to whatever the formula currently computes to (an
   // ability-mod-based max can change as the sheet's abilities change).
+  // «Божественный канал»: every card of a class (the class's own plus each
+  // domain/oath option) shares ONE pool of charges, kept on
+  // data.channelUses[class] instead of on each card.
+  function channelPoolKey(f) {
+    if (!/^(Божественный канал|Направление божества)/i.test(f.name || "")) return null;
+    const src = f.source || "";
+    if (/^Жрец/i.test(src)) return "cleric";
+    if (/^Паладин/i.test(src)) return "paladin";
+    return null;
+  }
+  function channelPoolMax(key) {
+    const e = (data.classes || []).find((c) => c.id === key);
+    const lvl = e && e.level ? Number(e.level) : 0;
+    if (key === "cleric") return lvl >= 18 ? 3 : lvl >= 6 ? 2 : lvl >= 2 ? 1 : 0;
+    if (key === "paladin") return lvl >= 3 ? 1 : 0;
+    return 0;
+  }
+  function setFeatureUsesState(f, arr) {
+    const key = channelPoolKey(f);
+    if (key) { data.channelUses = data.channelUses || {}; data.channelUses[key] = arr; }
+    else f.usesState = arr;
+  }
   function usesArrayFor(f, max) {
-    const arr = Array.isArray(f.usesState) ? f.usesState.slice(0, max) : [];
+    const key = channelPoolKey(f);
+    const src = key ? (data.channelUses || {})[key] : f.usesState;
+    const arr = Array.isArray(src) ? src.slice(0, max) : [];
     while (arr.length < max) arr.push(true);
     return arr;
   }
@@ -3721,6 +3759,8 @@ export async function renderSheet(id) {
     return true;
   }
   function resolveFeatureUses(f) {
+    const chKey = channelPoolKey(f);
+    if (chKey) return { max: channelPoolMax(chKey), recharge: "any" };
     if (BARD_INSPIRATION_FEATURE_NAME.test(f.name || "")) return { max: maxBardInspirationUses(), recharge: "long" };
     if (RAGE_FEATURE_NAME.test(f.name || "")) return { max: maxRageUses(data), recharge: "long" };
     if (ACTION_SURGE_FEATURE_NAME.test(f.name || "")) return { max: maxActionSurgeUses(data), recharge: "short" };
@@ -3970,7 +4010,7 @@ export async function renderSheet(id) {
           </div>
           <div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0 4px;">
             <button class="small ${spellPrepMode ? "" : "primary"}" data-action="toggle-spell-prep-mode">${spellPrepMode ? "✕ Скрыть неподготовленные" : "Подготовить заклинания"}</button>
-            ${isSpellbook ? `<button class="small primary" data-action="toggle-spell-browse">${spellBrowseOpen ? "✕ Закрыть подбор" : "+ Добавить в книгу заклинаний"}</button>` : ""}
+            ${isSpellbook ? `<button class="small primary" data-action="toggle-spell-browse">${spellBrowseOpen ? "✕ Закрыть подбор" : "+ Добавить в книгу заклинаний"}</button>` : `<button class="small primary" data-action="toggle-spell-browse">${spellBrowseOpen ? "✕ Закрыть подбор" : "+ Добавить заговор"}</button>`}
           </div>
           ${
             shown.length
@@ -3980,7 +4020,7 @@ export async function renderSheet(id) {
                 : '<p class="muted">Пока нет заговоров — выберите их при создании персонажа, затем подготовьте заклинания круга кнопкой выше.</p>'
           }
         </div>
-        ${isSpellbook && spellBrowseOpen ? spellBrowsePanelHtml(browseKnownIds, classIds) : ""}`;
+        ${spellBrowseOpen ? spellBrowsePanelHtml(browseKnownIds, classIds, !isSpellbook) : ""}`;
     } else {
       const oathIds = oathSpellIdSet();
       const knownIds = new Set([...(sc.cantrips || []), ...(sc.known || []), ...(sc.prepared || [])]);
@@ -4122,7 +4162,7 @@ export async function renderSheet(id) {
           </div>
           <div class="spell-level-divider"></div>
           <div class="spell-cards">${spells
-            .map((sp) => spellCardHtml(sp, spellCardControlHtml(sp, prepCtx), { known: true }))
+            .map((sp) => spellCardHtml(sp, spellCardControlHtml(sp, prepCtx), { known: true, domain: !!(prepCtx && prepCtx.domainIds && prepCtx.domainIds.has(sp.id)) || oathSpellIdSet().has(sp.id) }))
             .join("")}</div>
         </div>`;
       })
@@ -4255,22 +4295,23 @@ export async function renderSheet(id) {
     });
     return [...ids].filter((id) => SPELLS.some((sp) => sp.id === id));
   }
-  function spellBrowsePanelHtml(knownIds, classIds) {
+  function spellBrowsePanelHtml(knownIds, classIds, cantripsOnly) {
     const q = spellSearch.trim().toLowerCase();
     const expandedIds = characterExpandedSpellIds();
     const pool = SPELLS.filter((sp) => !knownIds.has(sp.id) && (expandedIds.has(sp.id) || !classIds.length || sp.classes.some((id) => classIds.includes(id))));
     const filtered = pool.filter((sp) => {
+      if (cantripsOnly && sp.level !== 0) return false;
       if (spellLevelFilter !== "all" && String(sp.level) !== spellLevelFilter) return false;
       if (q && !sp.name.toLowerCase().includes(q)) return false;
       return true;
     });
     return `
       <div class="panel">
-        <h3>Выбор заклинания</h3>
+        <h3>${cantripsOnly ? "Выбор заговора" : "Выбор заклинания"}</h3>
         <p class="muted">${classIds.length ? "Показаны заклинания, доступные классу персонажа." : "Класс персонажа не задан — показаны все заклинания."}</p>
         <div class="row spell-filters" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;">
           <input type="text" data-spell-search placeholder="Поиск по названию…" value="${escapeHtml(spellSearch)}" style="flex:1;min-width:160px;" />
-          <select data-spell-level-filter style="flex:none;width:auto;">
+          <select data-spell-level-filter style="flex:none;width:auto;${cantripsOnly ? "display:none;" : ""}">
             <option value="all" ${spellLevelFilter === "all" ? "selected" : ""}>Все уровни</option>
             <option value="0" ${spellLevelFilter === "0" ? "selected" : ""}>Заговоры</option>
             ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((lvl) => `<option value="${lvl}" ${spellLevelFilter === String(lvl) ? "selected" : ""}>${lvl}-й круг</option>`).join("")}
@@ -4604,6 +4645,95 @@ export async function renderSheet(id) {
       </div>`;
   }
 
+  // ---- Артефакты (магические предметы) ---------------------------------
+  // data.artifacts: [{ name, desc, open, damage, damageType, damageOn,
+  //   uses: {enabled, max, recharge}, usesState: [bool], spells: [{ id, max, usesState }] }]
+  const ARTIFACT_RECHARGE = { none: "без восстановления", short: "короткий отдых", long: "продолжительный отдых", dawn: "на рассвете", any: "любой отдых" };
+  function artifactPipsHtml(arr, action, idx, sub) {
+    return arr
+      .map((filled, j) => `<button type="button" class="pip ${filled ? "filled" : ""}" data-action="${action}" data-index="${idx}" ${sub !== undefined ? `data-spell-index="${sub}"` : ""} data-use-index="${j}" title="${filled ? "Отметить как потраченное" : "Восстановить использование"}"></button>`)
+      .join("");
+  }
+  function artifactUsesArray(state, max) {
+    const arr = Array.isArray(state) ? state.slice(0, max) : [];
+    while (arr.length < max) arr.push(true);
+    return arr;
+  }
+  function artifactCardHtml(a, i) {
+    const u = a.uses || {};
+    const usesMax = Math.max(1, Number(u.max) || 1);
+    const spells = (a.spells || []).map((sl, si) => {
+      const sp = SPELLS.find((x) => x.id === sl.id);
+      if (!sp) return "";
+      const max = Number(sl.max) || 0;
+      return `
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+          <button type="button" class="small" data-action="open-artifact-spell" data-spell="${sp.id}" title="Открыть карточку заклинания">✨ ${escapeHtml(sp.name)}</button>
+          <span class="muted" style="font-size:0.8rem;">${sp.level === 0 ? "заговор" : sp.level + "-й круг"}</span>
+          <label class="muted" style="font-size:0.8rem;">исп.:
+            <input type="number" min="0" max="20" style="width:52px;" data-artifact-spell-max data-index="${i}" data-spell-index="${si}" value="${max}" title="0 — без счётчика" />
+          </label>
+          ${max > 0 ? `<span class="feature-card-uses" style="padding:0;">${artifactPipsHtml(artifactUsesArray(sl.usesState, max), "toggle-artifact-spell-use", i, si)}</span>` : ""}
+          <button type="button" class="small danger" data-action="remove-artifact-spell" data-index="${i}" data-spell-index="${si}" title="Убрать заклинание">✕</button>
+        </div>`;
+    }).join("");
+    const dmgDice = parseDiceFromText(a.damage);
+    return `
+      <div class="feature-card artifact-card" style="height:auto;">
+        <button class="feature-card-remove" data-action="remove-artifact" data-index="${i}" title="Удалить">✕</button>
+        <div class="row" style="gap:8px;align-items:center;padding-right:28px;">
+          <button type="button" class="small" data-action="toggle-artifact-open" data-index="${i}" title="${a.open ? "Свернуть" : "Развернуть"}">${a.open ? "▾" : "▸"}</button>
+          <input type="text" class="feature-card-title" style="flex:1;min-width:0;" data-artifact-field="name" data-index="${i}" value="${escapeHtml(a.name || "")}" placeholder="Название артефакта" />
+          ${a.damageOn && dmgDice ? `<span class="badge" title="Урон включён">⚡ ${escapeHtml(dmgDice.raw)}</span>` : ""}
+        </div>
+        ${
+          a.open
+            ? `
+        <label class="feature-card-desc" style="margin-top:8px;">
+          <textarea data-artifact-field="desc" data-index="${i}" rows="3" placeholder="Описание, свойства, настройка…">${escapeHtml(a.desc || "")}</textarea>
+        </label>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <span class="muted">Урон:</span>
+          <input type="text" style="width:90px;" data-artifact-field="damage" data-index="${i}" value="${escapeHtml(a.damage || "")}" placeholder="напр. 1к6" />
+          <input type="text" style="width:130px;" data-artifact-field="damageType" data-index="${i}" value="${escapeHtml(a.damageType || "")}" placeholder="вид (огонь…)" />
+          <button type="button" class="small ${a.damageOn ? "primary" : ""}" data-action="toggle-artifact-damage" data-index="${i}" title="Включённый урон добавляется в окно урона оружия">${a.damageOn ? "⚡ Урон включён" : "Включить урон"}</button>
+          <button type="button" class="small feature-card-roll" data-action="roll-artifact-damage" data-index="${i}">🎲 Бросить</button>
+        </div>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-artifact-uses-enabled data-index="${i}" ${u.enabled ? "checked" : ""} /> Использования</label>
+          ${
+            u.enabled
+              ? `<input type="number" min="1" max="30" style="width:60px;" data-artifact-uses-max data-index="${i}" value="${usesMax}" />
+          <select data-artifact-recharge data-index="${i}" style="width:auto;">
+            ${Object.entries(ARTIFACT_RECHARGE).map(([k, l]) => `<option value="${k}" ${(u.recharge || "long") === k ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+          <span class="feature-card-uses" style="padding:0;">${artifactPipsHtml(artifactUsesArray(a.usesState, usesMax), "toggle-artifact-use", i)}</span>`
+              : ""
+          }
+        </div>
+        <div style="margin-top:10px;">
+          <span class="muted">Заклинания предмета:</span>
+          ${spells || '<p class="muted" style="margin:4px 0;">Нет заклинаний.</p>'}
+          <div class="row" style="gap:8px;margin-top:6px;">
+            <select data-artifact-spell-select data-index="${i}" style="flex:1;min-width:160px;">
+              <option value="">Добавить заклинание…</option>
+              ${[...SPELLS].sort((x, y) => x.name.localeCompare(y.name, "ru")).map((sp) => `<option value="${sp.id}">${escapeHtml(sp.name)} (${sp.level === 0 ? "заг." : sp.level + " кр."})</option>`).join("")}
+            </select>
+            <button type="button" class="small primary" data-action="add-artifact-spell" data-index="${i}">+ Добавить</button>
+          </div>
+        </div>`
+            : ""
+        }
+      </div>`;
+  }
+  function artifactsPanelHtml() {
+    const list = data.artifacts || [];
+    return `
+      <div class="panel">
+        <div class="row between"><h2 style="margin:0;">Артефакты</h2><button class="small primary" data-action="add-artifact">+ Добавить артефакт</button></div>
+        ${list.length ? `<div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;">${list.map(artifactCardHtml).join("")}</div>` : '<p class="muted">Магические предметы и артефакты: карточка с описанием, уроном, использованиями и заклинаниями.</p>'}
+      </div>`;
+  }
   function inventoryTab() {
     const weapons = data.weapons || [];
     // Wrapped in .inventory-panels so its four panels (Деньги/Оружие/
@@ -4674,6 +4804,7 @@ export async function renderSheet(id) {
         </table>`
         }
       </div>
+      ${artifactsPanelHtml()}
       ${ammoPanel()}
       <div class="panel">
         <h2>Прочее снаряжение</h2>
@@ -5795,6 +5926,12 @@ export async function renderSheet(id) {
     if (has(/^Угроза из засады$/)) list.push({ id: "ambush", label: "Угроза из засады", note: "дополнительная атака в первый ход боя", sides: 8, count: 1 });
     if (has(/^Добыча убийцы$/)) list.push({ id: "slayer-prey", label: "Добыча убийцы", note: "первое попадание за ход по выбранной цели", sides: 6, count: 1 });
     if (has(/^Ужасающие удары$/)) list.push({ id: "dread-strikes", label: "Ужасающие удары", note: "психическая энергия, раз в ход", sides: rangerLvl >= 11 ? 6 : 4, count: 1 });
+    (data.artifacts || []).forEach((art, ai) => {
+      const d = art.damageOn && parseDiceFromText(art.damage);
+      if (!d) return;
+      const m = /^(\d+)d(\d+)/.exec(d.expr);
+      if (m) list.push({ id: `artifact-${ai}`, label: art.name || "Артефакт", note: art.damageType || "урон артефакта", sides: Number(m[2]), count: Number(m[1]), auto: true });
+    });
     if (has(/^Улучшенная божественная кара$/)) list.push({ id: "improved-smite", label: "Улучшенная божественная кара", note: "излучение, любая рукопашная атака оружием", sides: 8, count: 1, meleeOnly: true, auto: true });
     return list;
   }
@@ -6267,7 +6404,7 @@ export async function renderSheet(id) {
     if (!uses) return;
     const arr = usesArrayFor(f, uses.max);
     arr[j] = !arr[j];
-    f.usesState = arr;
+    setFeatureUsesState(f, arr);
     doSave();
     render();
   });
@@ -6372,6 +6509,53 @@ export async function renderSheet(id) {
     entry.luckyUsed = used;
     doSave();
     render();
+  });
+  // Артефакты
+  const artifactAt = (el) => (data.artifacts || [])[Number(el.dataset.index)];
+  on(app, "click", "[data-action=add-artifact]", () => {
+    (data.artifacts = data.artifacts || []).push({ name: "Новый артефакт", desc: "", open: true, damage: "", damageType: "", damageOn: false, uses: { enabled: false, max: 1, recharge: "long" }, usesState: [], spells: [] });
+    doSave(); render();
+  });
+  on(app, "click", "[data-action=remove-artifact]", (e, el) => {
+    if (!confirm("Удалить артефакт?")) return;
+    data.artifacts.splice(Number(el.dataset.index), 1); doSave(); render();
+  });
+  on(app, "click", "[data-action=toggle-artifact-open]", (e, el) => { const a = artifactAt(el); if (a) { a.open = !a.open; doSave(); render(); } });
+  on(app, "input", "[data-artifact-field]", (e, el) => { const a = artifactAt(el); if (a) { a[el.dataset.artifactField] = el.value; doSave(); } });
+  on(app, "click", "[data-action=toggle-artifact-damage]", (e, el) => { const a = artifactAt(el); if (!a) return; if (!parseDiceFromText(a.damage)) { alert("Сначала впишите урон (например 1к6)."); return; } a.damageOn = !a.damageOn; doSave(); render(); });
+  on(app, "click", "[data-action=roll-artifact-damage]", (e, el) => {
+    const a = artifactAt(el); const d = a && parseDiceFromText(a.damage); if (!d) return;
+    const r = rollExpr(d.expr);
+    showRollResult({ label: `${a.name || "Артефакт"} — урон${a.damageType ? " (" + a.damageType + ")" : ""}`, detail: `${toCyrillicDice(d.expr)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`, total: r.total });
+  });
+  on(app, "change", "[data-artifact-uses-enabled]", (e, el) => { const a = artifactAt(el); if (a) { a.uses = a.uses || { max: 1, recharge: "long" }; a.uses.enabled = el.checked; doSave(); render(); } });
+  on(app, "change", "[data-artifact-uses-max]", (e, el) => { const a = artifactAt(el); if (a) { a.uses.max = Math.max(1, Math.min(30, Number(el.value) || 1)); a.usesState = Array(a.uses.max).fill(true); doSave(); render(); } });
+  on(app, "change", "[data-artifact-recharge]", (e, el) => { const a = artifactAt(el); if (a) { a.uses.recharge = el.value; doSave(); } });
+  on(app, "click", "[data-action=toggle-artifact-use]", (e, el) => {
+    const a = artifactAt(el); if (!a) return;
+    const arr = artifactUsesArray(a.usesState, Math.max(1, Number(a.uses.max) || 1)); const j = Number(el.dataset.useIndex);
+    arr[j] = !arr[j]; a.usesState = arr; doSave(); render();
+  });
+  on(app, "click", "[data-action=add-artifact-spell]", (e, el) => {
+    const a = artifactAt(el); const sel = app.querySelector(`[data-artifact-spell-select][data-index="${el.dataset.index}"]`);
+    if (!a || !sel || !sel.value) return;
+    a.spells = a.spells || [];
+    if (!a.spells.some((x) => x.id === sel.value)) a.spells.push({ id: sel.value, max: 0, usesState: [] });
+    doSave(); render();
+  });
+  on(app, "click", "[data-action=remove-artifact-spell]", (e, el) => { const a = artifactAt(el); if (a) { a.spells.splice(Number(el.dataset.spellIndex), 1); doSave(); render(); } });
+  on(app, "click", "[data-action=open-artifact-spell]", (e, el) => {
+    const sp = SPELLS.find((x) => x.id === el.dataset.spell);
+    if (sp) openModal(spellCardHtml(sp, "", { known: true }));
+  });
+  on(app, "change", "[data-artifact-spell-max]", (e, el) => {
+    const a = artifactAt(el); const sl = a && a.spells[Number(el.dataset.spellIndex)]; if (!sl) return;
+    sl.max = Math.max(0, Math.min(20, Number(el.value) || 0)); sl.usesState = Array(sl.max).fill(true); doSave(); render();
+  });
+  on(app, "click", "[data-action=toggle-artifact-spell-use]", (e, el) => {
+    const a = artifactAt(el); const sl = a && a.spells[Number(el.dataset.spellIndex)]; if (!sl) return;
+    const arr = artifactUsesArray(sl.usesState, Number(sl.max) || 0); const j = Number(el.dataset.useIndex);
+    arr[j] = !arr[j]; sl.usesState = arr; doSave(); render();
   });
   on(app, "click", "[data-action=roll-wild-surge]", () => {
     const controlled = (data.features || []).some((f) => /^Контролируемый всплеск$/i.test(f.name || ""));

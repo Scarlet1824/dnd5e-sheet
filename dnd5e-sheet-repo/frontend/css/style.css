@@ -754,3 +754,6 @@ textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; mi
 .wizard-steps button.step:disabled { opacity: 0.5; cursor: default; }
 .wizard-steps button.step.active { background: linear-gradient(180deg, var(--gold-bright), var(--gold)); color: #1a1206; border-color: var(--gold); font-weight: bold; }
 .wizard-steps button.step.done { color: var(--green); border-color: var(--green); }
+
+/* Round 59: domain / oath spells -- thin glowing blue frame */
+.spell-card.domain-spell { border-color: #5ab4ff; box-shadow: 0 0 0 1px #5ab4ff, 0 0 10px 1px rgba(90, 180, 255, 0.55); }
