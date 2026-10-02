@@ -11,7 +11,7 @@ import {
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
-import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
+import { featAlreadyTaken, FEAT_TAKEN_MESSAGE, proficiencyCovered, dedupeProficiencyCategories, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
 
 // showRollResult() (diceModal.js) fires this on `document` after every roll
 // anywhere in the app, so the inline roll-log on the sheet's main tab can
@@ -64,7 +64,7 @@ function addProficiencyValue(list, value) {
   for (let i = list.length - 1; i >= 0; i--) {
     if (PROFICIENCY_PLACEHOLDER_RE.test((list[i] || "").trim())) list.splice(i, 1);
   }
-  if (!list.includes(value)) list.push(value);
+  if (!proficiencyCovered(list, value)) list.push(value);
 }
 
 // Clamps a numeric field's raw <input> string to an integer in [min, max],
@@ -318,20 +318,52 @@ export async function renderSheet(id) {
       const namedWeapons = TRAIT_NAMED_WEAPON_GRANTS[f.name];
       if (namedWeapons) {
         namedWeapons.forEach((w) => {
-          if (!data.proficiencies.weapons.includes(w)) changed = true;
+          if (!proficiencyCovered(data.proficiencies.weapons, w)) changed = true;
           addProficiencyValue(data.proficiencies.weapons, w);
         });
         return;
       }
       const grants = parseProficiencyGrantsFromText(f.desc);
       grants.weapons.forEach((w) => {
-        if (!data.proficiencies.weapons.includes(w)) changed = true;
+        if (!proficiencyCovered(data.proficiencies.weapons, w)) changed = true;
         addProficiencyValue(data.proficiencies.weapons, w);
       });
       grants.armor.forEach((a) => {
-        if (!data.proficiencies.armor.includes(a)) changed = true;
+        if (!proficiencyCovered(data.proficiencies.armor, a)) changed = true;
         addProficiencyValue(data.proficiencies.armor, a);
       });
+    });
+    // уже добавленные дубли («Лёгкая броня» рядом с «Лёгкая, средняя броня, щиты»)
+    if (dedupeProficiencyCategories(data.proficiencies.armor)) changed = true;
+    if (dedupeProficiencyCategories(data.proficiencies.weapons)) changed = true;
+    if (changed) doSave();
+  })();
+
+  // Пси-воин: у уже созданных персонажей «Псионическая сила» разбивается на отдельные карточки способностей.
+  (function migratePsiWarriorPowers() {
+    const fighter = CLASSES.find((c) => c.id === "fighter");
+    const sub = fighter && (fighter.subclasses || []).find((x) => x.slug === "psi-warrior");
+    if (!sub) return;
+    const source = `${fighter.name} — ${sub.name}`;
+    const idx = (data.features || []).findIndex((f) => f.name === "Псионическая сила" && /Пси-воин/i.test(f.source || "") && /Защитное поле\./.test(f.desc || ""));
+    if (idx < 0) return;
+    const sf = (sub.features || []).find((x) => x.name === "Псионическая сила");
+    const split = sf && splitPsionicPowerCards(sf.desc || []);
+    if (!split) return;
+    data.features[idx].desc = split.intro;
+    const at = idx + 1;
+    split.powers.forEach((pw, k) => {
+      if (!data.features.some((f) => f.name === pw.name && f.source === data.features[idx].source)) data.features.splice(at + k, 0, { name: pw.name, source: data.features[idx].source, desc: pw.desc });
+    });
+    doSave();
+  })();
+
+  // Жрец: «Направление божества» везде называется «Божественный канал» (названия и тексты карточек).
+  (function migrateChannelDivinityName() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (/Направление божества/.test(f.name || "")) { f.name = f.name.replace(/Направление божества/g, "Божественный канал"); changed = true; }
+      if (/Направление божества/.test(f.desc || "")) { f.desc = f.desc.replace(/Направление божества/g, "Божественный канал"); changed = true; }
     });
     if (changed) doSave();
   })();
@@ -1202,33 +1234,53 @@ export async function renderSheet(id) {
     if (list === "ranger") return RANGER_MAX_CIRCLE_BY_LEVEL[level] || 0;
     return maxSpellCircleForLevel(level);
   }
-  function knownSpellGrowthCount(cls, newLevel) {
+  // «Треть-заклинатели»: Воин — Мистический рыцарь и Плут — Мистический ловкач. Заклинания из списка волшебника,
+  // свои таблицы известных заклинаний/заговоров/ячеек (PHB). Выбор на 3 уровне — отдельная панель выбора архетипа.
+  const THIRD_KNOWN_SPELLS = { 3: 3, 4: 4, 5: 4, 6: 4, 7: 5, 8: 6, 9: 6, 10: 7, 11: 8, 12: 8, 13: 9, 14: 10, 15: 10, 16: 11, 17: 11, 18: 11, 19: 12, 20: 13 };
+  const THIRD_MAX_CIRCLE = (lvl) => (lvl >= 19 ? 4 : lvl >= 13 ? 3 : lvl >= 7 ? 2 : lvl >= 3 ? 1 : 0);
+  const THIRD_SLOTS = { 3: [2], 4: [3], 5: [3], 6: [3], 7: [4, 2], 8: [4, 2], 9: [4, 2], 10: [4, 3], 11: [4, 3], 12: [4, 3], 13: [4, 3, 2], 14: [4, 3, 2], 15: [4, 3, 2], 16: [4, 3, 3], 17: [4, 3, 3], 18: [4, 3, 3], 19: [4, 3, 3, 1], 20: [4, 3, 3, 1] };
+  function thirdCasterOf(c) {
+    if (!c || !c.subclass) return null;
+    const sub = String(c.subclass).toLowerCase();
+    if (c.id === "fighter" && sub.includes("мистический рыцарь")) return { list: "wizard" };
+    if (c.id === "rogue" && sub.includes("мистический ловкач")) return { list: "wizard" };
+    return null;
+  }
+  function spellListFor(cls, c) {
+    const t = thirdCasterOf(c);
+    return t ? t.list : cls.spellcasting && cls.spellcasting.list;
+  }
+  function knownSpellGrowthCount(cls, newLevel, c) {
+    if (thirdCasterOf(c)) return newLevel >= 4 ? Math.max(0, (THIRD_KNOWN_SPELLS[newLevel] || 0) - (THIRD_KNOWN_SPELLS[newLevel - 1] || 0)) : 0;
     const table = cls && cls.spellcasting && KNOWN_SPELLS_BY_LEVEL[cls.spellcasting.list];
     if (!table) return 0;
     return Math.max(0, (table[newLevel] || 0) - (table[newLevel - 1] || 0));
   }
-  function knownCantripGrowthCount(cls, newLevel) {
+  function knownCantripGrowthCount(cls, newLevel, c) {
+    if (thirdCasterOf(c)) return newLevel === 10 ? 1 : 0;
     const table = cls && cls.spellcasting && KNOWN_CANTRIPS_BY_LEVEL[cls.spellcasting.list];
     if (!table) return 0;
     return Math.max(0, (table[newLevel] || 0) - (table[newLevel - 1] || 0));
   }
+  function currentLevelUpEntry() { return levelUpEligibleClasses()[levelUpState.classIndex]; }
   function freshKnownSpellChoiceState() {
     return { spellIds: [] };
   }
   function freshKnownCantripChoiceState() {
     return { cantripIds: [] };
   }
-  function knownSpellChoicePanelHtml(cls, newLevel) {
+  function knownSpellChoicePanelHtml(cls, newLevel, c) {
     const sc = levelUpState.knownSpellChoice;
-    const need = knownSpellGrowthCount(cls, newLevel);
-    const maxCircle = maxKnownSpellCircleForLevel(cls.spellcasting.list, newLevel);
+    const need = knownSpellGrowthCount(cls, newLevel, c);
+    const spellList = spellListFor(cls, c);
+    const maxCircle = thirdCasterOf(c) ? THIRD_MAX_CIRCLE(newLevel) : maxKnownSpellCircleForLevel(spellList, newLevel);
     const alreadyKnown = new Set([
       ...((data.spellcasting && data.spellcasting.cantrips) || []),
       ...((data.spellcasting && data.spellcasting.known) || []),
       ...((data.spellcasting && data.spellcasting.prepared) || []),
     ]);
     const options = SPELLS.filter(
-      (s) => s.level >= 1 && s.level <= maxCircle && s.classes.includes(cls.spellcasting.list) && !alreadyKnown.has(s.id)
+      (s) => s.level >= 1 && s.level <= maxCircle && s.classes.includes(spellList) && !alreadyKnown.has(s.id)
     ).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
     return `
       <div class="panel" style="margin:10px 0;">
@@ -1248,15 +1300,15 @@ export async function renderSheet(id) {
         </div>
       </div>`;
   }
-  function knownSpellChoiceIncomplete(cls, newLevel) {
+  function knownSpellChoiceIncomplete(cls, newLevel, c) {
     const sc = levelUpState.knownSpellChoice;
-    return !!(sc && sc.spellIds.length < knownSpellGrowthCount(cls, newLevel));
+    return !!(sc && sc.spellIds.length < knownSpellGrowthCount(cls, newLevel, c));
   }
-  function knownCantripChoicePanelHtml(cls, newLevel) {
+  function knownCantripChoicePanelHtml(cls, newLevel, c) {
     const sc = levelUpState.knownCantripChoice;
-    const need = knownCantripGrowthCount(cls, newLevel);
+    const need = knownCantripGrowthCount(cls, newLevel, c);
     const alreadyKnown = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
-    const options = SPELLS.filter((s) => s.level === 0 && s.classes.includes(cls.spellcasting.list) && !alreadyKnown.has(s.id))
+    const options = SPELLS.filter((s) => s.level === 0 && s.classes.includes(spellListFor(cls, c)) && !alreadyKnown.has(s.id))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
     return `
       <div class="panel" style="margin:10px 0;">
@@ -1275,9 +1327,9 @@ export async function renderSheet(id) {
         </div>
       </div>`;
   }
-  function knownCantripChoiceIncomplete(cls, newLevel) {
+  function knownCantripChoiceIncomplete(cls, newLevel, c) {
     const sc = levelUpState.knownCantripChoice;
-    return !!(sc && sc.cantripIds.length < knownCantripGrowthCount(cls, newLevel));
+    return !!(sc && sc.cantripIds.length < knownCantripGrowthCount(cls, newLevel, c));
   }
   // Standard 5e spell-slot-by-caster-level table (PHB "Multiclass
   // Spellcaster" table -- identical in shape to each individual full
@@ -1305,24 +1357,64 @@ export async function renderSheet(id) {
     let level = 0;
     (data.classes || []).forEach((c) => {
       const cls = getClass(c.id);
-      if (!cls || !cls.spellcasting || cls.spellcasting.pact) return;
       const lvl = c.level || 1;
+      if (thirdCasterOf(c)) { level += Math.floor(lvl / 3); return; }
+      if (!cls || !cls.spellcasting || cls.spellcasting.pact) return;
       level += cls.spellcasting.startsAtLevel === 2 ? Math.floor(lvl / 2) : lvl;
     });
     return level;
   }
+  // Таблица ячеек (по кругам 1..9) для набора классов: один треть-заклинатель — своя таблица, иначе общая таблица мультикласса.
+  function spellSlotsTableFor(classes) {
+    const entries = classes || [];
+    const thirds = entries.filter((c) => thirdCasterOf(c));
+    const others = entries.filter((c) => { const k = getClass(c.id); return !thirdCasterOf(c) && k && k.spellcasting && !k.spellcasting.pact; });
+    if (thirds.length === 1 && !others.length) return THIRD_SLOTS[Math.min(20, thirds[0].level || 1)] || [];
+    let level = 0;
+    entries.forEach((c) => {
+      const lvl = c.level || 1;
+      if (thirdCasterOf(c)) { level += Math.floor(lvl / 3); return; }
+      const k = getClass(c.id);
+      if (!k || !k.spellcasting || k.spellcasting.pact) return;
+      level += k.spellcasting.startsAtLevel === 2 ? Math.floor(lvl / 2) : lvl;
+    });
+    return SPELL_SLOTS_BY_CASTER_LEVEL[Math.min(20, Math.max(0, level))] || [];
+  }
+  // Ячейки магии договора колдуна: [число ячеек, круг] по уровню колдуна.
+  function pactSlotsAt(level) {
+    if (level < 1) return null;
+    const count = level >= 17 ? 4 : level >= 11 ? 3 : level >= 2 ? 2 : 1;
+    const circle = level >= 9 ? 5 : level >= 7 ? 4 : level >= 5 ? 3 : level >= 3 ? 2 : 1;
+    return { count, circle };
+  }
+  // Уведомление в окне повышения уровня: открывается новый круг ячеек / меняется число ячеек.
+  function levelUpSlotNoticeHtml(cls, c, newLevel) {
+    const picked = levelUpState.subclassChoice && levelUpState.subclassChoice.name;
+    const sim = (lvl) => (data.classes || []).map((x) => (x === c ? { ...x, level: lvl, subclass: x.subclass || picked || "" } : x));
+    const lines = [];
+    const before = spellSlotsTableFor(sim(newLevel - 1));
+    const after = spellSlotsTableFor(sim(newLevel));
+    for (let i = 0; i < 9; i++) {
+      const b = before[i] || 0, a = after[i] || 0;
+      if (a > 0 && b === 0) lines.push(`✨ <strong>Открывается ${i + 1}-й круг заклинаний:</strong> ${a} ${a === 1 ? "ячейка" : a < 5 ? "ячейки" : "ячеек"}.`);
+      else if (a !== b) lines.push(`${i + 1}-й круг: ${b} → ${a} ${a < 5 && a > 1 ? "ячейки" : a === 1 ? "ячейка" : "ячеек"}.`);
+    }
+    if (cls.spellcasting && cls.spellcasting.pact) {
+      const pb = pactSlotsAt(newLevel - 1), pa = pactSlotsAt(newLevel);
+      if (pa && (!pb || pb.circle !== pa.circle)) lines.push(`✨ <strong>Ячейки магии договора теперь ${pa.circle}-го круга:</strong> ${pa.count} шт. (все накладываются ячейкой этого круга).`);
+      else if (pa && pb && pa.count !== pb.count) lines.push(`Ячейки магии договора: ${pb.count} → ${pa.count} (${pa.circle}-го круга).`);
+    }
+    if (!lines.length) return "";
+    return `<div class="panel" style="margin:10px 0;border-color:var(--gold-dim);"><h4 style="margin-top:0;">Ячейки заклинаний</h4>${lines.map((l) => `<p style="margin:2px 0;">${l}</p>`).join("")}</div>`;
+  }
   // Recomputes data.spellcasting.slots from the character's current combined
   // caster level, called right after a spellcasting class's level actually
-  // changes (see applyLevelUp below) -- fixes slots staying manual forever
-  // (the "Количество ячеек" fields on the Заклинания tab are still plain
-  // editable numbers for the player to track usage against, but their
-  // starting/max value per level now fills in on its own instead of staying
-  // at whatever the player happened to leave them).
-  function applyLevelUpSpellSlots(cls) {
-    if (!cls.spellcasting || cls.spellcasting.pact) return;
+  // changes (see applyLevelUp below).
+  function applyLevelUpSpellSlots(cls, c) {
+    if (!(cls.spellcasting && !cls.spellcasting.pact) && !thirdCasterOf(c)) return;
     if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
     if (!data.spellcasting.slots) data.spellcasting.slots = {};
-    const table = SPELL_SLOTS_BY_CASTER_LEVEL[Math.min(20, Math.max(0, multiclassCasterLevel(data)))] || [];
+    const table = spellSlotsTableFor(data.classes);
     for (let circle = 1; circle <= 9; circle++) {
       data.spellcasting.slots[circle] = table[circle - 1] || 0;
     }
@@ -1452,12 +1544,27 @@ export async function renderSheet(id) {
   // The chosen (or, at level 3, still-being-picked) subclass's own features
   // that land at exactly this level -- e.g. Мастер боевых искусств's
   // "Боевое превосходство"+"Ученик войны" at 3, "Познай своего врага" at 7.
+  // Текст умения для карточки/окна: у «Резчика рун» список рун вынесен в выбор (каждая руна — своя карточка),
+  // так что в самом умении остаётся только вводная часть.
+  function subclassFeatureDescText(sub, sf) {
+    const paras = sf.desc || [];
+    const spec = SUBCLASS_MULTI_PICKS[sub && sub.slug];
+    if (spec && sf.name === spec.optionsFeature && spec.noun === "руна") {
+      const opts = parseNamedOptions(paras, spec.noun);
+      if (opts.length) {
+        const firstIdx = paras.findIndex((p) => p.includes(opts[0].name + "."));
+        const intro = paras.slice(0, firstIdx > 0 ? firstIdx : paras.length).filter((p) => !/^Известные руны$/i.test(p) && !/^Сл спасброска/i.test(p));
+        return [...intro, spec.note].join("\n\n");
+      }
+    }
+    return paras.join("\n\n");
+  }
   function subclassFeaturesAtLevel(cls, subName, level) {
     const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === String(subName || "").toLowerCase());
     if (!sub) return [];
     return (sub.features || [])
       .filter((sf) => sf.name && sf.level === level)
-      .map((sf) => ({ name: sf.name, desc: (sf.desc || []).join("\n\n") }));
+      .map((sf) => ({ name: sf.name, desc: subclassFeatureDescText(sub, sf) }));
   }
   // Generic version of chosenLevel1SubclassSkillGrant()/
   // chosenLevel1SubclassLanguageGrant() in wizard.js -- those only ever
@@ -1484,8 +1591,97 @@ export async function renderSheet(id) {
     }
     return null;
   }
+  // Подклассы, где игрок выбирает несколько вариантов из списка в тексте умения (руны, магические выстрелы):
+  // каждый выбранный вариант становится отдельной карточкой умения.
+  const SUBCLASS_MULTI_PICKS = {
+    "rune-knight": { optionsFeature: "Резчик рун", noun: "руна", title: "Руны", counts: { 3: 2, 7: 1, 10: 1, 15: 1 }, cardPrefix: "", note: "Известные руны: 2 на 3-м уровне, 3 на 7-м, 4 на 10-м, 5 на 15-м." },
+    "arcane-archer": { optionsFeature: "Варианты магического выстрела", noun: "стрела", title: "Варианты магического выстрела", counts: { 3: 2, 7: 1, 10: 1, 15: 1, 18: 1 }, cardPrefix: "Магический выстрел: " },
+  };
+  function parseNamedOptions(paras, noun) {
+    const re = new RegExp(`(?:^|[.!?])\\s*([А-ЯЁ][а-яё]+ ${noun})(\\s*\\([^)]*\\))?\\.\\s*([\\s\\S]*)$`);
+    const out = [];
+    let cur = null;
+    (paras || []).forEach((p) => {
+      const m = re.exec(p);
+      if (m) {
+        const lvl = /(\d+)-й уровень/.exec(m[2] || "");
+        cur = { name: m[1], minLevel: lvl ? Number(lvl[1]) : 0, paras: [m[3]] };
+        out.push(cur);
+      } else if (cur && !/^Сл спасброска/i.test(p)) {
+        cur.paras.push(p);
+      }
+    });
+    return out.map((o) => ({ name: o.name, minLevel: o.minLevel, text: o.paras.join("\n\n") }));
+  }
+  function multiPickOptionsFor(sub) {
+    const spec = SUBCLASS_MULTI_PICKS[sub && sub.slug];
+    if (!spec) return null;
+    const f = (sub.features || []).find((x) => x.name === spec.optionsFeature);
+    return f ? { spec, options: parseNamedOptions(f.desc, spec.noun) } : null;
+  }
+  function multiPickCardName(spec, opt) { return `${spec.cardPrefix}${opt.name}`; }
+  function resolveMultiPickState(cls, subName, newLevel) {
+    if (!cls || !subName) return null;
+    const sub = (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(subName).toLowerCase());
+    const info = multiPickOptionsFor(sub);
+    if (!info) return null;
+    const count = info.spec.counts[newLevel];
+    if (!count) return null;
+    const source = subclassFeatureSource(cls, sub.name);
+    const known = new Set((data.features || []).filter((f) => f.source === source).map((f) => f.name));
+    const options = info.options.filter((o) => !known.has(multiPickCardName(info.spec, o)));
+    if (!options.length) return null;
+    return { slug: sub.slug, subName: sub.name, count: Math.min(count, options.length), ids: [], options, title: info.spec.title, level: newLevel };
+  }
+  function multiPickPanelHtml() {
+    const mp = levelUpState.multiPick;
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${escapeHtml(mp.title)} (${mp.ids.length}/${mp.count})</h4>
+        <p class="muted" style="font-size:0.82rem;margin:2px 0 6px;">Наведите на название, чтобы прочитать описание. Каждый выбранный вариант добавится в лист отдельным умением.</p>
+        <div class="grid cols-2">
+          ${mp.options
+            .map((o) => {
+              const locked = o.minLevel && mp.level < o.minLevel;
+              const checked = mp.ids.includes(o.name);
+              const full = !checked && mp.ids.length >= mp.count;
+              return `<label class="row" style="gap:6px;align-items:center;${locked ? "opacity:0.5;" : ""}">
+                <input type="checkbox" data-level-up-multi="${escapeHtml(o.name)}" ${checked ? "checked" : ""} ${locked || full ? "disabled" : ""} />
+                <span class="subclass-hover-name" tabindex="0">${escapeHtml(o.name)}${o.minLevel ? ` <span class="muted">(${o.minLevel}-й ур.)</span>` : ""}<span class="subclass-hover-card panel">${o.text.split(/\n\n/).map((t) => `<p>${escapeHtml(t)}</p>`).join("")}</span></span>
+              </label>`;
+            })
+            .join("")}
+        </div>
+      </div>`;
+  }
+  function multiPickIncomplete() {
+    const mp = levelUpState.multiPick;
+    return !!(mp && mp.ids.length < mp.count);
+  }
+  // Умения подклассов с условной выдачей навыка/спасброска — выдача зависит от того, что у персонажа уже есть.
+  function specialSubGrantState(featureName) {
+    const skills = (data.proficiencies && data.proficiencies.skills) || [];
+    const saves = (data.proficiencies && data.proficiencies.savingThrows) || [];
+    if (featureName === "Посланник короны") {
+      const has = skills.includes("persuasion");
+      return { featureName, kind: "skill", count: has ? 1 : 0, optionIds: has ? ["animalHandling", "insight", "intimidation", "performance"] : [], autoSkills: has ? [] : ["persuasion"], expertiseIds: ["persuasion"], picked: [],
+        note: has ? "Вы уже владеете Убеждением — выберите другой навык; бонус мастерства удваивается при проверках Убеждения." : "Вы получаете владение навыком Убеждение (бонус мастерства удваивается при проверках Убеждения)." };
+    }
+    if (featureName === "Элегантный придворный") {
+      const has = saves.includes("wis");
+      return { featureName, kind: "save", count: has ? 1 : 0, optionIds: has ? ["int", "cha"] : [], autoSaves: has ? [] : ["wis"], picked: [],
+        note: has ? "Вы уже владеете спасброском Мудрости — выберите спасбросок Интеллекта или Харизмы. К проверкам Убеждения прибавляется модификатор Мудрости." : "Вы получаете владение спасброском Мудрости. К проверкам Убеждения прибавляется модификатор Мудрости." };
+    }
+    if (featureName === "Знания мистического лучника") {
+      return { featureName, kind: "skill", count: 1, optionIds: ["arcana", "nature"], picked: [], cantripOptions: ["prestidigitation", "druidcraft"], cantripPicked: "" };
+    }
+    return null;
+  }
+  const SPECIAL_SUB_GRANT_FEATURES = ["Посланник короны", "Элегантный придворный", "Знания мистического лучника"];
   function resolveSubSkillChoiceState(cls, subName, level) {
     if (!cls || !subName) return null;
+    const special = subclassFeaturesAtLevel(cls, subName, level).find((f) => SPECIAL_SUB_GRANT_FEATURES.includes(f.name));
+    if (special) return specialSubGrantState(special.name);
     const grant = subclassSkillChoiceGrant(cls, subName, level);
     return grant ? { ...grant, picked: [] } : null;
   }
@@ -1496,7 +1692,19 @@ export async function renderSheet(id) {
   }
   function subSkillChoicePanelHtml() {
     const sc = levelUpState.subSkillChoice;
-    const already = new Set(data.proficiencies?.skills || []);
+    const already = new Set(sc.kind === "save" ? data.proficiencies?.savingThrows || [] : data.proficiencies?.skills || []);
+    if (sc.kind === "save" || sc.note || sc.cantripOptions) {
+      const opts = sc.optionIds || [];
+      const labelOf = (id) => (sc.kind === "save" ? (ABILITIES.find((a) => a.id === id) || {}).label : (SKILLS.find((x) => x.id === id) || {}).label) || id;
+      const cantrips = (sc.cantripOptions || []).map((id) => SPELLS.find((x) => x.id === id)).filter(Boolean);
+      return `
+        <div class="panel" style="margin:10px 0;">
+          <h4 style="margin-top:0;">${escapeHtml(sc.featureName)}</h4>
+          ${sc.note ? `<p class="muted" style="margin:4px 0;">${escapeHtml(sc.note)}</p>` : ""}
+          ${opts.length ? `<p style="margin:6px 0 2px;">${sc.kind === "save" ? "Спасбросок" : "Навык"} на выбор:</p><div class="grid cols-2">${opts.map((id) => `<label class="row" style="gap:8px;align-items:center;${already.has(id) ? "opacity:0.5;" : ""}"><input type="radio" name="level-up-sub-skill" data-level-up-sub-skill value="${id}" ${sc.picked.includes(id) ? "checked" : ""} ${already.has(id) ? "disabled" : ""} /><span>${escapeHtml(labelOf(id))}${already.has(id) ? " (уже есть)" : ""}</span></label>`).join("")}</div>` : ""}
+          ${cantrips.length ? `<p style="margin:8px 0 2px;">Заговор на выбор:</p><div class="grid cols-2">${cantrips.map((sp) => `<label class="row" style="gap:8px;align-items:center;"><input type="radio" name="level-up-sub-cantrip" data-level-up-sub-cantrip value="${sp.id}" ${sc.cantripPicked === sp.id ? "checked" : ""} />${spellHoverNameHtml(sp)}</label>`).join("")}</div>` : ""}
+        </div>`;
+    }
     if (sc.optionIds) {
       const options = sc.optionIds.map((id) => SKILLS.find((s) => s.id === id)).filter(Boolean);
       const inputType = sc.count === 1 ? "radio" : "checkbox";
@@ -1535,7 +1743,7 @@ export async function renderSheet(id) {
   }
   function subSkillChoiceIncomplete() {
     const sc = levelUpState.subSkillChoice;
-    return !!(sc && sc.picked.filter(Boolean).length < sc.count);
+    return !!(sc && (sc.picked.filter(Boolean).length < sc.count || (sc.cantripOptions && !sc.cantripPicked)));
   }
   // Same rendering as wizard.js's own languageSelectOptionsHtml (grouped
   // Распространённые/Экзотические optgroups, already-known languages left
@@ -1623,7 +1831,7 @@ export async function renderSheet(id) {
           </select>
           ${
             feat
-              ? `<p style="margin:8px 0 0;">${escapeHtml(feat.desc)}</p>
+              ? `${featAlreadyTaken(feat, data) ? `<p style="margin:8px 0 0;color:var(--danger, #e57373);font-weight:600;">${FEAT_TAKEN_MESSAGE}</p>` : ""}<p style="margin:8px 0 0;white-space:pre-line;">${escapeHtml(feat.desc)}</p>
             ${
               feat.abilityIncrease && feat.abilityIncrease.choices.length > 1
                 ? `<div class="row" style="align-items:center;margin-top:6px;">
@@ -1659,6 +1867,7 @@ export async function renderSheet(id) {
     if (asi.mode === "feat") {
       if (!asi.featId) return true;
       const f = FEATS.find((x) => x.id === asi.featId);
+      if (featAlreadyTaken(f, data)) return true;
       if (f && f.skillChoice && asi.featSkills.length < f.skillChoice.count) return true;
       return featExtrasIncomplete(f, asi.sel, data);
     }
@@ -1687,12 +1896,12 @@ export async function renderSheet(id) {
   // Ограждение) -- the spell catalog has no "school" field to filter or
   // enforce that restriction by, so this offers the full wizard 1st-level
   // list with a text reminder instead of a hard filter.
-  function eldritchKnightChooserHtml(sc) {
-    const cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes("wizard"));
+  function eldritchKnightChooserHtml(sc, isTrickster) {
+    const cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes("wizard") && !(isTrickster && s.id === "mage-hand"));
     const spells1 = SPELLS.filter((s) => s.level === 1 && s.classes.includes("wizard"));
     return `
       <div style="margin-top:10px;">
-        <p class="muted">Заговоры волшебника (${sc.cantripIds.length}/2):</p>
+        <p class="muted">Заговоры волшебника (${sc.cantripIds.length}/2)${isTrickster ? " — «Волшебная рука» вы знаете дополнительно" : ""}:</p>
         <div class="grid cols-2">
           ${cantrips
             .map(
@@ -1705,7 +1914,7 @@ export async function renderSheet(id) {
             )
             .join("")}
         </div>
-        <p class="muted" style="margin-top:8px;">Заклинания 1-го уровня (${sc.spellIds.length}/3) — минимум два должны быть школы Воплощения или Ограждения:</p>
+        <p class="muted" style="margin-top:8px;">Заклинания 1-го уровня (${sc.spellIds.length}/3) — ${isTrickster ? "минимум два должны быть школы Очарования или Иллюзии (на 8, 14 и 20 уровнях — любые из списка волшебника)" : "минимум два должны быть школы Воплощения или Ограждения (на 8, 14 и 20 уровнях — любые из списка волшебника)"}:</p>
         <div class="grid cols-2">
           ${spells1
             .map(
@@ -1767,7 +1976,7 @@ export async function renderSheet(id) {
       // picked here), so repeating them in this panel too just duplicated
       // every card.
       if (picked.slug === "battlemaster") html += maneuverChooserHtml(sc);
-      else if (picked.slug === "eldritch-knigh") html += eldritchKnightChooserHtml(sc);
+      else if (picked.slug === "eldritch-knigh" || picked.slug === "arcane-trickster") html += eldritchKnightChooserHtml(sc, picked.slug === "arcane-trickster");
       else if (picked.slug === "totem-warrior") html += totemChooserHtml(sc, picked);
     }
     html += `</div>`;
@@ -1803,7 +2012,7 @@ export async function renderSheet(id) {
     const sub = (cls.subclasses || []).find((s) => s.name === sc.name);
     if (sub && sub.slug === "totem-warrior" && !sc.totem) return true;
     if (sub && sub.slug === "battlemaster" && sc.maneuverIds.length < 3) return true;
-    if (sub && sub.slug === "eldritch-knigh" && (sc.cantripIds.length < 2 || sc.spellIds.length < 3)) return true;
+    if (sub && (sub.slug === "eldritch-knigh" || sub.slug === "arcane-trickster") && (sc.cantripIds.length < 2 || sc.spellIds.length < 3)) return true;
     return false;
   }
   // ---- Extra level-up picks ---------------------------------------------
@@ -1985,10 +2194,12 @@ export async function renderSheet(id) {
       ${levelUpPicksPanelHtml()}
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
+      ${levelUpState.multiPick ? multiPickPanelHtml() : ""}
       ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
+      ${levelUpSlotNoticeHtml(cls, c, newLevel)}
       ${levelUpState.spellbookChoice ? spellbookChoicePanelHtml(cls, newLevel) : ""}
-      ${levelUpState.knownCantripChoice ? knownCantripChoicePanelHtml(cls, newLevel) : ""}
-      ${levelUpState.knownSpellChoice ? knownSpellChoicePanelHtml(cls, newLevel) : ""}
+      ${levelUpState.knownCantripChoice ? knownCantripChoicePanelHtml(cls, newLevel, c) : ""}
+      ${levelUpState.knownSpellChoice ? knownSpellChoicePanelHtml(cls, newLevel, c) : ""}
       ${levelUpState.asi ? asiChooserHtml() : ""}
       <div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px;">
         <button type="button" data-action="close-modal">Отмена</button>
@@ -2001,10 +2212,11 @@ export async function renderSheet(id) {
           baseFightingStyleChoiceIncomplete() ||
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
+          multiPickIncomplete() ||
           subLanguageChoiceIncomplete() ||
           spellbookChoiceIncomplete() ||
-          knownSpellChoiceIncomplete(cls, newLevel) ||
-          knownCantripChoiceIncomplete(cls, newLevel)
+          knownSpellChoiceIncomplete(cls, newLevel, c) ||
+          knownCantripChoiceIncomplete(cls, newLevel, c)
             ? "disabled"
             : ""
         } data-action="confirm-level-up">Повысить уровень</button>
@@ -2039,10 +2251,11 @@ export async function renderSheet(id) {
       levelUpState.baseFightingStyleChoice = ccls && levelHasBaseFightingStyleChoice(ccls, newLevel) ? freshBaseFightingStyleChoiceState() : null;
       levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState(ccls, cc.subclass, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
+      levelUpState.multiPick = resolveMultiPickState(ccls, cc && cc.subclass, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.spellbookChoice = ccls && levelHasSpellbookGrowth(ccls, newLevel) ? freshSpellbookChoiceState() : null;
-      levelUpState.knownSpellChoice = ccls && knownSpellGrowthCount(ccls, newLevel) > 0 ? freshKnownSpellChoiceState() : null;
-      levelUpState.knownCantripChoice = ccls && knownCantripGrowthCount(ccls, newLevel) > 0 ? freshKnownCantripChoiceState() : null;
+      levelUpState.knownSpellChoice = ccls && knownSpellGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownSpellChoiceState() : null;
+      levelUpState.knownCantripChoice = ccls && knownCantripGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownCantripChoiceState() : null;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-subclass]", (e, el) => {
@@ -2056,6 +2269,7 @@ export async function renderSheet(id) {
       const newLevel = (c.level || 1) + 1;
       levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState(cls, levelUpState.subclassChoice.name, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
+      levelUpState.multiPick = resolveMultiPickState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       refreshLevelUpModal();
     });
@@ -2089,6 +2303,17 @@ export async function renderSheet(id) {
       } else {
         sc.picked = sc.picked.filter((id) => id !== v);
       }
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-multi]", (e, el) => {
+      const mp = levelUpState.multiPick;
+      const id = el.dataset.levelUpMulti;
+      if (el.checked) { if (!mp.ids.includes(id) && mp.ids.length < mp.count) mp.ids.push(id); }
+      else mp.ids = mp.ids.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-sub-cantrip]", (e, el) => {
+      levelUpState.subSkillChoice.cantripPicked = el.value;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-sub-language]", (e, el) => {
@@ -2370,7 +2595,7 @@ export async function renderSheet(id) {
             if ((data.features || []).some((f) => f.name === m.name && f.source === source)) return;
             data.features.push({ name: m.name, source, desc: m.desc });
           });
-        } else if (sub.slug === "eldritch-knigh") {
+        } else if (sub.slug === "eldritch-knigh" || sub.slug === "arcane-trickster") {
           // blankCharacter() always pre-populates data.spellcasting (with
           // ability:null and empty arrays/slots) so every new character has
           // somewhere for the Заклинания tab's fields to bind to -- so
@@ -2386,6 +2611,7 @@ export async function renderSheet(id) {
           if (!data.spellcasting.prepared) data.spellcasting.prepared = [];
           if (!data.spellcasting.slots) data.spellcasting.slots = {};
           if (!data.spellcasting.slots[1]) data.spellcasting.slots[1] = 2;
+          if (sub.slug === "arcane-trickster" && !data.spellcasting.cantrips.includes("mage-hand")) data.spellcasting.cantrips.push("mage-hand");
           levelUpState.subclassChoice.cantripIds.forEach((id) => {
             if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
           });
@@ -2425,9 +2651,33 @@ export async function renderSheet(id) {
     }
     if (levelUpState.subSkillChoice) {
       const sc = levelUpState.subSkillChoice;
+      if (!Array.isArray(data.proficiencies.savingThrows)) data.proficiencies.savingThrows = [];
+      (sc.autoSkills || []).forEach((id) => { if (!data.proficiencies.skills.includes(id)) data.proficiencies.skills.push(id); });
+      (sc.autoSaves || []).forEach((id) => { if (!data.proficiencies.savingThrows.includes(id)) data.proficiencies.savingThrows.push(id); });
+      (sc.expertiseIds || []).forEach((id) => { if (!data.proficiencies.expertise.includes(id)) data.proficiencies.expertise.push(id); });
       sc.picked.filter(Boolean).forEach((id) => {
+        if (sc.kind === "save") { if (!data.proficiencies.savingThrows.includes(id)) data.proficiencies.savingThrows.push(id); return; }
         if (!data.proficiencies.skills.includes(id)) data.proficiencies.skills.push(id);
         if (sc.expertise && !data.proficiencies.expertise.includes(id)) data.proficiencies.expertise.push(id);
+      });
+      if (sc.cantripPicked) {
+        if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+        if (!data.spellcasting.ability) data.spellcasting.ability = "int";
+        if (!Array.isArray(data.spellcasting.cantrips)) data.spellcasting.cantrips = [];
+        if (!data.spellcasting.cantrips.includes(sc.cantripPicked)) data.spellcasting.cantrips.push(sc.cantripPicked);
+      }
+    }
+    if (levelUpState.multiPick) {
+      const mp = levelUpState.multiPick;
+      const sub = (cls.subclasses || []).find((x) => x.name === mp.subName);
+      const spec = SUBCLASS_MULTI_PICKS[mp.slug];
+      const source = subclassFeatureSource(cls, mp.subName);
+      mp.ids.forEach((name) => {
+        const opt = mp.options.find((o) => o.name === name);
+        if (!opt || !sub) return;
+        const cardName = multiPickCardName(spec, opt);
+        if ((data.features || []).some((f) => f.source === source && f.name === cardName)) return;
+        data.features.push({ name: cardName, source, desc: opt.text });
       });
     }
     if (levelUpState.subLanguageChoice) {
@@ -2456,7 +2706,7 @@ export async function renderSheet(id) {
         if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
       });
     }
-    applyLevelUpSpellSlots(cls);
+    applyLevelUpSpellSlots(cls, c);
     doSave();
     render();
   }
@@ -2479,10 +2729,11 @@ export async function renderSheet(id) {
       baseFightingStyleChoice: cls && levelHasBaseFightingStyleChoice(cls, newLevel) ? freshBaseFightingStyleChoiceState() : null,
       toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState(cls, c.subclass, newLevel) : null,
       subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
+      multiPick: resolveMultiPickState(cls, c && c.subclass, newLevel),
       subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
       spellbookChoice: cls && levelHasSpellbookGrowth(cls, newLevel) ? freshSpellbookChoiceState() : null,
-      knownSpellChoice: cls && knownSpellGrowthCount(cls, newLevel) > 0 ? freshKnownSpellChoiceState() : null,
-      knownCantripChoice: cls && knownCantripGrowthCount(cls, newLevel) > 0 ? freshKnownCantripChoiceState() : null,
+      knownSpellChoice: cls && knownSpellGrowthCount(cls, newLevel, c) > 0 ? freshKnownSpellChoiceState() : null,
+      knownCantripChoice: cls && knownCantripGrowthCount(cls, newLevel, c) > 0 ? freshKnownCantripChoiceState() : null,
     };
     levelUpModalEl = openModal(levelUpModalBodyHtml(), { wide: true });
     wireLevelUpModal(levelUpModalEl);
@@ -2685,7 +2936,14 @@ export async function renderSheet(id) {
     (sub.features || []).forEach((sf) => {
       if (!sf.name) return;
       if (sf.level !== null && sf.level !== undefined && sf.level > uptoLevel) return;
-      const desc = (sf.desc || []).join("\n\n");
+      const desc = subclassFeatureDescText(sub, sf);
+      // Пси-воин «Псионическая сила»: способности (Защитное поле, Псионический удар, Телекинетическое передвижение) — отдельные карточки.
+      const psi = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null;
+      if (psi) {
+        data.features.push({ name: sf.name, source, desc: psi.intro });
+        psi.powers.forEach((pw) => { if (!(data.features || []).some((f) => f.source === source && f.name === pw.name)) data.features.push({ name: pw.name, source, desc: pw.desc }); });
+        return;
+      }
       data.features.push({ name: sf.name, source, desc });
       applyFeatureProficiencyGrants(sf.name, desc);
     });
@@ -2700,6 +2958,18 @@ export async function renderSheet(id) {
   // dedup guard the plain class-feature loop in applyLevelUp() uses, and
   // only pushes the intro card when explicitly asked to (the first time the
   // player picks this subclass, at whichever level that happens to be).
+  function splitPsionicPowerCards(paras) {
+    const idx = paras.findIndex((p) => /расходуются на следующие способности/i.test(p));
+    if (idx < 0) return null;
+    const powers = [];
+    paras.slice(idx + 1).forEach((p) => {
+      const m = /^([А-ЯЁ][^.]{2,40})\.\s+([\s\S]+)$/.exec(p);
+      if (m) powers.push({ name: m[1], desc: m[2] });
+      else if (powers.length) powers[powers.length - 1].desc += "\n\n" + p;
+    });
+    if (!powers.length) return null;
+    return { intro: paras.slice(0, idx + 1).join("\n\n"), powers };
+  }
   function applySubclassFeaturesAtLevel(cls, sub, level, { withIntro, excludeNames } = {}) {
     if (!sub) return;
     const introName = subclassIntroName(cls, sub.name);
@@ -2711,7 +2981,13 @@ export async function renderSheet(id) {
       if (!sf.name || sf.level !== level) return;
       if (excludeNames && excludeNames.includes(sf.name)) return;
       if ((data.features || []).some((f) => f.source === source && f.name === sf.name)) return;
-      const desc = (sf.desc || []).join("\n\n");
+      const desc = subclassFeatureDescText(sub, sf);
+      const psi = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null;
+      if (psi) {
+        data.features.push({ name: sf.name, source, desc: psi.intro });
+        psi.powers.forEach((pw) => { if (!(data.features || []).some((f) => f.source === source && f.name === pw.name)) data.features.push({ name: pw.name, source, desc: pw.desc }); });
+        return;
+      }
       data.features.push({ name: sf.name, source, desc });
       applyFeatureProficiencyGrants(sf.name, desc);
     });
@@ -3337,7 +3613,7 @@ export async function renderSheet(id) {
         const cls = CLASSES.find((c) => c.name.toLowerCase() === clsPart);
         const sub = cls && (cls.subclasses || []).find((s) => s.name.toLowerCase() === subPart);
         const sf = sub && (sub.features || []).find((f) => (f.name || "").toLowerCase() === n);
-        if (sf) return (sf.desc || []).join("\n\n");
+        if (sf) { const psiSplit = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null; return psiSplit ? psiSplit.intro : subclassFeatureDescText(sub, sf); }
       } else {
         // Source is a bare class name: either that class's own
         // classFeatureText, or the "intro" card for one of its subclasses
@@ -3378,7 +3654,7 @@ export async function renderSheet(id) {
       for (const sub of cls.subclasses || []) {
         if ((sub.name || "").toLowerCase() === n && sub.intro) return sub.intro;
         const sf = (sub.features || []).find((f) => (f.name || "").toLowerCase() === n);
-        if (sf) return (sf.desc || []).join("\n\n");
+        if (sf) { const psiSplit = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null; return psiSplit ? psiSplit.intro : subclassFeatureDescText(sub, sf); }
       }
     }
     for (const race of RACES) {
@@ -3495,6 +3771,11 @@ export async function renderSheet(id) {
       const min = ruNumberToInt(modMatch[2]);
       const mod = getAbilityMod(data, abilityId);
       return { max: Math.max(min, mod), recharge: rechargeOf(text) };
+    }
+    // «Вы можете использовать это умение три раза» / «У вас есть два использования этой способности» + восстановление после отдыха
+    const wordCount = text.match(/(?:использовать[^.]{0,40}\s|(?:у вас )?есть\s+)(один|одно|два|две|три|четыре|пять|шесть)\s+(?:раза?|использовани[яй])/i);
+    if (wordCount && rechargeOf(text)) {
+      return { max: ruNumberToInt(wordCount[1]), recharge: rechargeOf(text) };
     }
     // "N/короткий отдых" style shorthand
     // \w doesn't match Cyrillic letters in JS regex, so the word endings
@@ -3639,8 +3920,15 @@ export async function renderSheet(id) {
     const count = Math.max(1, Math.ceil(sneakCount / 2));
     return { expr: `${count}d6`, raw: `${count}к6` };
   }
+  // Пси-воин: «Защитное поле» / «Псионический удар» — кость псионической энергии + модификатор Интеллекта
+  const PSI_WARRIOR_POWER_CARD = /^(Защитное поле|Псионический удар)$/i;
+  function psiWarriorPowerDice() {
+    const mod = getAbilityMod(data, "int");
+    const sides = psionicDieSides(data);
+    return { expr: `1d${sides}${mod ? (mod > 0 ? "+" : "") + mod : ""}`, raw: `1к${sides}${mod ? formatModifier(mod) : ""}` };
+  }
   function psionicDieSides(data) {
-    const lvl = rogueLevel(data);
+    const lvl = Math.max(rogueLevel(data), fighterLevel(data));
     if (lvl >= 17) return 12;
     if (lvl >= 11) return 10;
     if (lvl >= 5) return 8;
@@ -3760,6 +4048,8 @@ export async function renderSheet(id) {
     return true;
   }
   function resolveFeatureUses(f) {
+    // Способности Пси-воина (отдельные карточки) тратят кости «Псионической силы», своих счётчиков у них нет.
+    if (/^(Защитное поле|Псионический удар|Телекинетическое передвижение)$/i.test(f.name || "") && /Пси-воин/i.test(f.source || "")) return null;
     const chKey = channelPoolKey(f);
     if (chKey) return { max: channelPoolMax(chKey), recharge: "any" };
     if (BARD_INSPIRATION_FEATURE_NAME.test(f.name || "")) return { max: maxBardInspirationUses(), recharge: "long" };
@@ -4010,9 +4300,13 @@ export async function renderSheet(id) {
       const pool = [...basePool, ...SPELLS.filter((sp) => domainIds.includes(sp.id) && !basePool.some((p) => p.id === sp.id))];
       const preparedIds = new Set(sc.prepared || []);
       const max = preparedSpellsMax(sc, cls);
+      // заклинания от расы/черт/умений — всегда в списке (не занимают место подготовленных)
+      const grantedExtra = SPELLS.filter((sp) => sp.level > 0 && (sc.known || []).includes(sp.id) && spellGrantSource(sp.id));
+      const baseShown = spellPrepMode ? pool : pool.filter((sp) => preparedIds.has(sp.id) || domainIds.includes(sp.id));
       const shown = [
         ...cantripSpells,
-        ...(spellPrepMode ? pool : pool.filter((sp) => preparedIds.has(sp.id) || domainIds.includes(sp.id))),
+        ...baseShown,
+        ...grantedExtra.filter((sp) => !baseShown.some((b) => b.id === sp.id)),
       ].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
       const browseKnownIds = new Set([...(sc.cantrips || []), ...(sc.known || [])]);
       listSectionHtml = `
@@ -4199,11 +4493,31 @@ export async function renderSheet(id) {
   // FEATURE_GRANTED_SPELLS) is cast without spending a spell slot -- the
   // card shows a badge instead of a remove button. Future casting mechanics
   // should check this map (data.spellcasting.granted[spellId] = feature name).
-  function spellGrantedBy(spId) {
+  function spellGrantSource(spId) {
     const g = data.spellcasting && data.spellcasting.granted;
     const name = g && g[spId];
-    return name && (data.features || []).some((f) => f.name === name) ? name : null;
+    if (name && ((data.features || []).some((f) => f.name === name) || (data.feats || []).some((f) => (f.baseName || f.name) === name))) return { label: name, free: true };
+    // раса / подраса: заговоры из grantedCantrips (считаются по названию расы, хранить ничего не нужно)
+    const raceName = data.raceName || "";
+    if (raceName) {
+      for (const race of RACES) {
+        const subs = race.subraces || [];
+        const matchedSub = subs.find((sr) => raceName.includes(sr.name));
+        for (const src of [race, ...subs]) {
+          if (!src.grantedCantrips || !src.grantedCantrips.includes(spId) || !raceName.includes(src.name)) continue;
+          if (src === race && matchedSub && matchedSub.overridesRaceCantrips) continue;
+          return { label: `Раса: ${src.name}`, free: false };
+        }
+      }
+    }
+    // черты: заговоры/заклинания, выданные самой чертой (старые и новые записи)
+    for (const f of data.feats || []) {
+      const ids = [...(f.grantedCantrips || []), ...(f.grantedSpell ? [f.grantedSpell] : []), ...((f.fx && f.fx.cantrips) || []), ...((f.fx && f.fx.known) || [])];
+      if (ids.includes(spId)) return { label: `Черта: ${f.baseName || f.name}`, free: false };
+    }
+    return null;
   }
+  function spellGrantedBy(spId) { const r = spellGrantSource(spId); return r ? r.label : null; }
   // Заклинания клятвы паладина (и любого другого не-«подготавливающего» класса,
   // у подкласса которого есть domainSpells): всегда подготовлены, в лимит не
   // входят, убрать нельзя.
@@ -4223,9 +4537,10 @@ export async function renderSheet(id) {
     if (oathSpellIdSet().has(sp.id)) {
       return `<span class="spell-card-badge spell-card-badge-domain" title="Заклинание клятвы — всегда подготовлено, не занимает место среди подготовленных">дар клятвы</span>`;
     }
-    const grantedBy = spellGrantedBy(sp.id);
-    if (grantedBy) {
-      return `<span class="spell-card-badge spell-card-badge-domain" title="Даётся умением «${escapeHtml(grantedBy)}» — накладывается без траты ячеек заклинаний">✦ ${escapeHtml(grantedBy)} · без ячейки</span>`;
+    const grantSrc = spellGrantSource(sp.id);
+    if (grantSrc) {
+      const tip = grantSrc.free ? `Даётся «${grantSrc.label}» — накладывается без траты ячеек заклинаний` : `Даётся: ${grantSrc.label}`;
+      return `<span class="spell-card-badge spell-card-badge-domain" title="${escapeHtml(tip)}">✦ ${escapeHtml(grantSrc.label)}${grantSrc.free ? " · без ячейки" : ""}</span>`;
     }
     if (!prepCtx || sp.level === 0) {
       return `<button class="small danger" data-action="toggle-spell" data-spell="${sp.id}" title="Убрать из листа">✕</button>`;
@@ -4867,7 +5182,7 @@ export async function renderSheet(id) {
             <option value="">Выберите черту…</option>
             ${featSelectOptionsHtml(featPreviewId)}
           </select>
-          <button class="small primary" data-action="add-feat" ${preview && !(preview.id === "martial-adept" && featChosenManeuvers.length < 2) && !featPicksIncomplete(preview, featNewSel, data) ? "" : "disabled"}>+ Добавить</button>
+          <button class="small primary" data-action="add-feat" ${preview && !featAlreadyTaken(preview, data) && !(preview.id === "martial-adept" && featChosenManeuvers.length < 2) && !featPicksIncomplete(preview, featNewSel, data) ? "" : "disabled"}>+ Добавить</button>
         </div>
         ${
           preview
@@ -4875,6 +5190,7 @@ export async function renderSheet(id) {
           <div class="card" style="margin-bottom:10px;border-color:var(--gold-dim);">
             <h4 style="margin:0 0 4px;">${escapeHtml(preview.name)}${preview.nameEn ? ` <span class="muted" style="font-weight:normal;font-size:0.8rem;">[${escapeHtml(preview.nameEn)}]</span>` : ""}</h4>
             <p class="muted" style="margin:0 0 4px;font-size:0.8rem;">${escapeHtml(preview.source || "Книга игрока")}</p>
+            ${featAlreadyTaken(preview, data) ? `<p style="margin:0 0 6px;color:var(--danger, #e57373);font-weight:600;">${FEAT_TAKEN_MESSAGE}</p>` : ""}
             ${preview.prereq ? `<p class="muted" style="margin:0 0 4px;">Требование: ${escapeHtml(preview.prereq)}</p>` : ""}
             <p style="margin:0 0 8px;white-space:pre-line;">${escapeHtml(preview.desc)}</p>
             ${
@@ -5144,6 +5460,8 @@ export async function renderSheet(id) {
                     ? null
                     : PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
                       ? { expr: `1d${psionicDieSides(data)}`, raw: `1к${psionicDieSides(data)}` }
+                      : PSI_WARRIOR_POWER_CARD.test(f.name || "") && /Пси-воин/i.test(f.source || "")
+                        ? psiWarriorPowerDice()
                       : GRAVE_MIGHT_FEATURE_NAME.test(f.name || "")
                         ? graveyardShriekDice()
                         : featureDiceInfo(f.desc);
@@ -5320,6 +5638,7 @@ export async function renderSheet(id) {
 
   // ---------- wiring (delegated on #app, attached once) ----------
   const app = document.getElementById("app");
+  wireHoverCardPortal(app);
 
   if (rollLogRefreshHandler) document.removeEventListener("dnd5e:roll-logged", rollLogRefreshHandler);
   rollLogRefreshHandler = () => {
@@ -5763,6 +6082,25 @@ export async function renderSheet(id) {
     }
     return levels;
   }
+  // Боевой стиль «Сражение большим оружием»: кость урона, на которой выпало 1 или 2, перебрасывается
+  // (нужно использовать новый результат) — для рукопашного оружия, которое держат двумя руками
+  // (двуручное, либо «универсальное» двумя руками — рука «Две руки» или галочка «двумя руками»).
+  function applyGreatWeaponFighting(a, useVersatile, rBase) {
+    if (!hasFightingStyle("Сражение большим оружием") || a.rangeType === "ranged") return "";
+    const w = a.name ? WEAPONS.find((x) => x.name.toLowerCase() === a.name.trim().toLowerCase()) : null;
+    const cat = w ? weaponHandCategoryFromProperties(w.properties) : "one-handed";
+    const twoHanded = cat === "two-handed" || a.hand === "both" || (cat === "versatile" && useVersatile);
+    if (!twoHanded) return "";
+    const notes = [];
+    rBase.rolls = rBase.rolls.map((v) => {
+      if (v > 2) return v;
+      const nv = rollDice(1, rBase.sides)[0];
+      notes.push(`${v}→${nv}`);
+      return nv;
+    });
+    rBase.total = rBase.rolls.reduce((x, y) => x + y, 0) + rBase.modifier;
+    return notes.length ? `Сражение большим оружием: переброс ${notes.join(", ")}` : "";
+  }
   function doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, smiteLevel, useSmiteUndead, extraDice, priorRoll) {
     let base = parseDiceFromText(a.damage);
     if (!base) { alert("Не удалось распознать кубик урона в поле «Урон/тип» (напр. 1к8+3)."); return; }
@@ -5778,12 +6116,14 @@ export async function renderSheet(id) {
     const parts = [];
     const breakdown = [];
     let total = 0;
+    let gwfNote = "";
     if (a.ability) {
       let dieOnly = base.expr.replace(/[+-]\s*\d+$/, "");
       if (isCrit) dieOnly = doubleDiceCount(dieOnly);
       if (isSavage) dieOnly = addSavageAttacksDie(dieOnly);
       if (brutalDice) dieOnly = addExtraDice(dieOnly, brutalDice);
       const rBase = rollExpr(dieOnly);
+      gwfNote = applyGreatWeaponFighting(a, useVersatile, rBase);
       const abilityMod = getAbilityMod(data, a.ability);
       total += rBase.total + abilityMod;
       // Just the number, not the ability's name -- the modifier is already
@@ -5799,6 +6139,7 @@ export async function renderSheet(id) {
       if (isSavage) expr = addSavageAttacksDie(expr);
       if (brutalDice) expr = addExtraDice(expr, brutalDice);
       const rBase = rollExpr(expr);
+      gwfNote = applyGreatWeaponFighting(a, useVersatile, rBase);
       total += rBase.total;
       // formatModifier always signs its number ("+0" for a zero modifier),
       // which reads as a bogus "+0" tacked onto the roll when the dice
@@ -5920,7 +6261,7 @@ export async function renderSheet(id) {
     // higher; priorRoll being set here means this IS that reroll, so it
     // doesn't offer itself again.
     let finalTotal = total;
-    let finalDetail = parts.join(" + ");
+    let finalDetail = parts.join(" + ") + (gwfNote ? ` (${gwfNote})` : "");
     if (priorRoll) {
       if (priorRoll.total >= total) {
         finalTotal = priorRoll.total;
@@ -6474,6 +6815,8 @@ export async function renderSheet(id) {
     const f = data.features[Number(el.dataset.index)];
     const dice = PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
       ? { expr: `1d${psionicDieSides(data)}` }
+      : PSI_WARRIOR_POWER_CARD.test(f.name || "") && /Пси-воин/i.test(f.source || "")
+        ? psiWarriorPowerDice()
       : GRAVE_MIGHT_FEATURE_NAME.test(f.name || "")
         ? graveyardShriekDice()
         : featureDiceInfo(f.desc);

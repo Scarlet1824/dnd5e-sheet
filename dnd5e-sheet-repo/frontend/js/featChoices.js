@@ -300,8 +300,47 @@ function checkGridHtml(attr, key, items, chosen, max, labelFn) {
   }).join("")}</div>`;
 }
 
+// Черта уже есть у персонажа (и её нельзя брать повторно).
+export function featAlreadyTaken(feat, data) {
+  return !!(feat && !feat.repeatable && ((data && data.feats) || []).some((f) => f.id === feat.id));
+}
+export const FEAT_TAKEN_MESSAGE = "Вы уже владеете этой чертой.";
+
+// Владение бронёй/оружием по категориям: «Лёгкая броня» уже покрыта строкой класса «Лёгкая, средняя броня, щиты».
+const PROF_CATEGORY_RE = { "Лёгкая броня": /легк/, "Средняя броня": /средн/, "Тяжёлая броня": /тяжел/, "Щиты": /щит/, "Воинское оружие": /воинск/, "Простое оружие": /прост/ };
+const profNorm = (t) => String(t || "").toLowerCase().replace(/ё/g, "е");
+export function proficiencyCovered(list, value) {
+  if (!Array.isArray(list)) return false;
+  if (list.includes(value)) return true;
+  const re = PROF_CATEGORY_RE[value];
+  if (!re) return false;
+  return list.some((x) => x !== value && re.test(profNorm(x)));
+}
+// Убирает дубли вида «Лёгкая броня» рядом с «Лёгкая, средняя броня, щиты».
+export function dedupeProficiencyCategories(list) {
+  if (!Array.isArray(list)) return false;
+  let changed = false;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const v = list[i];
+    if (PROF_CATEGORY_RE[v] && list.some((x, j) => j !== i && x !== v && PROF_CATEGORY_RE[v].test(profNorm(x)))) { list.splice(i, 1); changed = true; }
+  }
+  return changed;
+}
+
+// Фиксированные заклинания/заговоры, которые черта даёт сама: имена с всплывающей карточкой при наведении.
+const GRANT_USE_LABEL = { atwill: "без ограничений", long: "1 раз за продолжительный отдых", short: "1 раз за короткий/продолжительный отдых", any: "1 раз за любой отдых", ritual: "как ритуал" };
+export function featGrantSpellsHtml(feat) {
+  const g = (feat && feat.grant) || {};
+  const items = [];
+  (g.cantrips || []).forEach((id) => { const sp = SPELLS.find((x) => x.id === id); if (sp) items.push(`${spellHoverNameHtml(sp)} <span class="muted">(заговор)</span>`); });
+  (g.spells || []).forEach((x) => { const sp = SPELLS.find((y) => y.id === x.id); if (sp) items.push(`${spellHoverNameHtml(sp)} <span class="muted">(${escapeHtml(GRANT_USE_LABEL[x.use] || "")})</span>`); });
+  if (!items.length) return "";
+  return `<p class="muted" style="margin:8px 0 2px;">Заклинания от черты (наведите, чтобы увидеть карточку):</p><div class="row" style="gap:14px;flex-wrap:wrap;">${items.map((i) => `<span>${i}</span>`).join("")}</div>`;
+}
+
 export function featPicksHtml(feat, sel, data) {
-  if (!featHasPicks(feat)) return "";
+  const grantHead = featGrantSpellsHtml(feat);
+  if (!featHasPicks(feat)) return grantHead ? `<div class="feat-picks" style="margin-top:6px;">${grantHead}</div>` : "";
   ensureDefaults(feat, sel);
   const pk = picksOf(sel);
   data = data || {};
@@ -359,7 +398,7 @@ export function featPicksHtml(feat, sel, data) {
     }
     return "";
   });
-  return `<div class="feat-picks" style="margin-top:6px;">${blocks.join("")}</div>`;
+  return `<div class="feat-picks" style="margin-top:6px;">${grantHead}${blocks.join("")}</div>`;
 }
 
 export function wireFeatPicks(root, getSel, getFeat, rerender) {
@@ -446,7 +485,7 @@ export function applyFeatPicks(data, feat, entry, sel) {
   (grant.cantrips || []).forEach(addCantrip);
   (grant.spells || []).forEach((s) => addFreeSpell(s.id, s.use));
   (grant.tools || []).forEach((t) => { if (addUniq(data.proficiencies.tools, t)) entry.fx.tools.push(t); });
-  (grant.weapons || []).forEach((w) => { if (addUniq(data.proficiencies.weapons, w)) entry.fx.weapons.push(w); });
+  (grant.weapons || []).forEach((w) => { if (!proficiencyCovered(data.proficiencies.weapons, w) && addUniq(data.proficiencies.weapons, w)) entry.fx.weapons.push(w); });
   (grant.languages || []).forEach((l) => { if (addUniq(data.proficiencies.languages, l)) entry.fx.languages.push(l); });
   (grant.skills || []).forEach((k) => { if (addUniq(data.proficiencies.skills, k)) entry.fx.skills.push(k); });
   if (grant.weaponItem) {

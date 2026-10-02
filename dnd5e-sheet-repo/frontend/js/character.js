@@ -80,6 +80,10 @@ export function skillBonus(data, skillId) {
   if (!proficient && !expert && HALF_PROFICIENCY_ABILITIES.includes(skill.ability) && hasRemarkableAthlete(data)) {
     bonus += Math.ceil(proficiencyBonus(data) / 2);
   }
+  // Самурай «Элегантный придворный»: к проверкам Харизмы (Убеждение) прибавляется модификатор Мудрости.
+  if (skillId === "persuasion" && (data.features || []).some((f) => /^Элегантный придворный$/i.test(f.name || ""))) {
+    bonus += Math.max(0, getAbilityMod(data, "wis"));
+  }
   return bonus;
 }
 

@@ -1,4 +1,4 @@
-import { mount, on, $, $all, freshApp, escapeHtml } from "../dom.js";
+import { mount, on, $, $all, freshApp, escapeHtml, wireHoverCardPortal } from "../dom.js";
 import { api } from "../api.js";
 import { navigate } from "../router.js";
 import {
@@ -12,7 +12,7 @@ import {
 import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
-import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml } from "../featChoices.js";
+import { proficiencyCovered, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml } from "../featChoices.js";
 
 // Следопыт's own 1st-level choices (Избранный враг / Природный следопыт):
 // not a subclass and not shaped like Воин's level1Choice (a single named
@@ -1900,6 +1900,7 @@ export function renderWizard() {
 
   function wire() {
     const app = $("#app");
+    wireHoverCardPortal(app);
     // The top-left "← ⚔ D&D 5e" home link used to jump straight back to the
     // character list with no warning, silently discarding whatever progress
     // the player had made in the wizard (nothing is saved until "Создать
@@ -2424,16 +2425,16 @@ export function renderWizard() {
       const namedWeapons = TRAIT_NAMED_WEAPON_GRANTS[name];
       if (namedWeapons) {
         namedWeapons.forEach((w) => {
-          if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w);
+          if (!proficiencyCovered(data.proficiencies.weapons, w)) data.proficiencies.weapons.push(w);
         });
         return;
       }
       const grants = parseProficiencyGrantsFromText(desc);
       grants.weapons.forEach((w) => {
-        if (!data.proficiencies.weapons.includes(w)) data.proficiencies.weapons.push(w);
+        if (!proficiencyCovered(data.proficiencies.weapons, w)) data.proficiencies.weapons.push(w);
       });
       grants.armor.forEach((a) => {
-        if (!data.proficiencies.armor.includes(a)) data.proficiencies.armor.push(a);
+        if (!proficiencyCovered(data.proficiencies.armor, a)) data.proficiencies.armor.push(a);
       });
     }
     function addFeatureOrFold(name, desc, source) {
