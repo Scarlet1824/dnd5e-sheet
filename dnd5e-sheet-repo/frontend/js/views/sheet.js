@@ -1,6 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
+import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesAt, optionalReplaces } from "../data/optionalFeatures.js";
 import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
@@ -2386,7 +2387,9 @@ export async function renderSheet(id) {
     // Дополнительный боевой стиль gets its own picker below instead of
     // this plain descriptive card, whenever that picker is on offer.
     const archetypeFeatures = archetypeFeaturesRaw.filter((f) => !(levelUpState.fightingStyleChoice && f.name === SECOND_FIGHTING_STYLE_FEATURE_NAME));
-    const allFeatures = [...features, ...archetypeFeatures];
+    const optPicked = optionalFeaturesAt(cls.id, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
+    const allFeaturesBeforeOpt = [...features, ...archetypeFeatures];
+    const allFeatures = allFeaturesBeforeOpt.filter((f) => !optPicked.some((o) => optionalReplaces(o, f.name)));
     const missingSubclassForArchetypeLevel = !c.subclass && !levelUpState.subclassChoice && (cls.features?.[newLevel] || []).some((f) => f === ARCHETYPE_FEATURE_MARKER);
     // An explicit `N: []` in cls.features (see e.g. Воин 11/13/17/20) means
     // "this level really has nothing new for this class" -- distinct from a
@@ -2440,6 +2443,7 @@ export async function renderSheet(id) {
         }
         ${cls.scalingNotes && cls.scalingNotes[newLevel] && (allFeatures.length || levelUpState.asi || levelUpState.subclassChoice) ? `<p class="muted" style="margin-top:8px;">Растут уже имеющиеся: ${escapeHtml(cls.scalingNotes[newLevel])}</p>` : ""}
       </div>
+      ${optionalFeaturesPanelHtml(cls, newLevel, allFeaturesBeforeOpt)}
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
@@ -2479,6 +2483,33 @@ export async function renderSheet(id) {
   }
   // Одно умение в списке «Умения N уровня»: каждый абзац — с новой строки; для некоторых подклассов
   // варианты вынесены в выбор ниже (тотемы, ауры бури) или в таблицу (дикая магия).
+  // Опциональные умения Tasha's: выбираются галочкой (только с разрешения Мастера); если умение что-то заменяет —
+  // основное умение этого уровня не добавляется.
+  function optionalFeaturesPanelHtml(cls, newLevel, baseFeatures) {
+    const opts = optionalFeaturesAt(cls.id, newLevel);
+    if (!opts.length) return "";
+    const picked = levelUpState.optionalPicked || [];
+    return `
+      <div class="panel" style="margin-top:12px;">
+        <h4 style="margin-top:0;">Опциональные умения</h4>
+        <p class="muted" style="margin-top:0;">${escapeHtml(OPTIONAL_FEATURE_SOURCE)} — используются только с разрешения Мастера.</p>
+        ${opts
+          .map((o) => {
+            const repl = (baseFeatures || []).filter((f) => optionalReplaces(o, f.name)).map((f) => `«${f.name}»`);
+            return `
+          <label class="row" style="gap:10px;align-items:flex-start;margin-top:8px;">
+            <input type="checkbox" data-level-up-optional="${escapeHtml(o.name)}" ${picked.includes(o.name) ? "checked" : ""} style="margin-top:4px;" />
+            <div>
+              <strong>${escapeHtml(o.name)}</strong>
+              <div class="muted" style="font-style:italic;">${o.level}-й уровень, опциональное умение ${escapeHtml(CLASS_GENITIVE[cls.id] || "класса")}</div>
+              <p style="white-space:pre-line;margin:4px 0;">${escapeHtml(o.desc)}</p>
+              <p class="muted" style="margin:0;">${repl.length ? `Заменяет: ${escapeHtml(repl.join(", "))}.` : "Дополняет умения класса, ничего не заменяя."}</p>
+            </div>
+          </label>`;
+          })
+          .join("")}
+      </div>`;
+  }
   function levelUpFeatureHtml(f, cls) {
     let desc = f.desc || "";
     let extra = "";
@@ -2488,6 +2519,13 @@ export async function renderSheet(id) {
   }
   function wireLevelUpModal(modal) {
     wireHoverCardPortal(modal);
+    on(modal, "change", "[data-level-up-optional]", (e, el) => {
+      const n = el.dataset.levelUpOptional;
+      const cur = new Set(levelUpState.optionalPicked || []);
+      if (el.checked) cur.add(n); else cur.delete(n);
+      levelUpState.optionalPicked = [...cur];
+      refreshLevelUpModal();
+    });
     on(modal, "click", "[data-action=close-modal]", closeModal);
     on(modal, "click", "[data-action=level-up-roll-hp]", () => {
       const c = levelUpEligibleClasses()[levelUpState.classIndex];
@@ -2826,9 +2864,12 @@ export async function renderSheet(id) {
     // from the live level (see SECOND_WIND_FEATURE_NAME below) -- so simply
     // bumping c.level here is enough for those to "recalculate themselves";
     // nothing stored on the feature card itself needs updating.
+    const optApply = optionalFeaturesAt(cls.id, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
+    const optReplacedName = (n) => optApply.some((o) => optionalReplaces(o, n));
     levelUpFeaturesFor(cls, newLevel)
       .filter(
         (f) =>
+          !optReplacedName(f.name) &&
           !ASI_FEATURE_NAME.test(f.name) &&
           !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) &&
           f.name !== ARCHETYPE_FEATURE_MARKER &&
@@ -2852,7 +2893,7 @@ export async function renderSheet(id) {
       const sub = (cls.subclasses || []).find((s) => s.name === levelUpState.subclassChoice.name);
       if (sub) {
         c.subclass = sub.name;
-        applySubclassFeaturesAtLevel(cls, sub, newLevel, { withIntro: true });
+        applySubclassFeaturesAtLevel(cls, sub, newLevel, { withIntro: true, excludeNames: (sub.features || []).filter((sf) => sf.level === newLevel && optReplacedName(sf.name)).map((sf) => sf.name) });
         if (sub.slug === "totem-warrior" && levelUpState.subclassChoice.totem) {
           const opt = totemSpiritOptions(sub).find((o) => o.name === levelUpState.subclassChoice.totem);
           const card = (data.features || []).find((f) => f.name === "Тотемный дух" && f.source === subclassFeatureSource(cls, sub.name));
@@ -2909,7 +2950,10 @@ export async function renderSheet(id) {
           withIntro: false,
           // Дополнительный боевой стиль gets its own real style card below
           // instead of this plain descriptive one, when the picker fired.
-          excludeNames: levelUpState.fightingStyleChoice ? [SECOND_FIGHTING_STYLE_FEATURE_NAME] : [],
+          excludeNames: [
+            ...(levelUpState.fightingStyleChoice ? [SECOND_FIGHTING_STYLE_FEATURE_NAME] : []),
+            ...(sub.features || []).filter((sf) => sf.level === newLevel && optReplacedName(sf.name)).map((sf) => sf.name),
+          ],
         });
         if (levelUpState.fightingStyleChoice && levelUpState.fightingStyleChoice.name) {
           const opt = (cls.level1Choice.options || []).find((o) => o.name === levelUpState.fightingStyleChoice.name);
@@ -2919,6 +2963,11 @@ export async function renderSheet(id) {
         }
       }
     }
+    optApply.forEach((o) => {
+      const src = `${cls.name} — опциональное (${OPTIONAL_FEATURE_SOURCE})`;
+      if ((data.features || []).some((x) => x.name === o.name && x.source === src)) return;
+      data.features.push({ name: o.name, source: src, desc: o.desc, optional: true });
+    });
     applyLevelUpPicks(cls, newLevel, picksSnapshot);
     if (levelUpState.toolChoice && levelUpState.toolChoice.name) {
       addProficiencyValue(data.proficiencies.tools, levelUpState.toolChoice.name);
@@ -3000,6 +3049,7 @@ export async function renderSheet(id) {
     const newLevel = (c?.level || 1) + 1;
     levelUpState = {
       classIndex: 0,
+      optionalPicked: [],
       hpMethod: "average",
       rolledAmount: null,
       asi: cls && levelHasAsiChoice(cls, newLevel) ? freshAsiState() : null,
