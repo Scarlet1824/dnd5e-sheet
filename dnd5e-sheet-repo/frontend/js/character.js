@@ -229,11 +229,15 @@ function unarmoredFlatACBase(data) {
 // the other passive-bonus parsers above, so toggling data.bladesongActive
 // on a non-Bladesinger (impossible via the UI, but the field is plain
 // character data) has no effect.
+function bladesongActiveNow(data, armor) {
+  if (!data.bladesongActive) return false;
+  // Своя броня без указанной категории считается лёгкой (категорию там не задают).
+  if (armor && armor.category && armor.category !== "light") return false;
+  if (data.shieldEquipped) return false;
+  return (data.features || []).some((f) => /^Песнь клинка$/i.test(f.name || ""));
+}
 function bladesongACBonus(data, armor) {
-  if (!data.bladesongActive) return 0;
-  if (armor && armor.category !== "light") return 0;
-  if (data.shieldEquipped) return 0;
-  if (!(data.features || []).some((f) => /^Песнь клинка$/i.test(f.name || ""))) return 0;
+  if (!bladesongActiveNow(data, armor)) return 0;
   return Math.max(1, getAbilityMod(data, "int"));
 }
 
@@ -343,6 +347,8 @@ export function speedBonusSources(data) {
   if ((data.feats || []).some((f) => f.id === "mobile")) sources.push({ label: "Подвижный", amount: 10 });
   if ((data.feats || []).some((f) => f.id === "squat-nimbleness")) sources.push({ label: "Низкорослое проворство", amount: 5 });
   if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
+  // Песнь клинка: +10 футов к скорости, пока песнь активна (и нет средних/тяжёлых доспехов и щита).
+  if (bladesongActiveNow(data, resolveEquippedArmor(data))) sources.push({ label: "Песнь клинка", amount: 10 });
   // Варвар «Быстрота» (5 ур.): +10 футов, пока не надет тяжёлый доспех.
   if ((data.features || []).some((f) => /^Быстрота$/i.test(f.name || ""))) {
     const worn = resolveEquippedArmor(data);

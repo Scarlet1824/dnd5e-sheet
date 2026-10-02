@@ -12,17 +12,16 @@ import {
 import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
-import { proficiencyCovered, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml } from "../featChoices.js";
+import { proficiencyCovered, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featInfoHtml } from "../featChoices.js";
 
-// Следопыт's own 1st-level choices (Избранный враг / Природный следопыт):
+// Следопыт's own 1st-level choices (Избранный враг / Исследователь природы):
 // not a subclass and not shaped like Воин's level1Choice (a single named
 // option with one line of flavor each) -- Избранный враг needs a free-text
 // sub-pick when "Гуманоиды" is chosen (two specific species) plus an
 // optional language, so it gets its own step and its own state instead of
 // being forced through the generic level1Choice mechanism.
 const RANGER_FAVORED_ENEMY_TYPES = [
-  "Аберрации", "Зверолюды", "Звери", "Драконы", "Элементали", "Феи",
-  "Нежить", "Великаны", "Гуманоиды", "Монстры", "Растения", "Порождения",
+  "Аберрации", "Великаны", "Драконы", "Звери", "Исчадия", "Конструкты", "Монстры", "Небожители", "Нежить", "Растения", "Слизи", "Феи", "Элементали",
 ];
 const RANGER_FAVORED_TERRAIN_TYPES = [
   "Арктика", "Горы", "Леса", "Побережье", "Пустоши", "Пустыня", "Равнины", "Подземье", "Болота",
@@ -473,7 +472,7 @@ export function renderWizard() {
       </div>`;
   }
 
-  // Следопыт's 1st-level Избранный враг + Природный следопыт picks -- see
+  // Следопыт's 1st-level Избранный враг + Исследователь природы picks -- see
   // RANGER_FAVORED_ENEMY_TYPES/RANGER_FAVORED_TERRAIN_TYPES above for why
   // this doesn't reuse the generic level1Choice mechanism.
   function stepRangerFavored() {
@@ -523,7 +522,7 @@ export function renderWizard() {
         }
       </div>
       <div class="panel">
-        <h3 style="margin-top:0;">Природный следопыт (местность)</h3>
+        <h3 style="margin-top:0;">Исследователь природы (местность)</h3>
         <div class="grid cols-3">
           ${RANGER_FAVORED_TERRAIN_TYPES.map(
             (t) => `
@@ -1348,9 +1347,7 @@ export function renderWizard() {
           feat
             ? `
           <div class="card" style="margin-bottom:10px;border-color:var(--gold-dim);">
-            <h4 style="margin:0 0 4px;">${escapeHtml(feat.name)}</h4>
-            ${feat.prereq ? `<p class="muted" style="margin:0 0 4px;">Требование: ${escapeHtml(feat.prereq)}</p>` : ""}
-            <p style="margin:0 0 8px;">${escapeHtml(feat.desc)}</p>
+            ${featInfoHtml(feat)}
             ${
               feat.abilityIncrease && feat.abilityIncrease.choices.length > 1
                 ? `
@@ -2552,10 +2549,10 @@ export function renderWizard() {
             desc: (fullText || split.desc) + (lang ? `\n\nЯзык избранного врага: ${lang}.` : ""),
           });
           if (lang && !data.proficiencies.languages.includes(lang)) data.proficiencies.languages.push(lang);
-        } else if (cls.id === "ranger" && split.name === "Природный следопыт" && state.favoredTerrain) {
+        } else if (cls.id === "ranger" && split.name === "Исследователь природы" && state.favoredTerrain) {
           const fullText = cls.classFeatureText && cls.classFeatureText[split.name];
           data.features.push({
-            name: `Природный следопыт: ${state.favoredTerrain}`,
+            name: `Исследователь природы: ${state.favoredTerrain}`,
             source: cls.name,
             desc: fullText || split.desc,
           });

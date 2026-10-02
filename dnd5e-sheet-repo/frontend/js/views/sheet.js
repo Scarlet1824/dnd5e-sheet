@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -11,7 +11,7 @@ import {
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
-import { featAlreadyTaken, FEAT_TAKEN_MESSAGE, proficiencyCovered, dedupeProficiencyCategories, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
+import { featAlreadyTaken, FEAT_TAKEN_MESSAGE, proficiencyCovered, dedupeProficiencyCategories, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featInfoHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
 
 // showRollResult() (diceModal.js) fires this on `document` after every roll
 // anywhere in the app, so the inline roll-log on the sheet's main tab can
@@ -443,11 +443,42 @@ export async function renderSheet(id) {
     if (changed) doSave();
   })();
 
-  // Ranger's level-1 features ("Избранный враг"/"Природный следопыт") used to
+  // Ranger's level-1 features ("Избранный враг"/"Исследователь природы") used to
   // have no description at all (the raw features[1] entry had no parenthetical
   // to split text out of) -- fills in the now-added classFeatureText, but only
   // when the card is still blank, never overwriting anything a player wrote.
-  const EMPTY_DESC_FEATURE_FIXES = ["Избранный враг", "Природный следопыт"];
+  // Раунд 62: заговоры, которые подкласс выдаёт автоматически (Школа Иллюзии — малая иллюзия,
+  // Круг спор — леденящее прикосновение, Круг звёзд — указание), раньше не добавлялись в список.
+  (function migrateSubclassFixedCantrips() {
+    let changed = false;
+    (data.classes || []).forEach((c) => {
+      const cls = getClass(c.id);
+      const sub = cls && (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(c.subclass || "").toLowerCase());
+      if (!sub) return;
+      (sub.features || []).forEach((sf) => {
+        const spec = SUBCLASS_BONUS_CANTRIPS[`${sub.slug}|${sf.name}`];
+        if (!spec || !spec.fixed || !(spec.noPick || sub.slug === "illusion") || (Number(c.level) || 1) < sf.level) return;
+        if (!data.spellcasting) return;
+        if (!Array.isArray(data.spellcasting.cantrips)) data.spellcasting.cantrips = [];
+        if (!data.spellcasting.cantrips.includes(spec.fixed)) { data.spellcasting.cantrips.push(spec.fixed); changed = true; }
+      });
+    });
+    if (changed) doSave();
+  })();
+  // Раунд 62: «Природный следопыт» переименован в «Исследователь природы» —
+  // переименовываем уже созданные карточки (и «Природный следопыт: Горы» и т.п.).
+  (function migrateNaturalExplorerName() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (/^Природный следопыт(?![а-яё])/i.test(f.name || "")) {
+        f.name = f.name.replace(/^Природный следопыт/i, "Исследователь природы");
+        if (f.desc) f.desc = f.desc.replace(/Природного следопыта/g, "Исследователя природы");
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+  const EMPTY_DESC_FEATURE_FIXES = ["Избранный враг", "Исследователь природы"];
   (function migrateEmptyRangerFeatureText() {
     let changed = false;
     (data.features || []).forEach((f) => {
@@ -1126,7 +1157,7 @@ export async function renderSheet(id) {
   // never matched ANYTHING, ever (not even the exact string "путь"). Use an
   // explicit "next char isn't a letter" lookahead instead everywhere a
   // Cyrillic word needs a real boundary.
-  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь(?![a-zа-яё])|традиция|клятва|колледж/i;
+  const SUBCLASS_CHOICE_FEATURE_NAME = /архетип|^путь(?![a-zа-яё])|традиция|клятва|колледж|^круг друидов$/i;
   // "Умение архетипа" (Воин 7-й/10-й уровень) is a placeholder marker in
   // cls.features -- the ACTUAL feature at that level comes from whichever
   // subclass the character already picked (see subclassFeaturesAtLevel()),
@@ -1407,6 +1438,17 @@ export async function renderSheet(id) {
     if (!lines.length) return "";
     return `<div class="panel" style="margin:10px 0;border-color:var(--gold-dim);"><h4 style="margin-top:0;">Ячейки заклинаний</h4>${lines.map((l) => `<p style="margin:2px 0;">${l}</p>`).join("")}</div>`;
   }
+  // Подготавливающие заклинатели без книги (Друид/Жрец/Изобретатель): сколько заклинаний можно подготовить.
+  function levelUpPrepNoticeHtml(cls, c, newLevel) {
+    if (!cls || !cls.spellcasting || !cls.spellcasting.preparedFormula) return "";
+    const mod = getAbilityMod(data, (data.spellcasting && data.spellcasting.ability) || cls.spellcasting.ability);
+    const calc = (lvl) => Math.max(1, mod + (cls.spellcasting.preparedFormula === "mod+halflevel" ? Math.floor(lvl / 2) : lvl));
+    const before = calc(c.level || 1), after = calc(newLevel);
+    const maxCircle = Math.min(9, Math.ceil(newLevel / 2));
+    return `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Подготовленные заклинания</h4>
+      <p style="margin:2px 0;">Можно подготовить: ${before} → <strong class="num">${after}</strong> (модификатор ${formatModifier(mod)} + уровень ${cls.name.toLowerCase()}).</p>
+      <p class="muted" style="margin:2px 0;font-size:0.82rem;">Заклинания выбираются из полного списка класса до ${maxCircle}-го круга — после повышения откройте вкладку «Заклинания» → «Подготовить заклинания».</p></div>`;
+  }
   // Recomputes data.spellcasting.slots from the character's current combined
   // caster level, called right after a spellcasting class's level actually
   // changes (see applyLevelUp below).
@@ -1612,6 +1654,85 @@ export async function renderSheet(id) {
       }
     });
     return out.map((o) => ({ name: o.name, minLevel: o.minLevel, text: o.paras.join("\n\n") }));
+  }
+  // ---- Заговор/местность от умения подкласса (Раунд 62) -------------------
+  // Школа Иллюзии («Улучшенная малая иллюзия»), Круг земли («Дополнительный заговор» и
+  // местность для заклинаний круга), Круг спор / Круг звёзд (фиксированный заговор).
+  function resolveBonusChoiceState(cls, subName, newLevel) {
+    if (!cls || !subName) return null;
+    const sub = (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(subName).toLowerCase());
+    if (!sub) return null;
+    const feats = (sub.features || []).filter((sf) => sf.name && sf.level === newLevel);
+    const out = {};
+    const bf = feats.find((f) => SUBCLASS_BONUS_CANTRIPS[`${sub.slug}|${f.name}`]);
+    if (bf) {
+      const spec = SUBCLASS_BONUS_CANTRIPS[`${sub.slug}|${bf.name}`];
+      const known = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
+      const fixedUnknown = spec.fixed && !known.has(spec.fixed);
+      const needPick = !spec.noPick && (!spec.fixed || !fixedUnknown);
+      if (fixedUnknown || needPick) out.cantrip = { featureName: bf.name, fixed: fixedUnknown ? spec.fixed : "", list: spec.list, needPick, picked: "" };
+    }
+    if (sub.terrainSpells && !data.landTerrain && feats.some((f) => f.name === "Заклинания круга")) out.terrain = { picked: "" };
+    return out.cantrip || out.terrain ? out : null;
+  }
+  function bonusChoicePanelHtml() {
+    const bc = levelUpState.bonusChoice;
+    let html = "";
+    if (bc.cantrip) {
+      const cc = bc.cantrip;
+      const known = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
+      const fixedSp = cc.fixed ? SPELLS.find((x) => x.id === cc.fixed) : null;
+      const options = SPELLS.filter((x) => x.level === 0 && x.classes.includes(cc.list) && !known.has(x.id) && x.id !== cc.fixed).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+      html += `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Заговор от умения «${escapeHtml(cc.featureName)}»</h4>
+        ${fixedSp ? `<p style="margin:2px 0;">Вы узнаёте заговор ${spellHoverNameHtml(fixedSp)}. Он не учитывается в общем числе известных заговоров.</p>` : ""}
+        ${cc.needPick ? `<p class="muted" style="font-size:0.82rem;margin:4px 0;">Выберите заговор из списка класса — он не учитывается в общем числе известных заговоров.</p>
+        <div class="grid cols-2">${options.map((x) => `<label class="row" style="gap:6px;"><input type="radio" name="bonus-cantrip" data-level-up-bonus-cantrip="${x.id}" ${cc.picked === x.id ? "checked" : ""} />${spellHoverNameHtml(x)}</label>`).join("")}</div>` : ""}
+      </div>`;
+    }
+    if (bc.terrain) {
+      const cls = getClass("druid");
+      const sub = cls && cls.subclasses.find((x) => x.slug === "land");
+      html += `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Местность Круга земли</h4>
+        <p class="muted" style="font-size:0.82rem;margin:2px 0 6px;">Выбранная местность определяет заклинания круга: они всегда подготовлены и не учитываются в лимите.</p>
+        <select data-level-up-terrain><option value="">Выберите местность…</option>${DRUID_LAND_TERRAINS.map((t) => `<option value="${escapeHtml(t)}" ${bc.terrain.picked === t ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}</select>
+        ${bc.terrain.picked && sub ? `<p style="margin:8px 0 0;font-size:0.85rem;">${sub.terrainSpells[bc.terrain.picked].map((t) => `<strong>${t.level}-й ур.:</strong> ${t.spells.map((id) => (SPELLS.find((x) => x.id === id) || {}).name || id).join(", ")}`).join("<br>")}</p>` : ""}
+      </div>`;
+    }
+    return html;
+  }
+  function bonusChoiceIncomplete() {
+    const bc = levelUpState.bonusChoice;
+    return !!(bc && ((bc.cantrip && bc.cantrip.needPick && !bc.cantrip.picked) || (bc.terrain && !bc.terrain.picked)));
+  }
+  function applyBonusChoice(cls) {
+    const bc = levelUpState.bonusChoice;
+    if (!bc) return;
+    if (bc.cantrip) {
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!Array.isArray(data.spellcasting.cantrips)) data.spellcasting.cantrips = [];
+      if (!data.spellcasting.ability && cls.spellcasting) data.spellcasting.ability = cls.spellcasting.ability;
+      const id = bc.cantrip.fixed || bc.cantrip.picked;
+      if (id && !data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
+    }
+    if (bc.terrain && bc.terrain.picked) {
+      data.landTerrain = bc.terrain.picked;
+      applyLandTerrainCard();
+    }
+  }
+  // Карточка «Заклинания круга» Круга земли получает название и список выбранной местности.
+  function applyLandTerrainCard() {
+    const cls = getClass("druid");
+    const sub = cls && cls.subclasses.find((x) => x.slug === "land");
+    if (!sub || !data.landTerrain || !sub.terrainSpells[data.landTerrain]) return;
+    const source = subclassFeatureSource(cls, sub.name);
+    const card = (data.features || []).find((f) => f.source === source && /^Заклинания круга(?::|$)/.test(f.name));
+    if (!card) return;
+    const spName = (id) => (SPELLS.find((x) => x.id === id) || {}).name || id;
+    card.name = `Заклинания круга: ${data.landTerrain}`;
+    card.desc = [
+      "Заклинания круга всегда подготовлены и не учитываются в лимите подготовленных заклинаний. Если заклинания нет в списке друида, оно становится для вас заклинанием друида.",
+      ...sub.terrainSpells[data.landTerrain].map((t) => `${t.level}-й уровень друида: ${t.spells.map(spName).join(", ")}`),
+    ].join("\n\n");
   }
   function multiPickOptionsFor(sub) {
     const spec = SUBCLASS_MULTI_PICKS[sub && sub.slug];
@@ -1831,7 +1952,7 @@ export async function renderSheet(id) {
           </select>
           ${
             feat
-              ? `${featAlreadyTaken(feat, data) ? `<p style="margin:8px 0 0;color:var(--danger, #e57373);font-weight:600;">${FEAT_TAKEN_MESSAGE}</p>` : ""}<p style="margin:8px 0 0;white-space:pre-line;">${escapeHtml(feat.desc)}</p>
+              ? `<div class="card" style="margin:8px 0 0;border-color:var(--gold-dim);">${featInfoHtml(feat, { takenHtml: featAlreadyTaken(feat, data) ? `<p style="margin:0 0 6px;color:var(--danger, #e57373);font-weight:600;">${FEAT_TAKEN_MESSAGE}</p>` : "" })}
             ${
               feat.abilityIncrease && feat.abilityIncrease.choices.length > 1
                 ? `<div class="row" style="align-items:center;margin-top:6px;">
@@ -1850,7 +1971,7 @@ export async function renderSheet(id) {
               </div>`
                 : ""
             }
-            ${featExtrasHtml(feat, asi.sel, data)}`
+            ${featExtrasHtml(feat, asi.sel, data)}</div>`
               : ""
           }
         </div>`
@@ -2020,7 +2141,7 @@ export async function renderSheet(id) {
   // тактика / Множественная атака / Превосходная защита охотника) and the
   // Следопыт's recurring enemy/terrain choices (levels 6, 10, 14).
   const OPTION_PICK_FEATURES = ["Добыча охотника", "Оборонительная тактика", "Множественная атака", "Превосходная защита охотника"];
-  const RANGER_ENEMY_TYPES = ["Аберрации", "Зверолюды", "Звери", "Драконы", "Элементали", "Феи", "Нежить", "Великаны", "Гуманоиды", "Монстры", "Растения", "Порождения"];
+  const RANGER_ENEMY_TYPES = ["Аберрации", "Великаны", "Драконы", "Звери", "Исчадия", "Конструкты", "Монстры", "Небожители", "Нежить", "Растения", "Слизи", "Феи", "Элементали"];
   const RANGER_TERRAIN_TYPES = ["Арктика", "Горы", "Леса", "Побережье", "Пустоши", "Пустыня", "Равнины", "Подземье", "Болота"];
   function featureOptionsOf(sub, featureName) {
     const f = (sub.features || []).find((x) => x.name === featureName);
@@ -2097,7 +2218,7 @@ export async function renderSheet(id) {
         const card = (data.features || []).find((f) => f.name === p.featureName && f.source === subclassFeatureSource(cls, p.sub.name));
         if (opt && card) { card.name = `${p.featureName}: ${opt.name}`; card.desc = `${opt.name}. ${opt.text}`; }
       } else if (p.type === "terrain") {
-        data.features.push({ name: `Более опытный следопыт: ${v.value}`, source: cls.name, desc: `Вы выбрали ещё один тип избранной местности: ${v.value}. В избранной местности вы получаете все преимущества «Природного следопыта».` });
+        data.features.push({ name: `Более опытный следопыт: ${v.value}`, source: cls.name, desc: `Вы выбрали ещё один тип избранной местности: ${v.value}. В избранной местности вы получаете все преимущества «Исследователя природы».` });
       } else {
         const label = v.value === "Гуманоиды" ? `Гуманоиды (${v.h1.trim()}, ${v.h2.trim()})` : v.value;
         const lang = v.lang === "custom" ? v.langCustom.trim() : v.lang;
@@ -2195,8 +2316,10 @@ export async function renderSheet(id) {
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
       ${levelUpState.multiPick ? multiPickPanelHtml() : ""}
+      ${levelUpState.bonusChoice ? bonusChoicePanelHtml() : ""}
       ${levelUpState.subLanguageChoice ? subLanguageChoicePanelHtml() : ""}
       ${levelUpSlotNoticeHtml(cls, c, newLevel)}
+      ${levelUpPrepNoticeHtml(cls, c, newLevel)}
       ${levelUpState.spellbookChoice ? spellbookChoicePanelHtml(cls, newLevel) : ""}
       ${levelUpState.knownCantripChoice ? knownCantripChoicePanelHtml(cls, newLevel, c) : ""}
       ${levelUpState.knownSpellChoice ? knownSpellChoicePanelHtml(cls, newLevel, c) : ""}
@@ -2213,6 +2336,7 @@ export async function renderSheet(id) {
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
           multiPickIncomplete() ||
+          bonusChoiceIncomplete() ||
           subLanguageChoiceIncomplete() ||
           spellbookChoiceIncomplete() ||
           knownSpellChoiceIncomplete(cls, newLevel, c) ||
@@ -2252,6 +2376,7 @@ export async function renderSheet(id) {
       levelUpState.toolChoice = ccls && cc.subclass && levelHasCraftToolChoice(ccls, cc.subclass, newLevel) ? freshToolChoiceState(ccls, cc.subclass, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.multiPick = resolveMultiPickState(ccls, cc && cc.subclass, newLevel);
+      levelUpState.bonusChoice = resolveBonusChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(ccls, cc && cc.subclass, newLevel);
       levelUpState.spellbookChoice = ccls && levelHasSpellbookGrowth(ccls, newLevel) ? freshSpellbookChoiceState() : null;
       levelUpState.knownSpellChoice = ccls && knownSpellGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownSpellChoiceState() : null;
@@ -2270,6 +2395,7 @@ export async function renderSheet(id) {
       levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState(cls, levelUpState.subclassChoice.name, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.multiPick = resolveMultiPickState(cls, levelUpState.subclassChoice.name, newLevel);
+      levelUpState.bonusChoice = resolveBonusChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       refreshLevelUpModal();
     });
@@ -2310,6 +2436,14 @@ export async function renderSheet(id) {
       const id = el.dataset.levelUpMulti;
       if (el.checked) { if (!mp.ids.includes(id) && mp.ids.length < mp.count) mp.ids.push(id); }
       else mp.ids = mp.ids.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-bonus-cantrip]", (e, el) => {
+      levelUpState.bonusChoice.cantrip.picked = el.dataset.levelUpBonusCantrip;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-terrain]", (e, el) => {
+      levelUpState.bonusChoice.terrain.picked = el.value;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-sub-cantrip]", (e, el) => {
@@ -2680,6 +2814,7 @@ export async function renderSheet(id) {
         data.features.push({ name: cardName, source, desc: opt.text });
       });
     }
+    applyBonusChoice(cls);
     if (levelUpState.subLanguageChoice) {
       levelUpState.subLanguageChoice.picked.filter(Boolean).forEach((lang) => {
         addProficiencyValue(data.proficiencies.languages, lang);
@@ -2730,6 +2865,7 @@ export async function renderSheet(id) {
       toolChoice: cls && c.subclass && levelHasCraftToolChoice(cls, c.subclass, newLevel) ? freshToolChoiceState(cls, c.subclass, newLevel) : null,
       subSkillChoice: resolveSubSkillChoiceState(cls, c && c.subclass, newLevel),
       multiPick: resolveMultiPickState(cls, c && c.subclass, newLevel),
+      bonusChoice: resolveBonusChoiceState(cls, c && c.subclass, newLevel),
       subLanguageChoice: resolveSubLanguageChoiceState(cls, c && c.subclass, newLevel),
       spellbookChoice: cls && levelHasSpellbookGrowth(cls, newLevel) ? freshSpellbookChoiceState() : null,
       knownSpellChoice: cls && knownSpellGrowthCount(cls, newLevel, c) > 0 ? freshKnownSpellChoiceState() : null,
@@ -4288,6 +4424,13 @@ export async function renderSheet(id) {
     const showPrepUI = !!(cls && PREP_UI_CLASSES.has(cls.id));
     const cantripSpells = SPELLS.filter((sp) => (sc.cantrips || []).includes(sp.id));
 
+    // Круг земли (друид 3+ ур.): местность определяет заклинания круга
+    const landEntry = (data.classes || []).find((x) => x.id === "druid" && /земл/i.test(x.subclass || "") && (Number(x.level) || 1) >= 3);
+    const terrainHtml = landEntry
+      ? `<div class="panel"><div class="row" style="gap:10px;align-items:center;flex-wrap:wrap;"><strong>Местность Круга земли:</strong>
+          <select data-land-terrain style="flex:none;width:auto;"><option value="">— не выбрана —</option>${DRUID_LAND_TERRAINS.map((t) => `<option value="${escapeHtml(t)}" ${data.landTerrain === t ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}</select>
+          <span class="muted" style="font-size:0.82rem;">Определяет заклинания круга (всегда подготовлены).</span></div></div>`
+      : "";
     let listSectionHtml;
     if (showPrepUI) {
       const isSpellbook = !cls.spellcasting.preparedFormula;
@@ -4309,7 +4452,7 @@ export async function renderSheet(id) {
         ...grantedExtra.filter((sp) => !baseShown.some((b) => b.id === sp.id)),
       ].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
       const browseKnownIds = new Set([...(sc.cantrips || []), ...(sc.known || [])]);
-      listSectionHtml = `
+      listSectionHtml = `${terrainHtml}
         <div class="panel">
           <div class="row between" style="align-items:center;flex-wrap:wrap;gap:8px;">
             <h3 style="margin:0;">Известные / подготовленные заклинания</h3>
@@ -4521,15 +4664,20 @@ export async function renderSheet(id) {
   // Заклинания клятвы паладина (и любого другого не-«подготавливающего» класса,
   // у подкласса которого есть domainSpells): всегда подготовлены, в лимит не
   // входят, убрать нельзя.
+  // Уровни заклинаний подкласса: domainSpells, а у Круга земли — по выбранной местности.
+  function subclassGrantedTiers(sub) {
+    if (sub && sub.terrainSpells) return (data.landTerrain && sub.terrainSpells[data.landTerrain]) || [];
+    return (sub && sub.domainSpells) || [];
+  }
   function oathSpellIdSet() {
     const ids = new Set();
     (data.classes || []).forEach((entry) => {
       const cls = getClass(entry.id);
       if (!cls || PREP_UI_CLASSES.has(cls.id) || !entry.subclass) return;
       const sub = (cls.subclasses || []).find((x) => x.name.toLowerCase() === entry.subclass.toLowerCase());
-      if (!sub || !sub.domainSpells) return;
+      if (!sub) return;
       const lvl = Number(entry.level) || 1;
-      sub.domainSpells.forEach((t) => { if (t.level <= lvl) t.spells.forEach((id) => ids.add(id)); });
+      subclassGrantedTiers(sub).forEach((t) => { if (t.level <= lvl) t.spells.forEach((id) => ids.add(id)); });
     });
     return ids;
   }
@@ -4615,10 +4763,10 @@ export async function renderSheet(id) {
     const entry = (data.classes || []).find((c) => c.id === cls.id);
     if (!entry || !entry.subclass) return [];
     const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === entry.subclass.toLowerCase());
-    if (!sub || !sub.domainSpells) return [];
+    if (!sub) return [];
     const lvl = Number(entry.level) || 1;
     const ids = new Set();
-    sub.domainSpells.forEach((tier) => {
+    subclassGrantedTiers(sub).forEach((tier) => {
       if (tier.level <= lvl) tier.spells.forEach((id) => ids.add(id));
     });
     return [...ids].filter((id) => SPELLS.some((sp) => sp.id === id));
@@ -5188,11 +5336,7 @@ export async function renderSheet(id) {
           preview
             ? `
           <div class="card" style="margin-bottom:10px;border-color:var(--gold-dim);">
-            <h4 style="margin:0 0 4px;">${escapeHtml(preview.name)}${preview.nameEn ? ` <span class="muted" style="font-weight:normal;font-size:0.8rem;">[${escapeHtml(preview.nameEn)}]</span>` : ""}</h4>
-            <p class="muted" style="margin:0 0 4px;font-size:0.8rem;">${escapeHtml(preview.source || "Книга игрока")}</p>
-            ${featAlreadyTaken(preview, data) ? `<p style="margin:0 0 6px;color:var(--danger, #e57373);font-weight:600;">${FEAT_TAKEN_MESSAGE}</p>` : ""}
-            ${preview.prereq ? `<p class="muted" style="margin:0 0 4px;">Требование: ${escapeHtml(preview.prereq)}</p>` : ""}
-            <p style="margin:0 0 8px;white-space:pre-line;">${escapeHtml(preview.desc)}</p>
+            ${featInfoHtml(preview, { takenHtml: featAlreadyTaken(preview, data) ? `<p style="margin:0 0 6px;color:var(--danger, #e57373);font-weight:600;">${FEAT_TAKEN_MESSAGE}</p>` : "" })}
             ${
               preview.abilityIncrease && preview.abilityIncrease.choices.length > 1
                 ? `
@@ -5331,7 +5475,7 @@ export async function renderSheet(id) {
               <h4 style="margin:0;">${escapeHtml(f.name)}</h4>
               <button class="small danger" data-action="remove-feat" data-index="${i}">✕</button>
             </div>
-            ${(() => { const src = (FEATS.find((x) => x.id === f.id) || {}).source; return src && src !== "Книга игрока" ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">${escapeHtml(src)}</p>` : ""; })()}
+            ${(() => { const src = (FEATS.find((x) => x.id === f.id) || {}).source || "Книга игрока"; return `<p class="muted" style="margin:2px 0;font-size:0.8rem;">${escapeHtml(src)}</p>`; })()}
             ${f.prereq ? `<p class="muted" style="margin:2px 0;">Требование: ${escapeHtml(f.prereq)}</p>` : ""}
             <p style="white-space:pre-line;">${escapeHtml(f.desc || "")}</p>
             ${f.grantedAbility ? `<p class="muted" style="margin:2px 0;">Характеристика: +${f.grantedAmount} ${ABILITIES.find((a) => a.id === f.grantedAbility)?.label || f.grantedAbility}</p>` : ""}
@@ -5493,6 +5637,13 @@ export async function renderSheet(id) {
                   const isTentacle = /^Щупальце из глубин$/i.test(f.name || "");
                   const isDreadLord = /^Жуткий лорд$/i.test(f.name || "");
                   const isSurge = /^(Всплеск дикости|Нестабильная отдача)$/i.test(f.name || "");
+                  // Школа Прорицания «Знамение»: 2к20 (3к20 с «Великого знамения»); значения хранятся на карточке до следующего броска.
+                  const isPortent = /^Знамение$/i.test(f.name || "");
+                  const portentCount = (data.features || []).some((x) => /^Великое знамение$/i.test(x.name || "")) ? 3 : 2;
+                  const portentRolls = isPortent && Array.isArray(data.portentRolls) ? data.portentRolls : [];
+                  const portentHtml = isPortent
+                    ? `<button class="small feature-card-roll" data-action="roll-portent">🎲 Бросить знамения (${portentCount}к20)</button>${portentRolls.map((r, ri) => `<button type="button" class="small ${r.used ? "" : "primary"}" data-action="toggle-portent" data-portent="${ri}" title="${r.used ? "Использовано — нажмите, чтобы вернуть" : "Нажмите, когда значение использовано"}" style="min-width:42px;font-weight:700;${r.used ? "text-decoration:line-through;opacity:0.55;" : ""}">${r.v}</button>`).join("")}`
+                    : "";
                   const attackBonus = isTentacle || isDreadLord ? spellAttackBonus(data) : null;
                   const isSuperiority = BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "");
                   // Чемпион «Уцелевший»: passive at-the-start-of-your-turn
@@ -5524,7 +5675,7 @@ export async function renderSheet(id) {
                   // directly (see the matching comment there).
                   const isBladesong = /^Песнь клинка$/i.test(f.name || "");
                   const bladesongActive = isBladesong && !!data.bladesongActive;
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -5550,7 +5701,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -6833,6 +6984,25 @@ export async function renderSheet(id) {
     const amount = 5 + getAbilityMod(data, "con");
     const max = effectiveMaxHp(data);
     data.hp.current = Math.min(max, (Number(data.hp.current) || 0) + amount);
+    doSave();
+    render();
+  });
+  on(app, "change", "[data-land-terrain]", (e, el) => {
+    data.landTerrain = el.value;
+    applyLandTerrainCard();
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=roll-portent]", () => {
+    const n = (data.features || []).some((x) => /^Великое знамение$/i.test(x.name || "")) ? 3 : 2;
+    data.portentRolls = rollDice(n, 20).map((v) => ({ v, used: false }));
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=toggle-portent]", (e, el) => {
+    const r = (data.portentRolls || [])[Number(el.dataset.portent)];
+    if (!r) return;
+    r.used = !r.used;
     doSave();
     render();
   });

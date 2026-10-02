@@ -173,6 +173,19 @@ export function applyFeatExtras(data, feat, entry, sel) {
 export function featHasPicks(f) { return !!(f && f.picks && f.picks.length); }
 export function featHasNew(f) { return !!(f && ((f.picks && f.picks.length) || f.grant || (f.cards && f.cards.length))); }
 
+// Единое оформление шапки черты (название, источник, требование, описание) —
+// одинаково на вкладке «Черты», в мастере создания и в окне повышения уровня.
+export function featInfoHtml(feat, opts = {}) {
+  if (!feat) return "";
+  const src = feat.source || "Книга игрока";
+  return `
+    <h4 style="margin:0 0 4px;">${escapeHtml(feat.name)}${feat.nameEn ? ` <span class="muted" style="font-weight:normal;font-size:0.8rem;">[${escapeHtml(feat.nameEn)}]</span>` : ""}</h4>
+    <p class="muted" style="margin:0 0 4px;font-size:0.8rem;">${escapeHtml(src)}</p>
+    ${opts.takenHtml || ""}
+    ${feat.prereq ? `<p class="muted" style="margin:0 0 4px;">Требование: ${escapeHtml(feat.prereq)}</p>` : ""}
+    <p style="margin:0 0 8px;white-space:pre-line;">${escapeHtml(feat.desc || "")}</p>`;
+}
+
 // <optgroup> по источникам для всех выпадающих списков черт.
 export function featSelectOptionsHtml(selectedId, filterFn) {
   const groups = new Map();
