@@ -451,7 +451,7 @@ textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; mi
 .beast-roll-row { display: flex; gap: 6px; flex-wrap: wrap; margin: -2px 0 6px; }
 .beast-roll-row button { padding: 2px 8px; font-size: 0.8rem; }
 .beast-card .spell-card-props { grid-template-columns: 1fr 1fr; gap: 8px 12px; }
-.beast-card .spell-card-prop { font-size: 1.15rem; line-height: 1.2; font-weight: 700; color: var(--text); }
+.beast-card .spell-card-prop { font-size: 0.82rem; line-height: 1.2; font-weight: 700; color: var(--text); }
 .beast-card .spell-card-prop .prop-label { font-size: 0.8rem; font-weight: 600; }
 .beast-card .beast-abil { grid-template-columns: repeat(3, 1fr); font-size: 0.9rem; gap: 5px; }
 .beast-card .beast-abil strong { font-size: 1.3rem; color: var(--gold-bright); line-height: 1.1; }

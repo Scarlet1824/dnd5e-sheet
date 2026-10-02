@@ -86,7 +86,7 @@ export function showRollResult({ label, detail, total, isCrit, isFumble, breakdo
 // when a condition already imposes disadvantage on this roll: the plain roll
 // becomes a disadvantage roll, and picking advantage instead just cancels the
 // two out into a normal roll (PHB: advantage and disadvantage cancel).
-export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null, forcedDisadvantage = "" }) {
+export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null, forcedDisadvantage = "", bonusOptions = [] }) {
   const showDieOption = superiorityDie && superiorityDie.available > 0;
   const html = `
     <h3>${escapeHtml(label)}</h3>
@@ -107,6 +107,7 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
     </label>`
         : ""
     }
+    ${(bonusOptions || []).map((o, i) => `<label class="row" style="gap:8px;align-items:center;margin-bottom:10px;"><input type="checkbox" data-bonus-option="${i}" /><span>${escapeHtml(o.label)}</span></label>`).join("")}
     ${forcedDisadvantage ? `<p style="color:var(--red);margin:0 0 10px;">Помеха: ${escapeHtml(forcedDisadvantage)}</p>` : ""}
     <div class="col" style="gap:8px;">
       ${
@@ -126,7 +127,9 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
     const useDie = showDieOption && modal.querySelector("[data-superiority-die]").checked;
     const usePower = !!(powerAttack && modal.querySelector("[data-power-attack]").checked);
     if (powerAttack) powerAttack.onToggle(usePower);
-    const effectiveModifier = modifier - (usePower ? powerAttack.penalty : 0);
+    let extraBonus = 0;
+    (bonusOptions || []).forEach((o, i) => { const cb = modal.querySelector(`[data-bonus-option="${i}"]`); if (cb && cb.checked) extraBonus += o.bonus; });
+    const effectiveModifier = modifier - (usePower ? powerAttack.penalty : 0) + extraBonus;
     const r = rollD20({ modifier: effectiveModifier, mode, label, critMin });
     closeModal();
     let detail =

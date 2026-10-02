@@ -116,6 +116,73 @@ export function renderWizard() {
   function canAdvance() {
     const steps = relevantSteps();
     const stepId = steps[state.step] && steps[state.step].id;
+    // Round 58: "Далее" stays locked until EVERYTHING selectable on the step
+    // has been chosen (not just the picks that used to be guarded below).
+    const filled = (v) => v !== undefined && v !== null && String(v).trim() !== "";
+    if (stepId === "race") {
+      const r = RACES.find((x) => x.id === state.raceId);
+      if (!r) return false;
+      if (r.subraces && r.subraces.length && !state.subraceId) return false;
+    }
+    if (stepId === "class") {
+      const c = CLASSES.find((x) => x.id === state.classId);
+      if (!c) return false;
+      if (c.level1Choice && state.level1ChoiceIndex == null) return false;
+    }
+    if (stepId === "equipment" && !state.classId) return false;
+    if (stepId === "background") {
+      if (!state.backgroundId) return false;
+      if (state.backgroundId === "custom") {
+        if (!filled(state.customBackground.name)) return false;
+      } else {
+        const bg = getSelectedBackground();
+        for (let i = 0; bg && i < (bg.languages || 0); i++) {
+          const v = state.chosenBgLanguages[i];
+          if (!filled(v) || (v === "custom" && !filled(state.bgLanguageCustom[i]))) return false;
+        }
+        for (const i of backgroundToolChoiceIndices(bg)) {
+          const v = state.chosenBgTools[i];
+          if (!filled(v) || (v === "custom" && !filled(state.bgToolCustom[i]))) return false;
+        }
+      }
+    }
+    if (stepId === "abilities") {
+      if (state.abilityMethod === "standard" && ABILITIES.some((a) => !state.standardAssignment[a.id])) return false;
+      if (state.abilityMethod === "diceroll" && (!state.diceRolls.length || ABILITIES.some((a) => state.diceAssignment[a.id] === undefined))) return false;
+    }
+    if (stepId === "skills") {
+      const cls0 = CLASSES.find((c) => c.id === state.classId);
+      if (cls0) {
+        const bg0 = getSelectedBackground();
+        const taken = new Set([...(bg0 ? bg0.skillProficiencies : []), ...raceGrantedSkillIds(), ...classGrantedSkillIds()]);
+        const pool = cls0.skillChoice.from.filter((id) => !taken.has(id));
+        if (state.chosenSkills.length < Math.min(cls0.skillChoice.count, pool.length)) return false;
+        const exp = EXPERTISE_COUNT[cls0.id] || 0;
+        if (exp && state.chosenExpertise.length < exp) return false;
+      }
+      const rl = raceLanguageChoiceGrant();
+      for (let i = 0; rl && i < rl.count; i++) {
+        const v = state.chosenRaceLanguages[i];
+        if (!filled(v) || (v === "custom" && !filled(state.raceLanguageCustom[i]))) return false;
+      }
+      const sl = chosenLevel1SubclassLanguageGrant();
+      for (let i = 0; sl && i < sl.count; i++) {
+        const v = state.chosenSubclassLanguages[i];
+        if (!filled(v) || (v === "custom" && !filled(state.subclassLanguageCustom[i]))) return false;
+      }
+    }
+    if (stepId === "spells") {
+      const cls1 = CLASSES.find((c) => c.id === state.classId);
+      if (cls1 && cls1.spellcasting) {
+        const expanded = new Set((chosenLevel1Subclass(cls1) || {}).expandedSpells || []);
+        const cantripPool = SPELLS.filter((s) => s.level === 0 && s.classes.includes(cls1.id)).length;
+        if (state.chosenCantrips.length < Math.min(cls1.spellcasting.cantripsKnown || 0, cantripPool)) return false;
+        if (!skipsLevel1SpellChoice(cls1)) {
+          const pool1 = SPELLS.filter((s) => s.level === 1 && (s.classes.includes(cls1.id) || expanded.has(s.id))).length;
+          if (state.chosenSpells.length < Math.min(level1SpellLimit(cls1), pool1)) return false;
+        }
+      }
+    }
     if (stepId === "abilities") {
       const race = RACES.find((r) => r.id === state.raceId);
       if (race && state.edition === "2014") {
@@ -171,6 +238,7 @@ export function renderWizard() {
             : `<button data-action="next" class="primary" ${advanceOk ? "" : "disabled"}>Далее →</button>`
         }
       </div>
+      ${advanceOk ? "" : '<p class="muted" style="margin:-6px 0 12px;text-align:right;">Чтобы продолжить, сделайте все доступные выборы на этом шаге.</p>'}
       <div data-step-content>${renderStep(current.id)}</div>
     `);
   }

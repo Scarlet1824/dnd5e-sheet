@@ -325,6 +325,11 @@ export function speedBonusSources(data) {
   const sources = [];
   if ((data.feats || []).some((f) => f.id === "mobile")) sources.push({ label: "Подвижный", amount: 10 });
   if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
+  // Варвар «Быстрота» (5 ур.): +10 футов, пока не надет тяжёлый доспех.
+  if ((data.features || []).some((f) => /^Быстрота$/i.test(f.name || ""))) {
+    const worn = resolveEquippedArmor(data);
+    if (!(worn && worn.category === "heavy")) sources.push({ label: "Быстрота", amount: 10 });
+  }
   return sources;
 }
 // Exhaustion level 0-6 (data.exhaustion). Old sheets stored it as an

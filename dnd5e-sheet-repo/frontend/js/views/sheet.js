@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -608,14 +608,20 @@ export async function renderSheet(id) {
   // see raceCustomOpen/backgroundCustomOpen above for why a boolean flag
   // (not just "does the saved name match a known one") decides custom mode.
   function raceFieldHtml() {
-    const known = RACES.some((r) => r.name === data.raceName);
-    const custom = raceCustomOpen || (!!data.raceName && !known);
+    // The wizard saves "Раса (Подраса)", e.g. "Эльф (Высший эльф)" -- not an
+    // exact RACES name, but still a known race, so it gets its own option
+    // instead of being mistaken for a homebrew one.
+    const rn = data.raceName || "";
+    const wizardStyle = !!rn && !RACES.some((r) => r.name === rn) && RACES.some((r) => rn.startsWith(r.name + " ("));
+    const known = wizardStyle || RACES.some((r) => r.name === rn);
+    const custom = raceCustomOpen || (!!rn && !known);
     return `
       <div class="col">
         <label>Раса</label>
         <div style="display:flex;gap:6px;">
           <select data-action="race-select" style="${custom ? "flex:0 0 auto;width:auto;" : "flex:1;min-width:0;"}">
             <option value="">—</option>
+            ${wizardStyle ? `<option value="${escapeHtml(rn)}" ${!custom ? "selected" : ""}>${escapeHtml(rn)}</option>` : ""}
             ${RACES.map((r) => `<option value="${escapeHtml(r.name)}" ${!custom && data.raceName === r.name ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("")}
             <option value="__custom__" ${custom ? "selected" : ""}>Своё…</option>
           </select>
@@ -3976,8 +3982,10 @@ export async function renderSheet(id) {
         </div>
         ${isSpellbook && spellBrowseOpen ? spellBrowsePanelHtml(browseKnownIds, classIds) : ""}`;
     } else {
+      const oathIds = oathSpellIdSet();
       const knownIds = new Set([...(sc.cantrips || []), ...(sc.known || []), ...(sc.prepared || [])]);
-      const knownSpells = SPELLS.filter((sp) => knownIds.has(sp.id)).sort(
+      const shownIds = new Set([...knownIds, ...oathIds]);
+      const knownSpells = SPELLS.filter((sp) => shownIds.has(sp.id)).sort(
         (a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru")
       );
       listSectionHtml = `
@@ -3992,13 +4000,16 @@ export async function renderSheet(id) {
               : '<p class="muted">Пока нет выбранных заклинаний — нажмите «+ Добавить заклинание», чтобы выбрать. Свои заклинания можно добавить как заметку в разделе «Черты».</p>'
           }
         </div>
-        ${spellBrowseOpen ? spellBrowsePanelHtml(knownIds, classIds) : ""}`;
+        ${spellBrowseOpen ? spellBrowsePanelHtml(shownIds, classIds) : ""}`;
     }
 
     return `
       <div class="panel">
-        <h2>Заклинания</h2>
-        <div class="row" style="gap:16px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="row between" style="align-items:center;flex-wrap:wrap;gap:8px;">
+          <h2 style="margin:0;">Заклинания</h2>
+          <button class="small primary" data-action="toggle-extra-browse">${extraBrowseOpen ? "✕ Закрыть подбор" : "+ Заговор / заклинание любого класса (сверх лимита)"}</button>
+        </div>
+        <div class="row" style="gap:16px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
           <div class="col" style="flex:1;min-width:180px;">
             <label>Базовая характеристика</label>
             <select data-bind="spellcasting.ability">
@@ -4008,7 +4019,7 @@ export async function renderSheet(id) {
           </div>
           <div class="grid cols-2 combat-stats" style="flex:none;width:auto;">
             <div class="stat-box"><div class="value">${dc ?? "—"}</div><div class="label">Слож. спасброска</div></div>
-            <div class="stat-box"><div class="value">${atk !== null ? formatModifier(atk) : "—"}</div><div class="label">Бонус атаки</div></div>
+            <button type="button" class="stat-box" ${atk !== null ? 'data-action="roll-spell-attack"' : "disabled"} title="Бросить атаку заклинанием" style="cursor:pointer;font:inherit;color:inherit;"><div class="value">${atk !== null ? formatModifier(atk) : "—"}</div><div class="label">🎲 Бонус атаки</div></button>
           </div>
         </div>
         <div style="margin-top:14px;">
@@ -4026,8 +4037,8 @@ export async function renderSheet(id) {
           </div>
         </div>
       </div>
-      ${listSectionHtml}
-      ${extraSpellsPanelHtml(sc)}`;
+      ${extraSpellsPanelHtml(sc)}
+      ${listSectionHtml}`;
   }
 
   // «Дополнительные заклинания»: any cantrip/spell of ANY class, added on top
@@ -4036,6 +4047,7 @@ export async function renderSheet(id) {
   // data.spellcasting.extra.
   function extraSpellsPanelHtml(sc) {
     const extraIds = new Set(sc.extra || []);
+    if (!extraIds.size && !extraBrowseOpen) return "";
     const extraSpells = SPELLS.filter((sp) => extraIds.has(sp.id)).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
     const removeBtn = (sp) => `<button class="small danger" data-action="toggle-extra-spell" data-spell="${sp.id}" title="Убрать">✕</button>`;
     let listHtml = extraSpells.length
@@ -4080,7 +4092,6 @@ export async function renderSheet(id) {
       <div class="panel">
         <div class="row between" style="align-items:center;flex-wrap:wrap;gap:8px;">
           <h3 style="margin:0;">Дополнительные заклинания (сверх лимита)</h3>
-          <button class="small primary" data-action="toggle-extra-browse">${extraBrowseOpen ? "✕ Закрыть подбор" : "+ Заговор / заклинание любого класса"}</button>
         </div>
         ${listHtml}
         ${browseHtml}
@@ -4140,7 +4151,25 @@ export async function renderSheet(id) {
     const name = g && g[spId];
     return name && (data.features || []).some((f) => f.name === name) ? name : null;
   }
+  // Заклинания клятвы паладина (и любого другого не-«подготавливающего» класса,
+  // у подкласса которого есть domainSpells): всегда подготовлены, в лимит не
+  // входят, убрать нельзя.
+  function oathSpellIdSet() {
+    const ids = new Set();
+    (data.classes || []).forEach((entry) => {
+      const cls = getClass(entry.id);
+      if (!cls || PREP_UI_CLASSES.has(cls.id) || !entry.subclass) return;
+      const sub = (cls.subclasses || []).find((x) => x.name.toLowerCase() === entry.subclass.toLowerCase());
+      if (!sub || !sub.domainSpells) return;
+      const lvl = Number(entry.level) || 1;
+      sub.domainSpells.forEach((t) => { if (t.level <= lvl) t.spells.forEach((id) => ids.add(id)); });
+    });
+    return ids;
+  }
   function spellCardControlHtml(sp, prepCtx) {
+    if (oathSpellIdSet().has(sp.id)) {
+      return `<span class="spell-card-badge spell-card-badge-domain" title="Заклинание клятвы — всегда подготовлено, не занимает место среди подготовленных">дар клятвы</span>`;
+    }
     const grantedBy = spellGrantedBy(sp.id);
     if (grantedBy) {
       return `<span class="spell-card-badge spell-card-badge-domain" title="Даётся умением «${escapeHtml(grantedBy)}» — накладывается без траты ячеек заклинаний">✦ ${escapeHtml(grantedBy)} · без ячейки</span>`;
@@ -4936,7 +4965,12 @@ export async function renderSheet(id) {
                     /^Психические клинки$/i.test(f.name || "") ||
                     // Бонусные кубики урона следопыта -- предлагаются в окне
                     // урона оружия (см. damageRiders), а не отдельной кнопкой.
-                    /^(Планарный воин|Добыча охотника|Победитель чудовищ|Угроза из засады|Добыча убийцы|Ужасающие удары)/i.test(f.name || "");
+                    /^(Планарный воин|Добыча охотника|Победитель чудовищ|Угроза из засады|Добыча убийцы|Ужасающие удары)/i.test(f.name || "") ||
+                    // Паладин: Улучшенная божественная кара предлагается в окне
+                    // урона оружия (см. damageRiders); Непобедимый покоритель --
+                    // "к20" в тексте это порог, а не бросок; Жуткий лорд получает
+                    // свои собственные кнопки ниже.
+                    /^(Улучшенная божественная кара|Непобедимый покоритель|Жуткий лорд|Всплеск дикости|Нестабильная отдача|Контролируемый всплеск)$/i.test(f.name || "");
                   const dice = noRollButton
                     ? null
                     : PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
@@ -4970,7 +5004,9 @@ export async function renderSheet(id) {
                   // its cold-damage roll, this adds the missing attack roll
                   // (spell attack bonus) right alongside it.
                   const isTentacle = /^Щупальце из глубин$/i.test(f.name || "");
-                  const attackBonus = isTentacle ? spellAttackBonus(data) : null;
+                  const isDreadLord = /^Жуткий лорд$/i.test(f.name || "");
+                  const isSurge = /^(Всплеск дикости|Нестабильная отдача)$/i.test(f.name || "");
+                  const attackBonus = isTentacle || isDreadLord ? spellAttackBonus(data) : null;
                   const isSuperiority = BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "");
                   // Чемпион «Уцелевший»: passive at-the-start-of-your-turn
                   // heal, triggered off a game moment (your turn starting)
@@ -5001,7 +5037,7 @@ export async function renderSheet(id) {
                   // directly (see the matching comment there).
                   const isBladesong = /^Песнь клинка$/i.test(f.name || "");
                   const bladesongActive = isBladesong && !!data.bladesongActive;
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -5023,7 +5059,11 @@ export async function renderSheet(id) {
                   const bladesongBtn = isBladesong
                     ? `<button class="small feature-card-roll ${bladesongActive ? "primary" : ""}" data-action="toggle-bladesong" data-index="${i}">${bladesongActive ? "✔ Активировано" : "Активировать"}</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${sneakSpan}${dcSpan}</div>`;
+                  const chaMod = getAbilityMod(data, "cha");
+                  const dreadBtns = isDreadLord
+                    ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
+                    : "";
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -5344,6 +5384,13 @@ export async function renderSheet(id) {
     doSave();
     render();
   });
+  // Клятва преданности (3-й уровень паладина): «Священное оружие» -- until it
+  // ends (1 минута) the weapon's attack rolls get +Харизма (минимум +1). Offered
+  // as an optional checkbox in the attack roll window.
+  function sacredWeaponAvailable() {
+    const p = (data.classes || []).find((c) => c.id === "paladin");
+    return !!(p && Number(p.level) >= 3 && /преданности/i.test(p.subclass || ""));
+  }
   on(app, "click", "[data-action=roll-attack]", (e, el) => {
     const a = data.attacks[Number(el.dataset.index)];
     let bonus = a.ability ? attackBonusValue(a) : parseInt(String(a.bonus).replace(/[^-\d]/g, ""), 10) || 0;
@@ -5363,6 +5410,7 @@ export async function renderSheet(id) {
         ? { sides: superiorityDieSides(data), available: superiorityDiceAvailable(), onUse: () => { const used = consumeSuperiorityDie(); if (used) render(); return used; } }
         : null,
       blessed: !!data.blessingActive,
+      bonusOptions: sacredWeaponAvailable() ? [{ label: `Священное оружие (+${Math.max(1, getAbilityMod(data, "cha"))} — модификатор Харизмы) — Божественный канал активен`, bonus: Math.max(1, getAbilityMod(data, "cha")) }] : [],
       powerAttack: hasFeat(GREAT_WEAPON_MASTER_FEAT_ID) && weaponIsHeavyMelee(a)
         ? { penalty: 5, label: "-5 к атаке (Мастер большого оружия) — при попадании +10 к урону", onToggle: (used) => { a.usePowerAttack = used; doSave(); } }
         : hasFeat(SHARPSHOOTER_FEAT_ID) && a.rangeType === "ranged"
@@ -5458,7 +5506,7 @@ export async function renderSheet(id) {
     const count = (m[1] ? parseInt(m[1], 10) : 1) + extra;
     return `${count}d${m[2]}${m[3] || ""}`;
   }
-  // Barbarian's «Жестокая критика»: extra weapon damage dice merged into the
+  // Barbarian's «Сильный критический удар»: extra weapon damage dice merged into the
   // crit roll, same idea as Half-Orc's Свирепые атаки above but scaling with
   // level (1 die at 9th, 2 at 13th, 3 at 17th) instead of a flat one.
   function barbarianLevel(data) {
@@ -5554,7 +5602,7 @@ export async function renderSheet(id) {
       if (sides) base = applyVersatileDie(base, sides);
     }
     const isSavage = isCrit && hasSavageAttacks();
-    // Жестокая критика only applies to a melee weapon attack, same
+    // Сильный критический удар only applies to a melee weapon attack, same
     // "rangeType" gate Дуэлянт uses above -- a thrown weapon fired at range
     // doesn't qualify even though it's still the same weapon.
     const brutalDice = isCrit && a.rangeType !== "ranged" ? brutalCriticalDice(data) : 0;
@@ -5747,10 +5795,11 @@ export async function renderSheet(id) {
     if (has(/^Угроза из засады$/)) list.push({ id: "ambush", label: "Угроза из засады", note: "дополнительная атака в первый ход боя", sides: 8, count: 1 });
     if (has(/^Добыча убийцы$/)) list.push({ id: "slayer-prey", label: "Добыча убийцы", note: "первое попадание за ход по выбранной цели", sides: 6, count: 1 });
     if (has(/^Ужасающие удары$/)) list.push({ id: "dread-strikes", label: "Ужасающие удары", note: "психическая энергия, раз в ход", sides: rangerLvl >= 11 ? 6 : 4, count: 1 });
+    if (has(/^Улучшенная божественная кара$/)) list.push({ id: "improved-smite", label: "Улучшенная божественная кара", note: "излучение, любая рукопашная атака оружием", sides: 8, count: 1, meleeOnly: true, auto: true });
     return list;
   }
   function startDamageRoll(a, isCrit) {
-    const riders = damageRiders();
+    const riders = damageRiders().filter((r) => !r.meleeOnly || a.rangeType !== "ranged");
     const bonusDice = parseDiceFromText(a.special);
     const sneak = sneakAttackDice();
     // Дуэлянт only applies to a Ближний бой weapon (see hasFightingStyle
@@ -5829,7 +5878,7 @@ export async function renderSheet(id) {
           : ""
       }
       ${riders
-        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" /> добавить «${escapeHtml(r.label)}» (${isCrit ? r.count * 2 : r.count}к${r.sides}) — ${escapeHtml(r.note)}</label>`)
+        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" ${r.auto ? "checked" : ""} /> добавить «${escapeHtml(r.label)}» (${isCrit ? r.count * 2 : r.count}к${r.sides}) — ${escapeHtml(r.note)}</label>`)
         .join("")}
       ${
         smiteAvailable
@@ -6323,6 +6372,34 @@ export async function renderSheet(id) {
     entry.luckyUsed = used;
     doSave();
     render();
+  });
+  on(app, "click", "[data-action=roll-wild-surge]", () => {
+    const controlled = (data.features || []).some((f) => /^Контролируемый всплеск$/i.test(f.name || ""));
+    const r1 = rollDice(1, 8)[0];
+    const e1 = WILD_MAGIC_SURGE_TABLE.find((x) => x.roll === r1);
+    if (!controlled) {
+      showRollResult({ label: "Дикая магия", detail: e1 ? e1.text : "", total: r1 });
+      return;
+    }
+    const r2 = rollDice(1, 8)[0];
+    const e2 = WILD_MAGIC_SURGE_TABLE.find((x) => x.roll === r2);
+    showRollResult({
+      label: "Дикая магия (Контролируемый всплеск: два кубика)",
+      detail: r1 === r2 ? `Выпало [${r1}] и [${r2}] — одинаково, выберите ЛЮБОЙ эффект из таблицы.` : `[${r1}] ${e1 ? e1.text : ""}\n\n[${r2}] ${e2 ? e2.text : ""}\n\nВыберите любой из двух эффектов.`,
+      total: Math.max(r1, r2),
+    });
+  });
+  on(app, "click", "[data-action=roll-spell-attack]", () => {
+    const bonus = spellAttackBonus(data);
+    if (bonus === null) return;
+    const dis = exhaustionDisadvantage("attack");
+    const r = rollD20({ modifier: bonus, mode: dis ? "disadvantage" : "normal" });
+    showRollResult({ label: "Атака заклинанием", detail: dis ? `к20: [${r.first}, ${r.second}] → взято ${r.picked} ${formatModifier(bonus)} (помеха: ${dis})` : `к20: [${r.first}] ${formatModifier(bonus)}`, total: r.total, isCrit: r.isCrit, isFumble: r.isFumble });
+  });
+  on(app, "click", "[data-action=roll-feature-expr]", (e, el) => {
+    const expr = el.dataset.expr;
+    const r = rollExpr(expr);
+    showRollResult({ label: el.dataset.label || "Бросок", detail: `${toCyrillicDice(expr)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`, total: r.total });
   });
   on(app, "click", "[data-action=roll-feature-attack]", (e, el) => {
     const f = data.features[Number(el.dataset.index)];
