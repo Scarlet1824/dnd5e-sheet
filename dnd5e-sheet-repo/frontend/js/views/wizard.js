@@ -2433,6 +2433,9 @@ export function renderWizard() {
       grants.armor.forEach((a) => {
         if (!proficiencyCovered(data.proficiencies.armor, a)) data.proficiencies.armor.push(a);
       });
+      (grants.tools || []).forEach((tl) => {
+        if (!(data.proficiencies.tools || []).includes(tl)) data.proficiencies.tools.push(tl);
+      });
     }
     function addFeatureOrFold(name, desc, source) {
       if (isSpellcastingAnnouncement(name)) return;

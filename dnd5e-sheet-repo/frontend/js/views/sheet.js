@@ -511,6 +511,31 @@ export async function renderSheet(id) {
     });
     if (changed) doSave();
   })();
+  // Раунд 64: жрец — правки текстов доменов у уже созданных персонажей.
+  (function migrateClericDomains() {
+    let changed = false;
+    const before = (data.features || []).length;
+    data.features = (data.features || []).filter((f) => !(/^Заклинания домена$/i.test(f.name || "") && /Домен (мира|порядка|сумерек)/i.test(f.source || "")));
+    if (data.features.length !== before) changed = true;
+    (data.features || []).forEach((f) => {
+      const d = f.desc || "";
+      if (/^Божественный домен: Домен смерти$/i.test(f.name || "") && /^Хотя этот подкласс официально опубликован/.test(d)) {
+        f.desc = d.replace(/^[^\n]*\n\n/, ""); changed = true;
+      }
+      if (/^Божественный канал: ограждение магией$/i.test(f.name || "") && /\nОграждения магией\s*$/.test(d) ) {
+        f.desc = d.replace(/\n+Ограждения магией\s*$/, "\n\nТаблица «Ограждение магией»\nУровень жреца → изгоняется существо с ПО…\n5 → 1/2 или ниже\n8 → 1 или ниже\n11 → 2 или ниже\n14 → 3 или ниже\n17 → 4 или ниже"); changed = true;
+      }
+      if (/^Божественный канал: сумеречное святилище$/i.test(f.name || "") && /ниже преимуществ:\s*\n+Даровать временные хиты[^\n]*очарования или испуга\.\s*$/.test(d)) {
+        f.desc = d.replace(/(ниже преимуществ:)\s*\n+Даровать временные хиты в количестве, равном 1к6 \+ ваш уровень жреца\.\s*Окончить/, "$1\n\n• Даровать временные хиты в количестве, равном 1к6 + ваш уровень жреца.\n• Окончить"); changed = true;
+      }
+      if (/^Бонусное владение$/i.test(f.name || "") && /Домен кузни/i.test(f.source || "")) {
+        if (!data.proficiencies) data.proficiencies = {};
+        if (!Array.isArray(data.proficiencies.tools)) data.proficiencies.tools = [];
+        if (!data.proficiencies.tools.includes("Инструменты кузнеца")) { data.proficiencies.tools.push("Инструменты кузнеца"); changed = true; }
+      }
+    });
+    if (changed) doSave();
+  })();
   const EMPTY_DESC_FEATURE_FIXES = ["Избранный враг", "Исследователь природы"];
   (function migrateEmptyRangerFeatureText() {
     let changed = false;
@@ -4347,6 +4372,8 @@ export async function renderSheet(id) {
     // rest modal can tell whether today's use is still available.
     if (ARCANE_RECOVERY_FEATURES.some((entry) => entry.match.test(f.name || ""))) return { max: 1, recharge: "long" };
     if (GENIE_VESSEL_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "long" };
+    // Домен упокоения «Хранитель душ»: раз до начала вашего следующего хода — ручной счётчик (восстанавливается вручную / на отдыхе).
+    if (/^Хранитель душ$/i.test(f.name || "") && /упокоения/i.test(f.source || "")) return { max: 1, recharge: "any" };
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
     if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
     // Клинок души «Псионическая сила»: "количество... равно вашему
@@ -5760,7 +5787,8 @@ export async function renderSheet(id) {
                     // урона оружия (см. damageRiders); Непобедимый покоритель --
                     // "к20" в тексте это порог, а не бросок; Жуткий лорд получает
                     // свои собственные кнопки ниже.
-                    /^(Улучшенная божественная кара|Непобедимый покоритель|Жуткий лорд|Всплеск дикости|Нестабильная отдача|Контролируемый всплеск)$/i.test(f.name || "");
+                    /^(Улучшенная божественная кара|Непобедимый покоритель|Жуткий лорд|Всплеск дикости|Нестабильная отдача|Контролируемый всплеск)$/i.test(f.name || "") ||
+                    !!divineStrikeType(f);
                   const dice = noRollButton
                     ? null
                     : PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
@@ -5840,7 +5868,12 @@ export async function renderSheet(id) {
                   // directly (see the matching comment there).
                   const isBladesong = /^Песнь клинка$/i.test(f.name || "");
                   const bladesongActive = isBladesong && !!data.bladesongActive;
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura) return "";
+                  const isIntervention = /^Божественное вмешательство$/i.test(f.name || "");
+                  const clericLevelNow = ((data.classes || []).find((c) => c.id === "cleric") || {}).level || 0;
+                  const interventionBtn = isIntervention
+                    ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="1d100" data-label="Божественное вмешательство (успех, если выпало ${clericLevelNow} или меньше)">🎲 Бросить к100</button>`
+                    : "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura && !isIntervention) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -5866,7 +5899,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -6609,6 +6642,20 @@ export async function renderSheet(id) {
   // Once-per-turn / conditional bonus damage dice from class & subclass
   // features (Следопыт etc.): offered as checkboxes in the damage window
   // instead of a roll button on the feature card.
+  // Жрец «Божественный удар» (домены с фиксированным видом урона): бонусная кость — флажок в окне урона оружием, а не кнопка на карточке.
+  const DIVINE_STRIKE_TYPES = [
+    [/обмана/i, "ядом"],
+    [/природы/i, "электричеством"],
+    [/смерти/i, "некротической энергией"],
+    [/кузни/i, "огнём"],
+    [/порядка/i, "психической энергией"],
+    [/сумерек/i, "излучением"],
+  ];
+  function divineStrikeType(f) {
+    if (!f || !/^Божественный удар$/i.test(f.name || "")) return "";
+    const hit = DIVINE_STRIKE_TYPES.find(([re]) => re.test(f.source || ""));
+    return hit ? hit[1] : "";
+  }
   function damageRiders() {
     const names = (data.features || []).map((f) => f.name || "");
     const has = (re) => names.some((n) => re.test(n));
@@ -6621,6 +6668,12 @@ export async function renderSheet(id) {
     if (has(/^Угроза из засады$/)) list.push({ id: "ambush", label: "Угроза из засады", note: "дополнительная атака в первый ход боя", sides: 8, count: 1 });
     if (has(/^Добыча убийцы$/)) list.push({ id: "slayer-prey", label: "Добыча убийцы", note: "первое попадание за ход по выбранной цели", sides: 6, count: 1 });
     if (has(/^Ужасающие удары$/)) list.push({ id: "dread-strikes", label: "Ужасающие удары", note: "психическая энергия, раз в ход", sides: rangerLvl >= 11 ? 6 : 4, count: 1 });
+    (data.features || []).forEach((f) => {
+      const t = divineStrikeType(f);
+      if (!t) return;
+      const clericLvl = ((data.classes || []).find((c) => c.id === "cleric") || {}).level || 0;
+      list.push({ id: "divine-strike", label: "Божественный удар", note: `${t}, раз в ход`, sides: 8, count: clericLvl >= 14 ? 2 : 1 });
+    });
     // Карточки умений с кубиком урона (черты: «Удар великанов», «Точный удар» и др.) — поле rider.
     (data.features || []).forEach((f, fi) => {
       const r = f.rider;
