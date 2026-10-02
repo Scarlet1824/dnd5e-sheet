@@ -86,7 +86,7 @@ export function showRollResult({ label, detail, total, isCrit, isFumble, breakdo
 // when a condition already imposes disadvantage on this roll: the plain roll
 // becomes a disadvantage roll, and picking advantage instead just cancels the
 // two out into a normal roll (PHB: advantage and disadvantage cancel).
-export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null, forcedDisadvantage = "", bonusOptions = [] }) {
+export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie = null, blessed = false, powerAttack = null, forcedDisadvantage = "", forcedAdvantage = "", bonusOptions = [] }) {
   const showDieOption = superiorityDie && superiorityDie.available > 0;
   const html = `
     <h3>${escapeHtml(label)}</h3>
@@ -109,9 +109,14 @@ export function openD20RollModal({ label, modifier, critMin = 20, superiorityDie
     }
     ${(bonusOptions || []).map((o, i) => `<label class="row" style="gap:8px;align-items:center;margin-bottom:10px;"><input type="checkbox" data-bonus-option="${i}" /><span>${escapeHtml(o.label)}</span></label>`).join("")}
     ${forcedDisadvantage ? `<p style="color:var(--red);margin:0 0 10px;">Помеха: ${escapeHtml(forcedDisadvantage)}</p>` : ""}
+    ${forcedAdvantage ? `<p style="color:var(--green);margin:0 0 10px;">Преимущество: ${escapeHtml(forcedAdvantage)}</p>` : ""}
     <div class="col" style="gap:8px;">
       ${
-        forcedDisadvantage
+        forcedAdvantage && forcedDisadvantage
+          ? `<button data-mode="normal" class="primary" style="width:100%;">Обычный бросок (преимущество и помеха гасят друг друга)</button>`
+          : forcedAdvantage
+          ? `<button data-mode="advantage" class="primary" style="width:100%;">Бросок с преимуществом</button>`
+          : forcedDisadvantage
           ? `<button data-mode="disadvantage" class="primary" style="width:100%;">Бросок с помехой</button>
       <button data-mode="normal" style="width:100%;">С преимуществом (гасит помеху) — обычный бросок</button>`
           : `<button data-mode="normal" class="primary" style="width:100%;">Обычный бросок</button>

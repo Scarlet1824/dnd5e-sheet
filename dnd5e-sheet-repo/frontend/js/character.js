@@ -312,6 +312,10 @@ export function armorClassAuto(data) {
   return base + shieldBonus + featureBonus + bladesongACBonus(data, armor) + dualWielderACBonus(data) + revenantBladeACBonus(data);
 }
 
+// Варвар «Дикий инстинкт» (7 ур.): броски инициативы всегда с преимуществом.
+export function initiativeAdvantageSource(data) {
+  return (data.features || []).some((f) => /^(Дикий инстинкт|Звериная инстинкция)$/i.test(f.name || "")) ? "Дикий инстинкт" : "";
+}
 export function initiativeBonus(data) {
   const o = manualOverride(data, "init");
   return o !== null ? o : initiativeBonusAuto(data);
@@ -349,11 +353,8 @@ export function speedBonusSources(data) {
   if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
   // Песнь клинка: +10 футов к скорости, пока песнь активна (и нет средних/тяжёлых доспехов и щита).
   if (bladesongActiveNow(data, resolveEquippedArmor(data))) sources.push({ label: "Песнь клинка", amount: 10 });
-  // Варвар «Быстрота» (5 ур.): +10 футов, пока не надет тяжёлый доспех.
-  if ((data.features || []).some((f) => /^Быстрота$/i.test(f.name || ""))) {
-    const worn = resolveEquippedArmor(data);
-    if (!(worn && worn.category === "heavy")) sources.push({ label: "Быстрота", amount: 10 });
-  }
+  // Варвар «Быстрое передвижение» (5 ур.): +10 фт скорости, пока не надет тяжёлый доспех — на панели
+  // скорость НЕ увеличивается (бонус учитывается игроком вручную).
   return sources;
 }
 // Exhaustion level 0-6 (data.exhaustion). Old sheets stored it as an

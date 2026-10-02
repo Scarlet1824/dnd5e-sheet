@@ -6,10 +6,10 @@ import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
   passivePerception, passiveInvestigation, passiveInsight, armorClass, initiativeBonus, spellSaveDC, spellAttackBonus,
-  speedBonusSources, totalSpeed, manualOverride, armorClassAuto, initiativeBonusAuto, totalSpeedAuto, exhaustionLevel, effectiveMaxHp, speedBeforeExhaustion,
+  speedBonusSources, totalSpeed, manualOverride, armorClassAuto, initiativeBonusAuto, totalSpeedAuto, exhaustionLevel, effectiveMaxHp, speedBeforeExhaustion, initiativeAdvantageSource,
 } from "../character.js";
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
-import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
+import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter, pushRollLog } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
 import { featAlreadyTaken, FEAT_TAKEN_MESSAGE, proficiencyCovered, dedupeProficiencyCategories, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featInfoHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
 
@@ -462,6 +462,39 @@ export async function renderSheet(id) {
         if (!Array.isArray(data.spellcasting.cantrips)) data.spellcasting.cantrips = [];
         if (!data.spellcasting.cantrips.includes(spec.fixed)) { data.spellcasting.cantrips.push(spec.fixed); changed = true; }
       });
+    });
+    if (changed) doSave();
+  })();
+  // Раунд 63: «Форма зверя» (Путь зверя) — формы отдельными карточками; «Всплеск дикости» — без таблицы в тексте.
+  (function migrateBarbarianCards() {
+    let changed = false;
+    const barb = CLASSES.find((c) => c.id === "barbarian");
+    const beast = barb && (barb.subclasses || []).find((x) => x.slug === "beast");
+    const idx = (data.features || []).findIndex((f) => f.name === "Форма зверя" && /Путь зверя/i.test(f.source || "") && /Укус\./.test(f.desc || "") && /Когти\./.test(f.desc || ""));
+    if (beast && idx >= 0) {
+      const sf = (beast.features || []).find((x) => x.name === "Форма зверя");
+      const split = splitBeastFormCards((sf && sf.desc) || []);
+      if (split) {
+        const src = data.features[idx].source;
+        data.features[idx].desc = split.intro;
+        split.cards.forEach((c, k) => { if (!data.features.some((f) => f.name === c.name && f.source === src)) data.features.splice(idx + 1 + k, 0, { name: c.name, source: src, desc: c.desc }); });
+        changed = true;
+      }
+    }
+    (data.features || []).forEach((f) => {
+      if (/^Всплеск дикости$/i.test(f.name || "") && /(^|\n)\d+\. /.test(f.desc || "")) {
+        f.desc = f.desc.split("\n\n").filter((p) => !/^\d+\. /.test(p) && !/^Таблица «Дикая магия»/.test(p)).join("\n\n");
+        changed = true;
+      }
+    });
+    if (changed) doSave();
+  })();
+  // Раунд 63: Варвар — «Быстрота» → «Быстрое передвижение», «Звериная инстинкция» → «Дикий инстинкт».
+  (function migrateBarbarianRenames() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (/^Быстрота$/i.test(f.name || "") && /Варвар/i.test(f.source || "")) { f.name = "Быстрое передвижение"; changed = true; }
+      else if (/^Звериная инстинкция$/i.test(f.name || "")) { f.name = "Дикий инстинкт"; changed = true; }
     });
     if (changed) doSave();
   })();
@@ -1590,6 +1623,10 @@ export async function renderSheet(id) {
   // так что в самом умении остаётся только вводная часть.
   function subclassFeatureDescText(sub, sf) {
     const paras = sf.desc || [];
+    // Путь дикой магии «Всплеск дикости»: таблица выносится в кнопку «Таблица» (и таблицу в окне повышения уровня).
+    if (sub && sub.slug === "wild-magic" && sf.name === "Всплеск дикости") return paras.filter((p) => !/^\d+\. /.test(p) && !/^Таблица «Дикая магия»/.test(p)).join("\n\n");
+    // Путь буревестника «Аура бури»: окружения (Пустыня/Море/Тундра) выбираются отдельно — каждое своей карточкой.
+    if (sub && sub.slug === "storm-herald" && sf.name === "Аура бури") return paras.filter((p) => !/^(Пустыня|Море|Тундра)\. /.test(p)).join("\n\n");
     const spec = SUBCLASS_MULTI_PICKS[sub && sub.slug];
     if (spec && sf.name === spec.optionsFeature && spec.noun === "руна") {
       const opts = parseNamedOptions(paras, spec.noun);
@@ -1655,6 +1692,61 @@ export async function renderSheet(id) {
     });
     return out.map((o) => ({ name: o.name, minLevel: o.minLevel, text: o.paras.join("\n\n") }));
   }
+  // ---- Таблица «Дикая магия» (Путь дикой магии) ---------------------------
+  function wildMagicTableHtml(selected = []) {
+    return `<table class="sheet-table" style="table-layout:auto;margin:8px 0;"><thead><tr><th style="width:44px;">к8</th><th>Эффект</th></tr></thead><tbody>${WILD_MAGIC_SURGE_TABLE.map((r) => {
+      const m = /^([^.]+)\.\s*([\s\S]*)$/.exec(r.text);
+      const hit = selected.includes(r.roll);
+      return `<tr data-wild-row="${r.roll}" style="${hit ? "background:rgba(212,175,55,0.22);" : ""}"><td style="vertical-align:top;font-weight:700;">${r.roll}</td><td><strong>${escapeHtml(m ? m[1] : "")}.</strong> ${escapeHtml(m ? m[2] : r.text)}</td></tr>`;
+    }).join("")}</tbody></table>`;
+  }
+  function openWildMagicTable() {
+    const controlled = (data.features || []).some((f) => /^Контролируемый всплеск$/i.test(f.name || ""));
+    const dc = 8 + proficiencyBonus(data) + getAbilityMod(data, "con");
+    const modal = openModal(`
+      <h3>Таблица «Дикая магия» (к8)</h3>
+      <p class="muted" style="margin:0 0 8px;">Бросается при входе в ярость. Если эффект требует спасброска, Сл = 8 + бонус мастерства + модификатор Телосложения = <strong>${dc}</strong>.${controlled ? " «Контролируемый всплеск»: бросаются два кубика, можно выбрать любой из выпавших эффектов." : ""}</p>
+      <div class="row" style="gap:10px;align-items:center;margin-bottom:6px;">
+        <button type="button" class="primary" data-wild-roll>🎲 Бросить ${controlled ? "2 × к8" : "к8"}</button>
+        <strong data-wild-result></strong>
+      </div>
+      <div data-wild-table>${wildMagicTableHtml()}</div>
+      <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" data-action="close-modal">Закрыть</button></div>`, { wide: true });
+    on(modal, "click", "[data-action=close-modal]", closeModal);
+    on(modal, "click", "[data-wild-roll]", () => {
+      const rolls = rollDice(controlled ? 2 : 1, 8);
+      modal.querySelector("[data-wild-table]").innerHTML = wildMagicTableHtml(rolls);
+      modal.querySelector("[data-wild-result]").textContent = `Выпало: ${rolls.join(" и ")}`;
+      const hit = modal.querySelector(`[data-wild-row="${rolls[0]}"]`);
+      if (hit && hit.scrollIntoView) hit.scrollIntoView({ block: "nearest" });
+      pushRollLog({ label: "Дикая магия", detail: `к8: [${rolls.join(", ")}]`, total: rolls[0] });
+      document.dispatchEvent(new CustomEvent("dnd5e:roll-logged"));
+    });
+  }
+  // ---- Путь буревестника: окружение ауры бури ------------------------------
+  const STORM_ENVIRONMENTS = ["Пустыня", "Море", "Тундра"];
+  function stormHeraldSub() {
+    const cls = getClass("barbarian");
+    return cls ? { cls, sub: (cls.subclasses || []).find((x) => x.slug === "storm-herald") } : { cls: null, sub: null };
+  }
+  function stormEnvText(env) {
+    const { sub } = stormHeraldSub();
+    const f = sub && (sub.features || []).find((x) => x.name === "Аура бури");
+    const par = f && (f.desc || []).find((p) => p.startsWith(env + ". "));
+    return par ? par.slice(env.length + 2) : "";
+  }
+  // Заменяет карточку «Аура бури» на карточку выбранного окружения (Пустыня/Море/Тундра).
+  function applyStormEnvironment(env) {
+    const { cls, sub } = stormHeraldSub();
+    if (!sub || !STORM_ENVIRONMENTS.includes(env)) return;
+    const source = subclassFeatureSource(cls, sub.name);
+    const card = (data.features || []).find((f) => f.source === source && /^Аура бури(?::|$)/.test(f.name || ""));
+    const f = (sub.features || []).find((x) => x.name === "Аура бури");
+    if (!card || !f) return;
+    card.name = `Аура бури: ${env}`;
+    card.desc = [(f.desc || [])[0], `${env}. ${stormEnvText(env)}`].join("\n\n");
+    data.stormEnv = env;
+  }
   // ---- Заговор/местность от умения подкласса (Раунд 62) -------------------
   // Школа Иллюзии («Улучшенная малая иллюзия»), Круг земли («Дополнительный заговор» и
   // местность для заклинаний круга), Круг спор / Круг звёзд (фиксированный заговор).
@@ -1673,7 +1765,11 @@ export async function renderSheet(id) {
       if (fixedUnknown || needPick) out.cantrip = { featureName: bf.name, fixed: fixedUnknown ? spec.fixed : "", list: spec.list, needPick, picked: "" };
     }
     if (sub.terrainSpells && !data.landTerrain && feats.some((f) => f.name === "Заклинания круга")) out.terrain = { picked: "" };
-    return out.cantrip || out.terrain ? out : null;
+    if (sub.slug === "storm-herald" && newLevel >= 3) {
+      const current = data.stormEnv || "";
+      out.storm = { current, picked: current, required: !current && newLevel === 3 };
+    }
+    return out.cantrip || out.terrain || out.storm ? out : null;
   }
   function bonusChoicePanelHtml() {
     const bc = levelUpState.bonusChoice;
@@ -1689,6 +1785,15 @@ export async function renderSheet(id) {
         <div class="grid cols-2">${options.map((x) => `<label class="row" style="gap:6px;"><input type="radio" name="bonus-cantrip" data-level-up-bonus-cantrip="${x.id}" ${cc.picked === x.id ? "checked" : ""} />${spellHoverNameHtml(x)}</label>`).join("")}</div>` : ""}
       </div>`;
     }
+    if (bc.storm) {
+      const st = bc.storm;
+      html += `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Аура бури — окружение</h4>
+        <p class="muted" style="font-size:0.82rem;margin:2px 0 6px;">Одновременно действует одно окружение, от него зависит эффект ауры. При каждом повышении уровня его можно сменить — карточка ауры заменится на выбранную.${st.current ? ` Сейчас: <strong>${escapeHtml(st.current)}</strong>.` : ""}</p>
+        <div class="col" style="gap:6px;">${STORM_ENVIRONMENTS.map((env) => `<label class="card selectable ${st.picked === env ? "selected" : ""}" style="cursor:pointer;">
+          <input type="radio" name="level-up-storm" data-level-up-storm="${env}" ${st.picked === env ? "checked" : ""} style="margin-right:6px;" />
+          <strong>${env}</strong> <span class="muted">${escapeHtml(stormEnvText(env))}</span>
+        </label>`).join("")}</div></div>`;
+    }
     if (bc.terrain) {
       const cls = getClass("druid");
       const sub = cls && cls.subclasses.find((x) => x.slug === "land");
@@ -1702,7 +1807,7 @@ export async function renderSheet(id) {
   }
   function bonusChoiceIncomplete() {
     const bc = levelUpState.bonusChoice;
-    return !!(bc && ((bc.cantrip && bc.cantrip.needPick && !bc.cantrip.picked) || (bc.terrain && !bc.terrain.picked)));
+    return !!(bc && ((bc.cantrip && bc.cantrip.needPick && !bc.cantrip.picked) || (bc.terrain && !bc.terrain.picked) || (bc.storm && bc.storm.required && !bc.storm.picked)));
   }
   function applyBonusChoice(cls) {
     const bc = levelUpState.bonusChoice;
@@ -1714,6 +1819,7 @@ export async function renderSheet(id) {
       const id = bc.cantrip.fixed || bc.cantrip.picked;
       if (id && !data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id);
     }
+    if (bc.storm && bc.storm.picked && bc.storm.picked !== bc.storm.current) applyStormEnvironment(bc.storm.picked);
     if (bc.terrain && bc.terrain.picked) {
       data.landTerrain = bc.terrain.picked;
       applyLandTerrainCard();
@@ -2296,7 +2402,7 @@ export async function renderSheet(id) {
         <h4 style="margin-top:0;">Умения ${newLevel} уровня</h4>
         ${
           allFeatures.length
-            ? allFeatures.map((f) => `<p><strong>${escapeHtml(f.name)}:</strong> ${escapeHtml(f.desc || "")}</p>`).join("")
+            ? allFeatures.map((f) => levelUpFeatureHtml(f, cls)).join("")
             : levelUpState.asi || levelUpState.subclassChoice
               ? `<p class="muted">На этом уровне только выбор ниже — новых карточек умений нет.</p>`
               : missingSubclassForArchetypeLevel
@@ -2345,6 +2451,15 @@ export async function renderSheet(id) {
             : ""
         } data-action="confirm-level-up">Повысить уровень</button>
       </div>`;
+  }
+  // Одно умение в списке «Умения N уровня»: каждый абзац — с новой строки; для некоторых подклассов
+  // варианты вынесены в выбор ниже (тотемы, ауры бури) или в таблицу (дикая магия).
+  function levelUpFeatureHtml(f, cls) {
+    let desc = f.desc || "";
+    let extra = "";
+    if (f.name === "Тотемный дух" && levelUpState.subclassChoice) desc = desc.split("\n\n")[0];
+    if (/^Всплеск дикости$/i.test(f.name)) extra = wildMagicTableHtml();
+    return `<p style="white-space:pre-line;"><strong>${escapeHtml(f.name)}:</strong> ${escapeHtml(desc)}</p>${extra}`;
   }
   function wireLevelUpModal(modal) {
     wireHoverCardPortal(modal);
@@ -2440,6 +2555,10 @@ export async function renderSheet(id) {
     });
     on(modal, "change", "[data-level-up-bonus-cantrip]", (e, el) => {
       levelUpState.bonusChoice.cantrip.picked = el.dataset.levelUpBonusCantrip;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-storm]", (e, el) => {
+      levelUpState.bonusChoice.storm.picked = el.dataset.levelUpStorm;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-terrain]", (e, el) => {
@@ -3074,10 +3193,10 @@ export async function renderSheet(id) {
       if (sf.level !== null && sf.level !== undefined && sf.level > uptoLevel) return;
       const desc = subclassFeatureDescText(sub, sf);
       // Пси-воин «Псионическая сила»: способности (Защитное поле, Псионический удар, Телекинетическое передвижение) — отдельные карточки.
-      const psi = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null;
+      const psi = splitSubFeatureCards(sub, sf);
       if (psi) {
         data.features.push({ name: sf.name, source, desc: psi.intro });
-        psi.powers.forEach((pw) => { if (!(data.features || []).some((f) => f.source === source && f.name === pw.name)) data.features.push({ name: pw.name, source, desc: pw.desc }); });
+        psi.cards.forEach((pw) => { if (!(data.features || []).some((f) => f.source === source && f.name === pw.name)) data.features.push({ name: pw.name, source, desc: pw.desc }); });
         return;
       }
       data.features.push({ name: sf.name, source, desc });
@@ -3106,6 +3225,29 @@ export async function renderSheet(id) {
     if (!powers.length) return null;
     return { intro: paras.slice(0, idx + 1).join("\n\n"), powers };
   }
+  // Путь зверя «Форма зверя»: Укус / Когти / Хвост — отдельные карточки умений.
+  function splitBeastFormCards(paras) {
+    const idx = paras.findIndex((p) => /Вы выбираете форму оружия/i.test(p));
+    if (idx < 0) return null;
+    const cards = [];
+    paras.slice(idx + 1).forEach((p) => {
+      const m = /^([А-ЯЁ][а-яё]+)\.\s+([\s\S]+)$/.exec(p);
+      if (m) cards.push({ name: `Форма зверя: ${m[1]}`, desc: m[2] });
+      else if (cards.length) cards[cards.length - 1].desc += "\n\n" + p;
+    });
+    if (!cards.length) return null;
+    return { intro: paras.slice(0, idx + 1).join("\n\n"), cards };
+  }
+  // Умения подкласса, которые разбиваются на несколько карточек: { intro, cards: [{name, desc}] } или null.
+  function splitSubFeatureCards(sub, sf) {
+    if (!sub || !sf) return null;
+    if (sub.slug === "psi-warrior" && sf.name === "Псионическая сила") {
+      const r = splitPsionicPowerCards(sf.desc || []);
+      return r ? { intro: r.intro, cards: r.powers } : null;
+    }
+    if (sub.slug === "beast" && sf.name === "Форма зверя") return splitBeastFormCards(sf.desc || []);
+    return null;
+  }
   function applySubclassFeaturesAtLevel(cls, sub, level, { withIntro, excludeNames } = {}) {
     if (!sub) return;
     const introName = subclassIntroName(cls, sub.name);
@@ -3118,10 +3260,10 @@ export async function renderSheet(id) {
       if (excludeNames && excludeNames.includes(sf.name)) return;
       if ((data.features || []).some((f) => f.source === source && f.name === sf.name)) return;
       const desc = subclassFeatureDescText(sub, sf);
-      const psi = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null;
+      const psi = splitSubFeatureCards(sub, sf);
       if (psi) {
         data.features.push({ name: sf.name, source, desc: psi.intro });
-        psi.powers.forEach((pw) => { if (!(data.features || []).some((f) => f.source === source && f.name === pw.name)) data.features.push({ name: pw.name, source, desc: pw.desc }); });
+        psi.cards.forEach((pw) => { if (!(data.features || []).some((f) => f.source === source && f.name === pw.name)) data.features.push({ name: pw.name, source, desc: pw.desc }); });
         return;
       }
       data.features.push({ name: sf.name, source, desc });
@@ -3192,7 +3334,14 @@ export async function renderSheet(id) {
         </div>
         ${
           barbarianLevel(data) > 0
-            ? `<button type="button" class="small ${data.rageActive ? "primary" : ""}" data-action="toggle-rage" title="Пока включено, к урону оружием ближнего боя в силовых атаках (Сила) добавляется бонус Ярости (+${rageDamageBonus(data)} на этом уровне)">${data.rageActive ? "✔ Ярость" : "Ярость"}</button>`
+            ? (() => {
+                const left = rageUsesLeft();
+                const noUses = !data.rageActive && left <= 0;
+                const tip = noUses
+                  ? "Использования «Ярости» закончились — восстановятся после продолжительного отдыха"
+                  : `Пока включено, к урону оружием ближнего боя в силовых атаках (Сила) добавляется бонус Ярости (+${rageDamageBonus(data)} на этом уровне). Включение тратит одно использование «Ярости»${left === Infinity ? "" : ` (осталось: ${left})`}.`;
+                return `<button type="button" class="small ${data.rageActive ? "primary" : ""}" data-action="toggle-rage" ${noUses ? "disabled" : ""} title="${escapeHtml(tip)}">${data.rageActive ? "✔ Ярость" : "Ярость"}${!data.rageActive && left !== Infinity ? ` (${left})` : ""}</button>`;
+              })()
             : ""
         }
         <button type="button" class="small ${data.blessingActive ? "primary" : ""}" data-action="toggle-blessing" title="Пока включено, ко всем броскам атаки, спасброскам и проверкам характеристик автоматически добавляется к4 (эффект заклинания благословение)">${data.blessingActive ? "✔ Благословение" : "Благословение"}</button>
@@ -3749,7 +3898,7 @@ export async function renderSheet(id) {
         const cls = CLASSES.find((c) => c.name.toLowerCase() === clsPart);
         const sub = cls && (cls.subclasses || []).find((s) => s.name.toLowerCase() === subPart);
         const sf = sub && (sub.features || []).find((f) => (f.name || "").toLowerCase() === n);
-        if (sf) { const psiSplit = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null; return psiSplit ? psiSplit.intro : subclassFeatureDescText(sub, sf); }
+        if (sf) { const psiSplit = splitSubFeatureCards(sub, sf); return psiSplit ? psiSplit.intro : subclassFeatureDescText(sub, sf); }
       } else {
         // Source is a bare class name: either that class's own
         // classFeatureText, or the "intro" card for one of its subclasses
@@ -3790,7 +3939,7 @@ export async function renderSheet(id) {
       for (const sub of cls.subclasses || []) {
         if ((sub.name || "").toLowerCase() === n && sub.intro) return sub.intro;
         const sf = (sub.features || []).find((f) => (f.name || "").toLowerCase() === n);
-        if (sf) { const psiSplit = sub.slug === "psi-warrior" && sf.name === "Псионическая сила" ? splitPsionicPowerCards(sf.desc || []) : null; return psiSplit ? psiSplit.intro : subclassFeatureDescText(sub, sf); }
+        if (sf) { const psiSplit = splitSubFeatureCards(sub, sf); return psiSplit ? psiSplit.intro : subclassFeatureDescText(sub, sf); }
       }
     }
     for (const race of RACES) {
@@ -4208,6 +4357,18 @@ export async function renderSheet(id) {
     return parseUsesFromText(f.desc);
   }
   // Списывает одно использование карточки умения (если у неё есть счётчик).
+  // Ярость на панели: вход в ярость списывает одно использование карточки «Ярость»;
+  // когда использований не осталось, включить ярость нельзя (выключить — можно).
+  function rageFeatureCard() {
+    return (data.features || []).find((f) => RAGE_FEATURE_NAME.test(f.name || "")) || null;
+  }
+  function rageUsesLeft() {
+    const f = rageFeatureCard();
+    if (!f) return Infinity;
+    const uses = resolveFeatureUses(f);
+    if (!uses || uses.max === Infinity || !(uses.max > 0)) return Infinity;
+    return usesArrayFor(f, uses.max).filter(Boolean).length;
+  }
   function spendFeatureUse(f) {
     if (!f) return;
     const uses = resolveFeatureUses(f);
@@ -5638,6 +5799,10 @@ export async function renderSheet(id) {
                   const isDreadLord = /^Жуткий лорд$/i.test(f.name || "");
                   const isSurge = /^(Всплеск дикости|Нестабильная отдача)$/i.test(f.name || "");
                   // Школа Прорицания «Знамение»: 2к20 (3к20 с «Великого знамения»); значения хранятся на карточке до следующего броска.
+                  const isStormAura = /^Аура бури(?::|$)/.test(f.name || "") && /буревестник/i.test(f.source || "");
+                  const stormHtml = isStormAura
+                    ? `<select data-storm-env title="Окружение ауры бури" style="flex:none;width:auto;"><option value="">${data.stormEnv ? "Сменить окружение…" : "Выберите окружение…"}</option>${STORM_ENVIRONMENTS.filter((env) => env !== data.stormEnv).map((env) => `<option value="${env}">${env}</option>`).join("")}</select>`
+                    : "";
                   const isPortent = /^Знамение$/i.test(f.name || "");
                   const portentCount = (data.features || []).some((x) => /^Великое знамение$/i.test(x.name || "")) ? 3 : 2;
                   const portentRolls = isPortent && Array.isArray(data.portentRolls) ? data.portentRolls : [];
@@ -5675,7 +5840,7 @@ export async function renderSheet(id) {
                   // directly (see the matching comment there).
                   const isBladesong = /^Песнь клинка$/i.test(f.name || "");
                   const bladesongActive = isBladesong && !!data.bladesongActive;
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -5701,7 +5866,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -7053,6 +7218,10 @@ export async function renderSheet(id) {
     render();
   });
   on(app, "click", "[data-action=toggle-rage]", () => {
+    if (!data.rageActive) {
+      if (rageUsesLeft() <= 0) return;
+      spendFeatureUse(rageFeatureCard());
+    }
     data.rageActive = !data.rageActive;
     doSave();
     render();
@@ -7142,6 +7311,13 @@ export async function renderSheet(id) {
     const a = artifactAt(el); const sl = a && a.spells[Number(el.dataset.spellIndex)]; if (!sl) return;
     const arr = artifactUsesArray(sl.usesState, Number(sl.max) || 0); const j = Number(el.dataset.useIndex);
     arr[j] = !arr[j]; sl.usesState = arr; doSave(); render();
+  });
+  on(app, "click", "[data-action=open-wild-table]", () => openWildMagicTable());
+  on(app, "change", "[data-storm-env]", (e, el) => {
+    if (!el.value) return;
+    applyStormEnvironment(el.value);
+    doSave();
+    render();
   });
   on(app, "click", "[data-action=roll-wild-surge]", () => {
     const controlled = (data.features || []).some((f) => /^Контролируемый всплеск$/i.test(f.name || ""));
@@ -7500,7 +7676,7 @@ export async function renderSheet(id) {
     openD20RollModal({ label: `Навык: ${SKILLS.find((s) => s.id === sk).label}`, modifier: skillBonus(data, sk), blessed: !!data.blessingActive, forcedDisadvantage: exhaustionDisadvantage("check") });
   });
   on(app, "click", "[data-action=roll-initiative]", () => {
-    openD20RollModal({ label: "Инициатива", modifier: initiativeBonus(data), forcedDisadvantage: exhaustionDisadvantage("check") });
+    openD20RollModal({ label: "Инициатива", modifier: initiativeBonus(data), forcedDisadvantage: exhaustionDisadvantage("check"), forcedAdvantage: initiativeAdvantageSource(data) });
   });
   // Dice-pool builder: queue up any mix of dice (e.g. 2к6 + 1к8), see what's
   // queued, remove entries, then roll everything together at once. Clicking
