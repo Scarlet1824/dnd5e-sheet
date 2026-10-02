@@ -638,9 +638,18 @@ export function renderWizard() {
       const count = m[1] ? CATEGORY_NUM_WORDS[m[1].toLowerCase()] || 1 : 1;
       mentions.push({ start: m.index, end: m.index + m[0].length, text: m[0], categories, count });
     }
+    // «музыкальный инструмент» / «другой музыкальный инструмент» — выпадающий список инструментов.
+    const instrRe = /(?:другой\s+)?музыкальн[а-яё]*\s+инструмент[а-яё]*(?:\s+на\s+(?:ваш|свой)\s+выбор)?/gi;
+    while ((m = instrRe.exec(text))) {
+      mentions.push({ start: m.index, end: m.index + m[0].length, text: m[0], categories: ["__instrument"], count: 1 });
+    }
+    mentions.sort((a, b) => a.start - b.start);
     return mentions;
   }
   function weaponsInCategories(categories) {
+    if (categories.includes("__instrument")) {
+      return ((TOOL_GROUPS.find((g) => /музыкальн/i.test(g.label)) || {}).items || []).map((n) => ({ id: n, name: n, instrument: true }));
+    }
     return WEAPONS.filter((w) => categories.includes(w.category));
   }
   // One-line stat summary for a weapon-choice <option>'s title="" attribute,
@@ -650,6 +659,7 @@ export function renderWizard() {
   // equipmentOptionLabel's CSS-hover bubble, which can't attach to <option>
   // elements inside a native <select> popup).
   function weaponOptionTitle(w) {
+    if (w.instrument) return "Музыкальный инструмент";
     const props = w.properties && w.properties !== "—" ? `, ${w.properties}` : "";
     return `${w.damage} (${w.type})${props}`;
   }
@@ -680,6 +690,7 @@ export function renderWizard() {
       if (mention.count >= 2) hasTwoWeaponPick = true;
       for (let pi = 0; pi < mention.count; pi++) {
         if (pi > 0) html += ` и `;
+        if (mention.categories.includes("__instrument")) html += `<span>Музыкальный инструмент:</span>`;
         const key = categoryChoiceKey(gi, oi, mi, pi);
         const chosen = chosenCategoryWeapon(gi, oi, mi, pi, mention.categories);
         html += `

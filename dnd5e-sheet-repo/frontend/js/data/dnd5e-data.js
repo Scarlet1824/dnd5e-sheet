@@ -2065,7 +2065,7 @@ export const CLASSES = [
     // in wizard.js, which already uses that same kind for a background's
     // instrument-choice entries).
     toolChoice: { count: 3, kind: "instrument" },
-    startEquipment: "Рапира или длинный меч или простое оружие; набор дипломата или набор артиста; лютня или другой музыкальный инструмент; кожаная броня и кинжал",
+    startEquipment: "Рапира или длинный меч или простое оружие; набор дипломата или набор артиста; музыкальный инструмент на ваш выбор; кожаная броня и кинжал",
     spellcasting: { ability: "cha", type: "known", cantripsKnown: 2, level1SpellCount: 4, list: "bard" },
     features: {
       1: ["Бардовское вдохновение", "Заклинания барда"],

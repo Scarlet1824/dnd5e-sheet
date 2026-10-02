@@ -629,8 +629,54 @@ export async function renderSheet(id) {
     "Среди мёртвых": ["spare-the-dying"],
     "Глаза тьмы": ["darkness"],
   };
-  function ensureFeatureSpells() {
+  // Расовые умения, открывающие заклинания на определённом уровне персонажа (тифлинги и т.п.).
+  // Заклинания добавляются в лист автоматически (без ячейки, раз в долгий отдых), убираются при откате уровня.
+  const RACE_LEVEL_SPELLS = {
+    "Инфернальное наследие": [{ level: 3, id: "hellish-rebuke", skipIfCard: "Адское пламя" }, { level: 5, id: "darkness" }],
+    "Дьявольский язык": [{ level: 3, id: "charm-person" }, { level: 5, id: "enthrall" }],
+    "Адское пламя": [{ level: 3, id: "burning-hands" }],
+    "Наследие Маладомини": [{ level: 3, id: "ray-of-sickness" }, { level: 5, id: "crown-of-madness" }],
+    "Наследие Малболга": [{ level: 3, id: "disguise-self" }, { level: 5, id: "invisibility" }],
+    "Наследие Диса": [{ level: 3, id: "disguise-self" }, { level: 5, id: "detect-thoughts" }],
+    "Наследие Авернуса": [{ level: 3, id: "searing-smite" }, { level: 5, id: "branding-smite" }],
+    "Наследие Стигии": [{ level: 3, id: "armor-of-agathys" }, { level: 5, id: "darkness" }],
+    "Наследие Минауроса": [{ level: 3, id: "tensers-floating-disk" }, { level: 5, id: "arcane-lock" }],
+    "Наследие Кании": [{ level: 3, id: "burning-hands" }, { level: 5, id: "flame-blade" }],
+    "Наследие Флегетоса": [{ level: 3, id: "charm-person" }, { level: 5, id: "suggestion" }],
+  };
+  function ensureRaceLevelSpells() {
     let changed = false;
+    const total = (data.classes || []).reduce((n, c) => n + (Number(c.level) || 0), 0);
+    Object.entries(RACE_LEVEL_SPELLS).forEach(([trait, list]) => {
+      const has = (data.features || []).some((f) => f.name === trait);
+      list.forEach((e) => {
+        const sc = data.spellcasting;
+        const sp = SPELLS.find((x) => x.id === e.id);
+        if (!sp) return;
+        const want = has && total >= e.level && !(e.skipIfCard && (data.features || []).some((f) => f.name === e.skipIfCard));
+        if (want) {
+          if (!data.spellcasting) data.spellcasting = { ability: "cha", classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+          const c = data.spellcasting;
+          if (!c.known) c.known = [];
+          if (!c.cantrips) c.cantrips = [];
+          if (!c.ability) c.ability = "cha";
+          if (c.cantrips.includes(e.id) || c.known.includes(e.id) || (c.prepared || []).includes(e.id)) return;
+          c.known.push(e.id);
+          if (!c.granted) c.granted = {};
+          c.granted[e.id] = trait;
+          changed = true;
+        } else if (sc && sc.granted && sc.granted[e.id] === trait) {
+          sc.known = (sc.known || []).filter((x) => x !== e.id);
+          sc.prepared = (sc.prepared || []).filter((x) => x !== e.id);
+          delete sc.granted[e.id];
+          changed = true;
+        }
+      });
+    });
+    return changed;
+  }
+  function ensureFeatureSpells() {
+    let changed = ensureRaceLevelSpells();
     (data.features || []).forEach((f) => {
       const ids = FEATURE_GRANTED_SPELLS[f.name];
       if (!ids) return;
@@ -2668,9 +2714,12 @@ export async function renderSheet(id) {
     const picked = levelUpState.optionalPicked || [];
     return `
       <div class="panel" style="margin-top:12px;">
-        <h4 style="margin-top:0;">Опциональные умения</h4>
-        <p class="muted" style="margin-top:0;">${escapeHtml(OPTIONAL_FEATURE_SOURCE)} — используются только с разрешения Мастера.</p>
-        ${opts
+        <button type="button" class="small" data-level-up-opt-toggle style="width:100%;text-align:left;display:flex;justify-content:space-between;">
+          <strong>${levelUpState.optOpen ? "▾" : "▸"} Опциональные умения (${opts.length})${picked.length ? ` — выбрано: ${picked.length}` : ""}</strong>
+          <span class="muted">${levelUpState.optOpen ? "свернуть" : "развернуть"}</span>
+        </button>
+        ${levelUpState.optOpen ? `<p class="muted" style="margin:8px 0 0;">${escapeHtml(OPTIONAL_FEATURE_SOURCE)} — используются только с разрешения Мастера.</p>` : ""}
+        ${!levelUpState.optOpen ? "" : opts
           .map((o) => {
             const repl = (baseFeatures || []).filter((f) => optionalReplaces(o, f.name)).map((f) => `«${f.name}»`);
             return `
@@ -2722,6 +2771,10 @@ export async function renderSheet(id) {
       const cur = new Set(levelUpState.styleCantrips[st] || []);
       if (el.checked) cur.add(el.dataset.levelUpStyleCantrip); else cur.delete(el.dataset.levelUpStyleCantrip);
       levelUpState.styleCantrips[st] = [...cur].slice(0, 2);
+      refreshLevelUpModal();
+    });
+    on(modal, "click", "[data-level-up-opt-toggle]", () => {
+      levelUpState.optOpen = !levelUpState.optOpen;
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-optional]", (e, el) => {
