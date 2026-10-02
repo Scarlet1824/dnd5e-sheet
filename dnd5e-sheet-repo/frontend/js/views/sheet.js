@@ -548,7 +548,7 @@ export async function renderSheet(id) {
       else if (isBard && /^Контрчары$/i.test(n)) { f.name = "Контрочарование"; if ((f.desc || "").length < 260) f.desc = bardData["Контрочарование"]; changed = true; }
       else if (isBard && /^Знаток$/i.test(n)) { f.name = "Компетентность"; changed = true; }
       else if (isBard && /^Песнь отдыха$/i.test(n) && (f.desc || "").length < 200) { f.desc = bardData["Песнь отдыха"]; changed = true; }
-      else if (/Паладин/i.test(f.source || "") && /^Использование божественной силы$/i.test(n)) { f.name = "Праведное восстановление"; changed = true; }
+      else if (/Паладин/i.test(f.source || "") && /^Праведное восстановление$/i.test(n) && /^Вы можете потратить одно использование/.test(f.desc || "")) { f.name = "Использование божественной силы"; changed = true; }
       else if (/^Боевой стиль: Слепой бой$/i.test(n)) { f.name = "Боевой стиль: Сражение вслепую"; changed = true; }
     });
     if (changed) doSave();
@@ -4587,7 +4587,7 @@ export async function renderSheet(id) {
     if (/^Хранитель душ$/i.test(f.name || "") && /упокоения/i.test(f.source || "")) return { max: 1, recharge: "any" };
     // Опциональные «Праведное восстановление» (паладин: 3/7/15 ур.) и «Использование божественной силы» (жрец: 2/6/18 ур.): 1/2/3 использования, продолжительный отдых.
     if (/^Праведное восстановление$/i.test(f.name || "")) { const L = ((data.classes || []).find((c) => c.id === "paladin") || {}).level || 3; return { max: L >= 15 ? 3 : L >= 7 ? 2 : 1, recharge: "long" }; }
-    if (/^Использование божественной силы$/i.test(f.name || "")) { const L = ((data.classes || []).find((c) => c.id === "cleric") || {}).level || 2; return { max: L >= 18 ? 3 : L >= 6 ? 2 : 1, recharge: "long" }; }
+    if (/^Использование божественной силы$/i.test(f.name || "")) { const isPal = /Паладин/i.test(f.source || ""); const L = ((data.classes || []).find((c) => c.id === (isPal ? "paladin" : "cleric")) || {}).level || (isPal ? 3 : 2); return { max: isPal ? (L >= 15 ? 3 : L >= 7 ? 2 : 1) : (L >= 18 ? 3 : L >= 6 ? 2 : 1), recharge: "long" }; }
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
     if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
     // Клинок души «Псионическая сила»: "количество... равно вашему
