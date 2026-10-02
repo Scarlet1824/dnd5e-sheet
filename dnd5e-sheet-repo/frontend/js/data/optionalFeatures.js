@@ -2,6 +2,8 @@
 // Предлагаются в окне повышения уровня — только с разрешения Мастера.
 // replaces — регулярные выражения (по имени) основных умений этого же уровня, которые опциональное умение заменяет
 // (пустой список — умение лишь дополняет класс, ничего не заменяя).
+import { SPELLS } from "./dnd5e-data.js";
+
 export const OPTIONAL_FEATURE_SOURCE = "Tasha's Cauldron of Everything";
 
 const HARNESS = (uses) =>
@@ -10,8 +12,8 @@ const HARNESS = (uses) =>
 const CANTRIP_VERSATILITY = (cls) =>
   `Каждый раз, когда вы достигаете уровня в этом классе, дающего умение «Черта или увеличение характеристик», вы можете заменить один заговор, изученный умением «Использование заклинаний» этого класса, другим заговором из списка заклинаний ${cls}.`;
 
-const MARTIAL_VERSATILITY = (extra) =>
-  `Каждый раз, когда вы достигаете уровня в этом классе, дающего умение «Черта или увеличение характеристик», вы можете сделать одно из следующего, отражая смену направления вашей подготовки: заменить боевой стиль, выбранный вами для умения «Боевой стиль», другим боевым стилем, доступным этому классу${extra}.`;
+const MARTIAL_VERSATILITY = (cls, extra) =>
+  `Каждый раз, когда вы достигаете определённого уровня в этом классе и получаете умение «Увеличение характеристик», вы можете заменить известный вам боевой стиль на другой, доступный ${cls}${extra || ""}. Эта замена отражает смену направления вашего развития в боевых практиках.`;
 
 export const OPTIONAL_CLASS_FEATURES = {
   barbarian: [
@@ -57,7 +59,7 @@ export const OPTIONAL_CLASS_FEATURES = {
   fighter: [
     {
       name: "Универсальность воина", level: 4, replaces: [],
-      desc: MARTIAL_VERSATILITY(", или, если вы знаете маневры подкласса Мастер боевых искусств, заменить один известный вам маневр другим маневром"),
+      desc: MARTIAL_VERSATILITY("воину", ". Кроме того, если вы знаете маневры подкласса Мастер боевых искусств, вы можете заменить один известный вам маневр другим"),
     },
   ],
   monk: [
@@ -80,8 +82,8 @@ export const OPTIONAL_CLASS_FEATURES = {
     },
   ],
   paladin: [
-    { name: "Использование божественной силы", level: 3, replaces: [], desc: HARNESS("3-й уровень — один раз; 7-й уровень — дважды; 15-й уровень — трижды") },
-    { name: "Универсальность воина", level: 4, replaces: [], desc: MARTIAL_VERSATILITY("") },
+    { name: "Праведное восстановление", level: 3, replaces: [], desc: HARNESS("3-й уровень — один раз; 7-й уровень — дважды; 15-й уровень — трижды") },
+    { name: "Универсальность воина", level: 4, replaces: [], desc: MARTIAL_VERSATILITY("паладину") },
   ],
   ranger: [
     {
@@ -99,7 +101,7 @@ export const OPTIONAL_CLASS_FEATURES = {
       desc:
         "Вы можете один раз накладывать заклинание «разговор с животными [speak with animals]», не тратя ячейку заклинаний. Вы восстанавливаете эту возможность после продолжительного отдыха.\n\nВаше мастерство в этой практике следопытов даёт дополнительные способы расширить чувства: заклинания «чувства зверя [beast sense]» (5-й уровень), «разговор с растениями [speak with plants]» (9-й уровень), «поиск существа [locate creature]» (13-й уровень) и «общение с природой [commune with nature]» (17-й уровень) вы тоже можете накладывать по одному разу, не тратя ячейку; после этого вы не можете накладывать это заклинание таким образом до окончания продолжительного отдыха. Эти заклинания считаются для вас заклинаниями следопыта.",
     },
-    { name: "Универсальность воина", level: 4, replaces: [], desc: MARTIAL_VERSATILITY("") },
+    { name: "Универсальность воина", level: 4, replaces: [], desc: MARTIAL_VERSATILITY("следопыту") },
     {
       name: "Покров природы", level: 10, replaces: ["^Скрыться на виду"],
       desc:
@@ -148,4 +150,44 @@ export function optionalFeaturesAt(classId, level) {
 }
 export function optionalReplaces(opt, featureName) {
   return (opt.replaces || []).some((re) => new RegExp(re, "i").test(featureName || ""));
+}
+
+// ---- Дополнительные заклинания (опциональное умение классов с заклинаниями) ----------------------------
+// Списки из Tasha's Cauldron of Everything; в расчёт идут только заклинания, которые есть в каталоге и ещё не входят в список класса.
+const ADDITIONAL_SPELLS = {
+  bard: ["color-spray", "command", "aid", "mirror-image", "intellect-fortress", "mass-healing-word", "slow", "phantasmal-killer", "rarys-telepathic-bond", "heroes-feast", "dream-of-the-blue-veil", "prismatic-wall"],
+  cleric: ["aura-of-vitality", "spirit-shroud", "aura-of-life", "aura-of-purity", "summon-celestial", "sunbeam", "sunburst", "power-word-heal"],
+  druid: ["protection-from-evil-and-good", "augury", "continual-flame", "summon-beast", "aura-of-vitality", "elemental-weapon", "revivify", "summon-fey", "divination", "fire-shield", "summon-elemental", "cone-of-cold", "flesh-to-stone", "incendiary-cloud", "symbol"],
+  paladin: ["gentle-repose", "prayer-of-healing", "warding-bond", "spirit-shroud", "summon-celestial"],
+  ranger: ["entangle", "searing-smite", "aid", "enhance-ability", "gust-of-wind", "magic-weapon", "summon-beast", "elemental-weapon", "meld-into-stone", "revivify", "summon-fey", "dominate-beast", "summon-elemental", "greater-restoration"],
+  sorcerer: ["booming-blade", "green-flame-blade", "lightning-lure", "mind-sliver", "sword-burst", "grease", "tashas-caustic-brew", "flame-blade", "flaming-sphere", "magic-weapon", "tashas-mind-whip", "intellect-fortress", "vampiric-touch", "fire-shield", "bigbys-hand", "flesh-to-stone", "otilukes-freezing-sphere", "tashas-otherworldly-guise", "dream-of-the-blue-veil", "demiplane"],
+  warlock: ["booming-blade", "green-flame-blade", "lightning-lure", "mind-sliver", "sword-burst", "intellect-fortress", "spirit-shroud", "summon-fey", "summon-shadowspawn", "summon-undead", "summon-aberration", "summon-greater-demon", "mislead", "planar-binding", "teleportation-circle", "summon-fiend", "tashas-otherworldly-guise", "dream-of-the-blue-veil", "blade-of-disaster", "gate", "weird"],
+  wizard: ["booming-blade", "green-flame-blade", "lightning-lure", "mind-sliver", "sword-burst", "tashas-caustic-brew", "augury", "enhance-ability", "tashas-mind-whip", "intellect-fortress", "speak-with-dead", "spirit-shroud", "summon-fey", "summon-shadowspawn", "summon-undead", "divination", "summon-aberration", "summon-construct", "summon-elemental", "summon-fiend", "tashas-otherworldly-guise", "dream-of-the-blue-veil", "blade-of-disaster"],
+};
+const SPELL_BY_ID = new Map(SPELLS.map((s) => [s.id, s]));
+// Заклинания, которые опциональное умение реально добавляет классу (есть в каталоге и ещё не в списке класса).
+export function additionalSpellIds(classId) {
+  return (ADDITIONAL_SPELLS[classId] || []).filter((id) => {
+    const sp = SPELL_BY_ID.get(id);
+    return sp && !sp.classes.includes(classId);
+  });
+}
+export const ADDITIONAL_SPELLS_NAME = (classId) => `Дополнительные заклинания ${CLASS_GENITIVE[classId]}`;
+function additionalSpellsDesc(classId) {
+  const showAll = classId === "paladin" || classId === "ranger";
+  const ids = showAll ? (ADDITIONAL_SPELLS[classId] || []).filter((id) => SPELL_BY_ID.has(id)) : additionalSpellIds(classId);
+  const byLevel = new Map();
+  ids.forEach((id) => { const sp = SPELL_BY_ID.get(id); if (!byLevel.has(sp.level)) byLevel.set(sp.level, []); byLevel.get(sp.level).push(sp.name.toLowerCase()); });
+  const rows = [...byLevel.entries()].sort((a, b) => a[0] - b[0]).map(([lvl, names]) => `${lvl === 0 ? "Заговоры" : lvl + "-й круг"}: ${names.join(", ")}`);
+  return `Заклинания из представленного ниже списка расширяют ваш список заклинаний ${CLASS_GENITIVE[classId]}, представленный в «Книге игрока». Список отсортирован по уровню заклинаний, а не по уровню персонажа.\n\n${rows.join("\n")}`;
+}
+Object.keys(ADDITIONAL_SPELLS).forEach((classId) => {
+  (OPTIONAL_CLASS_FEATURES[classId] = OPTIONAL_CLASS_FEATURES[classId] || []).unshift({
+    name: ADDITIONAL_SPELLS_NAME(classId), level: classId === "paladin" || classId === "ranger" ? 2 : 1, replaces: [], late: true, spells: true,
+    desc: additionalSpellsDesc(classId),
+  });
+});
+// Показывать ли в окне повышения до newLevel (опции «на потом» доступны на любом уровне, пока не взяты).
+export function optionalFeaturesForLevelUp(classId, newLevel, hasCard) {
+  return (OPTIONAL_CLASS_FEATURES[classId] || []).filter((o) => (o.level === newLevel && newLevel > 1) || (o.late && o.level <= newLevel && newLevel > 1 && !hasCard(o)));
 }

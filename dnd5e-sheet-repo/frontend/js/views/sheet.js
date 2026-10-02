@@ -1,7 +1,7 @@
 import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeModal, wireHoverCardPortal } from "../dom.js";
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
-import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesAt, optionalReplaces } from "../data/optionalFeatures.js";
+import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
 import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
@@ -534,6 +534,22 @@ export async function renderSheet(id) {
         if (!Array.isArray(data.proficiencies.tools)) data.proficiencies.tools = [];
         if (!data.proficiencies.tools.includes("Инструменты кузнеца")) { data.proficiencies.tools.push("Инструменты кузнеца"); changed = true; }
       }
+    });
+    if (changed) doSave();
+  })();
+  // Раунд 67: переименования барда/паладина, стиль «Сражение вслепую».
+  (function migrateRound67() {
+    let changed = false;
+    const bardData = (CLASSES.find((c) => c.id === "bard") || {}).classFeatureText || {};
+    (data.features || []).forEach((f) => {
+      const n = f.name || "";
+      const isBard = /Бард/i.test(f.source || "");
+      if (isBard && /^Разностороннее дарование$/i.test(n)) { f.name = "Мастер на все руки"; if ((f.desc || "").length < 220) f.desc = bardData["Мастер на все руки"]; changed = true; }
+      else if (isBard && /^Контрчары$/i.test(n)) { f.name = "Контрочарование"; if ((f.desc || "").length < 260) f.desc = bardData["Контрочарование"]; changed = true; }
+      else if (isBard && /^Знаток$/i.test(n)) { f.name = "Компетентность"; changed = true; }
+      else if (isBard && /^Песнь отдыха$/i.test(n) && (f.desc || "").length < 200) { f.desc = bardData["Песнь отдыха"]; changed = true; }
+      else if (/Паладин/i.test(f.source || "") && /^Использование божественной силы$/i.test(n)) { f.name = "Праведное восстановление"; changed = true; }
+      else if (/^Боевой стиль: Слепой бой$/i.test(n)) { f.name = "Боевой стиль: Сражение вслепую"; changed = true; }
     });
     if (changed) doSave();
   })();
@@ -1152,7 +1168,9 @@ export async function renderSheet(id) {
     if (!raw) return [];
     return raw.map((f) => {
       const split = splitFeatureText(f);
-      const fullText = cls.classFeatureText && cls.classFeatureText[split.name];
+      // Если то же умение уже было на более раннем уровне (рост кости и т.п.), показываем только короткое пояснение, а не полный текст ещё раз.
+      const repeated = split.desc && Object.keys(cls.features || {}).some((lv) => Number(lv) < newLevel && (cls.features[lv] || []).some((x) => splitFeatureText(x).name === split.name));
+      const fullText = !repeated && cls.classFeatureText && cls.classFeatureText[split.name];
       return { name: split.name, desc: fullText || split.desc };
     });
   }
@@ -1370,7 +1388,7 @@ export async function renderSheet(id) {
       ...((data.spellcasting && data.spellcasting.prepared) || []),
     ]);
     const options = SPELLS.filter(
-      (s) => s.level >= 1 && s.level <= maxCircle && s.classes.includes(spellList) && !alreadyKnown.has(s.id)
+      (s) => s.level >= 1 && s.level <= maxCircle && (s.classes.includes(spellList) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id)
     ).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
     return `
       <div class="panel" style="margin:10px 0;">
@@ -1398,7 +1416,7 @@ export async function renderSheet(id) {
     const sc = levelUpState.knownCantripChoice;
     const need = knownCantripGrowthCount(cls, newLevel, c);
     const alreadyKnown = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
-    const options = SPELLS.filter((s) => s.level === 0 && s.classes.includes(spellListFor(cls, c)) && !alreadyKnown.has(s.id))
+    const options = SPELLS.filter((s) => s.level === 0 && (s.classes.includes(spellListFor(cls, c)) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
     return `
       <div class="panel" style="margin:10px 0;">
@@ -1602,6 +1620,88 @@ export async function renderSheet(id) {
             .join("")}
         </div>
       </div>`;
+  }
+  // ---- Компетентность при повышении уровня (Бард 3/10, Плут 6) -----------------------------------------
+  function levelExpertiseCount(cls, newLevel) {
+    const raw = (cls && cls.features && cls.features[newLevel]) || [];
+    return raw.some((f) => /^Компетентность/.test(f)) ? 2 : 0;
+  }
+  function expertiseOptions() {
+    const prof = data.proficiencies.skills || [];
+    const already = new Set(data.proficiencies.expertise || []);
+    return SKILLS.filter((sk) => prof.includes(sk.id) && !already.has(sk.id));
+  }
+  function expertisePanelHtml() {
+    const ec = levelUpState.expertiseChoice;
+    if (!ec) return "";
+    const opts = expertiseOptions();
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Компетентность — выберите ${Math.min(ec.count, opts.length)} навыка (${ec.picked.length}/${Math.min(ec.count, opts.length)})</h4>
+        <p class="muted" style="margin-top:0;">Бонус мастерства удваивается для проверок выбранных навыков (только навыки, которыми вы владеете).</p>
+        <div class="grid cols-3">
+          ${opts.map((sk) => `<label class="row" style="gap:6px;"><input type="checkbox" data-level-up-expertise="${sk.id}" ${ec.picked.includes(sk.id) ? "checked" : ""} ${!ec.picked.includes(sk.id) && ec.picked.length >= ec.count ? "disabled" : ""} /> ${escapeHtml(sk.label)}</label>`).join("")}
+        </div>
+      </div>`;
+  }
+  function expertiseChoiceIncomplete() {
+    const ec = levelUpState.expertiseChoice;
+    return !!(ec && ec.picked.length < Math.min(ec.count, expertiseOptions().length));
+  }
+  // ---- Универсальность воина: смена боевого стиля на уровне с «Увеличением характеристик» --------------------
+  function currentBaseStyleCard(cls) {
+    return (data.features || []).find((f) => f.source === cls.name && /^Боевой стиль:/i.test(f.name || ""));
+  }
+  function canSwapFightingStyle(cls, newLevel) {
+    return !!cls && ["fighter", "paladin", "ranger"].includes(cls.id) && levelHasAsiChoice(cls, newLevel) && (data.features || []).some((f) => /^Универсальность воина$/i.test(f.name || "")) && !!currentBaseStyleCard(cls);
+  }
+  function styleOptionsFor(cls) {
+    return (getClass("fighter").level1Choice.options || []).filter((o) => !o.only || o.only.includes(cls.id));
+  }
+  function styleSwapPanelHtml(cls) {
+    const sw = levelUpState.styleSwap;
+    if (!sw) return "";
+    const cur = currentBaseStyleCard(cls);
+    const curName = cur ? cur.name.replace(/^Боевой стиль:\s*/i, "") : "";
+    const opts = styleOptionsFor(cls).filter((o) => o.name !== curName);
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Универсальность воина — сменить боевой стиль (необязательно)</h4>
+        <p class="muted" style="margin-top:0;">Сейчас: ${escapeHtml(curName || "—")}. Опциональное умение (Tasha's), только с разрешения Мастера.</p>
+        <select data-level-up-style-swap>
+          <option value="">— оставить текущий —</option>
+          ${opts.map((o) => `<option value="${escapeHtml(o.name)}" ${sw.name === o.name ? "selected" : ""}>${escapeHtml(o.name)}</option>`).join("")}
+        </select>
+        ${sw.name ? `<p class="muted" style="font-size:0.85rem;margin-bottom:0;">${escapeHtml((opts.find((o) => o.name === sw.name) || {}).desc || "")}</p>` : ""}
+      </div>`;
+  }
+  // ---- Заговоры боевых стилей «Друидический воин» / «Благословенный воин» ------------------------------------
+  const STYLE_CANTRIP_CLASS = { "Друидический воин": "druid", "Благословенный воин": "cleric" };
+  function chosenStyleCantripStyles() {
+    const names = [levelUpState.baseFightingStyleChoice && levelUpState.baseFightingStyleChoice.name, levelUpState.fightingStyleChoice && levelUpState.fightingStyleChoice.name, levelUpState.styleSwap && levelUpState.styleSwap.name];
+    return [...new Set(names.filter((n) => n && STYLE_CANTRIP_CLASS[n]))];
+  }
+  function styleCantripsPanelHtml() {
+    const styles = chosenStyleCantripStyles();
+    if (!styles.length) return "";
+    if (!levelUpState.styleCantrips) levelUpState.styleCantrips = {};
+    const known = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
+    return styles
+      .map((st) => {
+        const picked = levelUpState.styleCantrips[st] || [];
+        const list = SPELLS.filter((sp) => sp.level === 0 && sp.classes.includes(STYLE_CANTRIP_CLASS[st]) && !known.has(sp.id)).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+        return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${escapeHtml(st)} — два заговора ${STYLE_CANTRIP_CLASS[st] === "druid" ? "друида" : "жреца"} (${picked.length}/2)</h4>
+        <div class="grid cols-3">
+          ${list.map((sp) => `<label class="row" style="gap:6px;"><input type="checkbox" data-level-up-style-cantrip="${sp.id}" data-style="${escapeHtml(st)}" ${picked.includes(sp.id) ? "checked" : ""} ${!picked.includes(sp.id) && picked.length >= 2 ? "disabled" : ""} /> ${escapeHtml(sp.name)}</label>`).join("")}
+        </div>
+      </div>`;
+      })
+      .join("");
+  }
+  function styleCantripsIncomplete() {
+    return chosenStyleCantripStyles().some((st) => ((levelUpState.styleCantrips || {})[st] || []).length < 2);
   }
   function baseFightingStyleChoiceIncomplete() {
     return !!(levelUpState.baseFightingStyleChoice && !levelUpState.baseFightingStyleChoice.name);
@@ -2396,7 +2496,7 @@ export async function renderSheet(id) {
     // Дополнительный боевой стиль gets its own picker below instead of
     // this plain descriptive card, whenever that picker is on offer.
     const archetypeFeatures = archetypeFeaturesRaw.filter((f) => !(levelUpState.fightingStyleChoice && f.name === SECOND_FIGHTING_STYLE_FEATURE_NAME));
-    const optPicked = optionalFeaturesAt(cls.id, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
+    const optPicked = levelUpOptionalList(cls, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
     const allFeaturesBeforeOpt = [...features, ...archetypeFeatures];
     const allFeatures = allFeaturesBeforeOpt.filter((f) => !optPicked.some((o) => optionalReplaces(o, f.name)));
     const missingSubclassForArchetypeLevel = !c.subclass && !levelUpState.subclassChoice && (cls.features?.[newLevel] || []).some((f) => f === ARCHETYPE_FEATURE_MARKER);
@@ -2456,6 +2556,9 @@ export async function renderSheet(id) {
       ${levelUpState.subclassChoice ? subclassChoicePanelHtml(cls) : ""}
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
+      ${expertisePanelHtml()}
+      ${styleSwapPanelHtml(cls)}
+      ${styleCantripsPanelHtml()}
       ${levelUpPicksPanelHtml()}
       ${levelUpState.toolChoice ? craftToolChoicePanelHtml() : ""}
       ${levelUpState.subSkillChoice ? subSkillChoicePanelHtml() : ""}
@@ -2477,6 +2580,8 @@ export async function renderSheet(id) {
           levelUpPicksIncomplete() ||
           fightingStyleChoiceIncomplete() ||
           baseFightingStyleChoiceIncomplete() ||
+          expertiseChoiceIncomplete() ||
+          styleCantripsIncomplete() ||
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
           multiPickIncomplete() ||
@@ -2494,8 +2599,11 @@ export async function renderSheet(id) {
   // варианты вынесены в выбор ниже (тотемы, ауры бури) или в таблицу (дикая магия).
   // Опциональные умения Tasha's: выбираются галочкой (только с разрешения Мастера); если умение что-то заменяет —
   // основное умение этого уровня не добавляется.
+  function levelUpOptionalList(cls, newLevel) {
+    return optionalFeaturesForLevelUp(cls.id, newLevel, (o) => (data.features || []).some((f) => f.name === o.name));
+  }
   function optionalFeaturesPanelHtml(cls, newLevel, baseFeatures) {
-    const opts = optionalFeaturesAt(cls.id, newLevel);
+    const opts = levelUpOptionalList(cls, newLevel);
     if (!opts.length) return "";
     const picked = levelUpState.optionalPicked || [];
     return `
@@ -2528,6 +2636,27 @@ export async function renderSheet(id) {
   }
   function wireLevelUpModal(modal) {
     wireHoverCardPortal(modal);
+    on(modal, "change", "[data-level-up-expertise]", (e, el) => {
+      const ec = levelUpState.expertiseChoice;
+      if (!ec) return;
+      const id = el.dataset.levelUpExpertise;
+      const cur = new Set(ec.picked);
+      if (el.checked) cur.add(id); else cur.delete(id);
+      ec.picked = [...cur].slice(0, ec.count);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-style-swap]", (e, el) => {
+      levelUpState.styleSwap.name = el.value;
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-style-cantrip]", (e, el) => {
+      if (!levelUpState.styleCantrips) levelUpState.styleCantrips = {};
+      const st = el.dataset.style;
+      const cur = new Set(levelUpState.styleCantrips[st] || []);
+      if (el.checked) cur.add(el.dataset.levelUpStyleCantrip); else cur.delete(el.dataset.levelUpStyleCantrip);
+      levelUpState.styleCantrips[st] = [...cur].slice(0, 2);
+      refreshLevelUpModal();
+    });
     on(modal, "change", "[data-level-up-optional]", (e, el) => {
       const n = el.dataset.levelUpOptional;
       const cur = new Set(levelUpState.optionalPicked || []);
@@ -2557,6 +2686,10 @@ export async function renderSheet(id) {
       const ccls = cc && getClass(cc.id);
       const newLevel = (cc?.level || 1) + 1;
       levelUpState.asi = ccls && levelHasAsiChoice(ccls, newLevel) ? freshAsiState() : null;
+      levelUpState.optionalPicked = [];
+      levelUpState.expertiseChoice = ccls && levelExpertiseCount(ccls, newLevel) ? { count: levelExpertiseCount(ccls, newLevel), picked: [] } : null;
+      levelUpState.styleSwap = ccls && canSwapFightingStyle(ccls, newLevel) ? { name: "" } : null;
+      levelUpState.styleCantrips = {};
       levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, newLevel) ? freshSubclassChoiceState() : null;
       levelUpState.fightingStyleChoice = ccls && levelHasFightingStyleChoice(cc, ccls, newLevel) ? freshFightingStyleChoiceState() : null;
       levelUpState.baseFightingStyleChoice = ccls && levelHasBaseFightingStyleChoice(ccls, newLevel) ? freshBaseFightingStyleChoiceState() : null;
@@ -2873,7 +3006,7 @@ export async function renderSheet(id) {
     // from the live level (see SECOND_WIND_FEATURE_NAME below) -- so simply
     // bumping c.level here is enough for those to "recalculate themselves";
     // nothing stored on the feature card itself needs updating.
-    const optApply = optionalFeaturesAt(cls.id, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
+    const optApply = levelUpOptionalList(cls, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
     const optReplacedName = (n) => optApply.some((o) => optionalReplaces(o, n));
     levelUpFeaturesFor(cls, newLevel)
       .filter(
@@ -2973,6 +3106,21 @@ export async function renderSheet(id) {
         }
       }
     }
+    if (levelUpState.expertiseChoice) {
+      if (!Array.isArray(data.proficiencies.expertise)) data.proficiencies.expertise = [];
+      levelUpState.expertiseChoice.picked.forEach((id) => { if (!data.proficiencies.expertise.includes(id)) data.proficiencies.expertise.push(id); });
+    }
+    if (levelUpState.styleSwap && levelUpState.styleSwap.name) {
+      const opt = styleOptionsFor(cls).find((o) => o.name === levelUpState.styleSwap.name);
+      const curCard = currentBaseStyleCard(cls);
+      if (opt && curCard) { curCard.name = `Боевой стиль: ${opt.name}`; curCard.desc = opt.desc; }
+    }
+    Object.entries(levelUpState.styleCantrips || {}).forEach(([st, ids]) => {
+      if (!chosenStyleCantripStyles().includes(st)) return;
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!Array.isArray(data.spellcasting.cantrips)) data.spellcasting.cantrips = [];
+      ids.forEach((id) => { if (!data.spellcasting.cantrips.includes(id)) data.spellcasting.cantrips.push(id); });
+    });
     optApply.forEach((o) => {
       const src = `${cls.name} — опциональное (${OPTIONAL_FEATURE_SOURCE})`;
       if ((data.features || []).some((x) => x.name === o.name && x.source === src)) return;
@@ -3060,6 +3208,9 @@ export async function renderSheet(id) {
     levelUpState = {
       classIndex: 0,
       optionalPicked: [],
+      expertiseChoice: cls && levelExpertiseCount(cls, newLevel) ? { count: levelExpertiseCount(cls, newLevel), picked: [] } : null,
+      styleSwap: cls && canSwapFightingStyle(cls, newLevel) ? { name: "" } : null,
+      styleCantrips: {},
       hpMethod: "average",
       rolledAmount: null,
       asi: cls && levelHasAsiChoice(cls, newLevel) ? freshAsiState() : null,
@@ -4434,6 +4585,9 @@ export async function renderSheet(id) {
     if (GENIE_VESSEL_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "long" };
     // Домен упокоения «Хранитель душ»: раз до начала вашего следующего хода — ручной счётчик (восстанавливается вручную / на отдыхе).
     if (/^Хранитель душ$/i.test(f.name || "") && /упокоения/i.test(f.source || "")) return { max: 1, recharge: "any" };
+    // Опциональные «Праведное восстановление» (паладин: 3/7/15 ур.) и «Использование божественной силы» (жрец: 2/6/18 ур.): 1/2/3 использования, продолжительный отдых.
+    if (/^Праведное восстановление$/i.test(f.name || "")) { const L = ((data.classes || []).find((c) => c.id === "paladin") || {}).level || 3; return { max: L >= 15 ? 3 : L >= 7 ? 2 : 1, recharge: "long" }; }
+    if (/^Использование божественной силы$/i.test(f.name || "")) { const L = ((data.classes || []).find((c) => c.id === "cleric") || {}).level || 2; return { max: L >= 18 ? 3 : L >= 6 ? 2 : 1, recharge: "long" }; }
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
     if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
     // Клинок души «Псионическая сила»: "количество... равно вашему
@@ -4995,7 +5149,17 @@ export async function renderSheet(id) {
       const sub = (cls?.subclasses || []).find((s) => s.name.toLowerCase() === c.subclass.toLowerCase());
       (sub?.expandedSpells || []).forEach((id) => ids.add(id));
     });
+    optionalExtraSpellIds().forEach((id) => ids.add(id));
     return ids;
+  }
+  // Опциональное умение «Дополнительные заклинания <класса>» (Tasha's): расширяет список заклинаний класса.
+  function optionalExtraSpellIds(classIdFilter) {
+    const out = new Set();
+    (data.classes || []).forEach((c) => {
+      if (classIdFilter && c.id !== classIdFilter) return;
+      if ((data.features || []).some((f) => f.name === ADDITIONAL_SPELLS_NAME(c.id))) additionalSpellIds(c.id).forEach((id) => out.add(id));
+    });
+    return out;
   }
   // Cleric domain spells (and any future subclass with the same
   // "domainSpells" shape): unlike expandedSpells above, these aren't just a
@@ -5848,7 +6012,8 @@ export async function renderSheet(id) {
                     // "к20" в тексте это порог, а не бросок; Жуткий лорд получает
                     // свои собственные кнопки ниже.
                     /^(Улучшенная божественная кара|Непобедимый покоритель|Жуткий лорд|Всплеск дикости|Нестабильная отдача|Контролируемый всплеск)$/i.test(f.name || "") ||
-                    !!divineStrikeType(f);
+                    !!divineStrikeType(f) ||
+                    /^(Песнь отдыха|Праведное восстановление|Использование божественной силы|Универсальность|Мастер на все руки)/i.test(f.name || "");
                   const dice = noRollButton
                     ? null
                     : PSIONIC_POWER_FEATURE_NAME.test(f.name || "")
@@ -6586,6 +6751,12 @@ export async function renderSheet(id) {
       total += 2;
       parts.push(`2`);
       breakdown.push({ value: 2, label: "боевой стиль: Дуэлянт" });
+    }
+    // Боевой стиль «Сражение метательным оружием»: +2 к урону метательной атакой (автоматически).
+    if (a.rangeType === "thrown" && hasFightingStyle("Сражение метательным оружием")) {
+      total += 2;
+      parts.push(`2`);
+      breakdown.push({ value: 2, label: "боевой стиль: Сражение метательным оружием" });
     }
     // Ярость's flat damage bonus (+2/+3/+4 by Barbarian level, see
     // rageDamageBonus below) applies automatically to every Силовая (Str)
@@ -7972,8 +8143,12 @@ export async function renderSheet(id) {
     if (!window.confirm("Откатить последнее повышение уровня? Все изменения этого уровня (хиты, умения, черта/характеристика, подкласс) будут отменены.")) return;
     const snapshot = stack[stack.length - 1];
     const remainingStack = stack.slice(0, -1);
+    // Инвентарь, оружие и атаки не относятся к уровню — после отката остаются такими, какими были до отката.
+    const KEEP_ON_REVERT = ["armorId", "armorEquipped", "customArmor", "shieldEquipped", "shieldACBonus", "healingPotions", "attacks", "weapons", "ammo", "equipmentText", "money", "artifacts", "pets", "notes", "personality", "portraitDataUrl"];
+    const kept = {};
+    KEEP_ON_REVERT.forEach((k) => { if (k in data) kept[k] = JSON.parse(JSON.stringify(data[k])); });
     Object.keys(data).forEach((k) => delete data[k]);
-    Object.assign(data, snapshot);
+    Object.assign(data, snapshot, kept);
     // The restored snapshot has no stack of its own (it was stripped out
     // when taken -- see applyLevelUp), so the remaining, one-shorter stack
     // is reattached here, letting the button keep working for further

@@ -9,7 +9,7 @@ import {
   equipmentNameMatches, expandPackContents, detectAmmoInText, stripStartingGoldMention, splitFeatureText,
   parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, LANGUAGES, LANGUAGE_GROUPS, TOOLS, TOOL_GROUPS, GAMING_SETS, VEHICLE_GROUPS, FEATS,
 } from "../data/dnd5e-data.js";
-import { optionalFeaturesAt } from "../data/optionalFeatures.js";
+import { optionalFeaturesAt, additionalSpellIds, ADDITIONAL_SPELLS_NAME, OPTIONAL_CLASS_FEATURES, OPTIONAL_FEATURE_SOURCE } from "../data/optionalFeatures.js";
 import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
@@ -94,6 +94,7 @@ export function renderWizard() {
     favoredEnemyLanguage: "", // a LANGUAGES entry, or "custom", or "" (no language / skip)
     favoredEnemyLanguageCustom: "", // free-text language name, when favoredEnemyLanguage === "custom"
     favoredTerrain: "", // Следопыт: one of RANGER_FAVORED_TERRAIN_TYPES
+    optAddSpells: false, // Tasha's: «Дополнительные заклинания <класса>» (1 уровень)
     optFavoredFoe: false, // Следопыт, Tasha's: «Избранный противник» вместо «Избранного врага»
     optDeftExplorer: false, // Следопыт, Tasha's: «Ловкий исследователь» вместо «Исследователя природы»
     name: "",
@@ -484,19 +485,6 @@ export function renderWizard() {
       <div class="panel">
         <p class="muted">💡 На 1 уровне следопыт выбирает тип избранного врага и тип избранной местности (не подкласс — «Архетип следопыта» выбирается на 3 уровне).</p>
       </div>
-      <div class="panel">
-        <h4 style="margin-top:0;">Опциональные умения</h4>
-        <p class="muted" style="margin-top:0;">Tasha's Cauldron of Everything — только с разрешения Мастера. Заменяют основные умения 1 уровня.</p>
-        ${optionalFeaturesAt("ranger", 1).map((o) => {
-          const key = o.name === "Избранный противник" ? "foe" : "deft";
-          const on_ = key === "foe" ? state.optFavoredFoe : state.optDeftExplorer;
-          return `<label class="row" style="gap:10px;align-items:flex-start;margin-top:8px;">
-            <input type="checkbox" data-ranger-optional="${key}" ${on_ ? "checked" : ""} style="margin-top:4px;" />
-            <div><strong>${escapeHtml(o.name)}</strong> <span class="muted" style="font-style:italic;">— 1-й уровень, опциональное умение следопыта; заменяет «${key === "foe" ? "Избранный враг" : "Исследователь природы"}»</span>
-              <p style="white-space:pre-line;margin:4px 0;">${escapeHtml(o.desc)}</p></div>
-          </label>`;
-        }).join("")}
-      </div>
       ${state.optFavoredFoe ? "" : `<div class="panel">
         <h3 style="margin-top:0;">Избранный враг</h3>
         <div class="grid cols-3">
@@ -547,7 +535,20 @@ export function renderWizard() {
             </div>`
           ).join("")}
         </div>
-      </div>`}`;
+      </div>`}
+      <div class="panel">
+        <h4 style="margin-top:0;">Опциональные умения</h4>
+        <p class="muted" style="margin-top:0;">Tasha's Cauldron of Everything — только с разрешения Мастера. Заменяют основные умения 1 уровня.</p>
+        ${optionalFeaturesAt("ranger", 1).map((o) => {
+          const key = o.name === "Избранный противник" ? "foe" : "deft";
+          const on_ = key === "foe" ? state.optFavoredFoe : state.optDeftExplorer;
+          return `<label class="row" style="gap:10px;align-items:flex-start;margin-top:8px;">
+            <input type="checkbox" data-ranger-optional="${key}" ${on_ ? "checked" : ""} style="margin-top:4px;" />
+            <div><strong>${escapeHtml(o.name)}</strong> <span class="muted" style="font-style:italic;">— 1-й уровень, опциональное умение следопыта; заменяет «${key === "foe" ? "Избранный враг" : "Исследователь природы"}»</span>
+              <p style="white-space:pre-line;margin:4px 0;">${escapeHtml(o.desc)}</p></div>
+          </label>`;
+        }).join("")}
+      </div>`;
   }
 
   // Splits a class's free-text startEquipment string into groups (separated
@@ -1691,8 +1692,21 @@ export function renderWizard() {
   function stepSpells() {
     const cls = CLASSES.find((c) => c.id === state.classId);
     if (!cls || !cls.spellcasting) return `<div class="panel"><p class="muted">Этот класс не владеет заклинаниями на 1 уровне.</p></div>`;
-    const expandedIds = new Set((chosenLevel1Subclass(cls) || {}).expandedSpells || []);
-    const cantrips = SPELLS.filter((s) => s.level === 0 && s.classes.includes(cls.id));
+    const extraIds = state.optAddSpells ? new Set(additionalSpellIds(cls.id)) : new Set();
+    const expandedIds = new Set([...((chosenLevel1Subclass(cls) || {}).expandedSpells || []), ...extraIds]);
+    const addSpellsOpt = (OPTIONAL_CLASS_FEATURES[cls.id] || []).find((o) => o.spells && o.level === 1);
+    const optSpellsPanel = addSpellsOpt
+      ? `<div class="panel" style="margin-top:12px;">
+        <h4 style="margin-top:0;">Опциональные умения</h4>
+        <p class="muted" style="margin-top:0;">${escapeHtml(OPTIONAL_FEATURE_SOURCE)} — только с разрешения Мастера.</p>
+        <label class="row" style="gap:10px;align-items:flex-start;">
+          <input type="checkbox" data-opt-add-spells ${state.optAddSpells ? "checked" : ""} style="margin-top:4px;" />
+          <div><strong>${escapeHtml(addSpellsOpt.name)}</strong> <span class="muted" style="font-style:italic;">— 1-й уровень, опциональное умение</span>
+            <p style="white-space:pre-line;margin:4px 0;">${escapeHtml(addSpellsOpt.desc)}</p></div>
+        </label>
+      </div>`
+      : "";
+    const cantrips = SPELLS.filter((s) => s.level === 0 && (s.classes.includes(cls.id) || extraIds.has(s.id)));
     const cantripLimit = cls.spellcasting.cantripsKnown || 0;
     const skipSpellChoice = skipsLevel1SpellChoice(cls);
     const cantripsHtml = `
@@ -1716,7 +1730,7 @@ export function renderWizard() {
         <p style="font-weight:600;margin-top:0;">Выберите заговоры и заклинания для вашего класса</p>
         <p class="muted">💡 ${cls.name} не ведёт книгу заклинаний и не имеет фиксированного списка известных заклинаний — доступны все заклинания класса. Какие из них подготовлены на день, выбирается позже на вкладке «Заклинания» в листе персонажа.</p>
         ${cantripsHtml}
-      </div>`;
+      </div>${optSpellsPanel}`;
     }
     const firstLevel = SPELLS.filter((s) => s.level === 1 && (s.classes.includes(cls.id) || expandedIds.has(s.id)));
     const spellLimit = level1SpellLimit(cls);
@@ -1743,7 +1757,7 @@ export function renderWizard() {
             })
             .join("")}
         </div>
-      </div>`;
+      </div>${optSpellsPanel}`;
   }
 
   // Returns the selected background, either from BACKGROUNDS or synthesized
@@ -2000,6 +2014,7 @@ export function renderWizard() {
       state.favoredTerrain = "";
       state.optFavoredFoe = false;
       state.optDeftExplorer = false;
+      state.optAddSpells = false;
       render();
     });
     on(app, "click", "[data-action=change-class]", () => {
@@ -2036,6 +2051,15 @@ export function renderWizard() {
     });
     on(app, "input", "[data-favored-enemy-language-custom]", (e, el) => {
       state.favoredEnemyLanguageCustom = el.value;
+    });
+    on(app, "change", "[data-opt-add-spells]", (e, el) => {
+      state.optAddSpells = el.checked;
+      const cls = CLASSES.find((c) => c.id === state.classId);
+      if (cls && !el.checked) {
+        state.chosenCantrips = state.chosenCantrips.filter((id) => { const sp = SPELLS.find((x) => x.id === id); return sp && sp.classes.includes(cls.id); });
+        state.chosenSpells = state.chosenSpells.filter((id) => { const sp = SPELLS.find((x) => x.id === id); return sp && (sp.classes.includes(cls.id) || ((chosenLevel1Subclass(cls) || {}).expandedSpells || []).includes(id)); });
+      }
+      render();
     });
     on(app, "change", "[data-ranger-optional]", (e, el) => {
       if (el.dataset.rangerOptional === "foe") state.optFavoredFoe = el.checked;
@@ -2594,6 +2618,11 @@ export function renderWizard() {
           addFeatureOrFold(split.name, fullText || split.desc, cls.name);
         }
       });
+    }
+
+    if (state.optAddSpells && cls && (OPTIONAL_CLASS_FEATURES[cls.id] || []).some((o) => o.spells && o.level === 1)) {
+      const o = (OPTIONAL_CLASS_FEATURES[cls.id] || []).find((x) => x.spells);
+      data.features.push({ name: ADDITIONAL_SPELLS_NAME(cls.id), source: `${cls.name} — опциональное (${OPTIONAL_FEATURE_SOURCE})`, desc: o.desc, optional: true });
     }
 
     const equipLines = [];
