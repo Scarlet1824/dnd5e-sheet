@@ -1542,7 +1542,7 @@ export async function renderSheet(id) {
   function fightingStyleChoicePanelHtml(cls) {
     const sc = levelUpState.fightingStyleChoice;
     const current = currentFightingStyleName(cls);
-    const options = (cls.level1Choice.options || []).filter((o) => o.name !== current);
+    const options = (cls.level1Choice.options || []).filter((o) => o.name !== current && (!o.only || o.only.includes(cls.id)));
     return `
       <div class="panel" style="margin:10px 0;">
         <h4 style="margin-top:0;">${escapeHtml(SECOND_FIGHTING_STYLE_FEATURE_NAME)}</h4>
@@ -1585,7 +1585,8 @@ export async function renderSheet(id) {
   }
   function baseFightingStyleChoicePanelHtml() {
     const sc = levelUpState.baseFightingStyleChoice;
-    const options = (getClass("fighter").level1Choice.options || []);
+    const baseCls = levelUpEligibleClasses()[levelUpState.classIndex];
+    const options = (getClass("fighter").level1Choice.options || []).filter((o) => !o.only || o.only.includes(baseCls && baseCls.id));
     return `
       <div class="panel" style="margin:10px 0;">
         <h4 style="margin-top:0;">Боевой стиль</h4>
@@ -2283,6 +2284,13 @@ export async function renderSheet(id) {
       return m ? { name: m[1].trim(), text: m[2] } : null;
     }).filter(Boolean);
   }
+  // Опциональные умения следопыта 1 уровня (Tasha's), выбранные при создании: «Избранный противник» заменяет «Избранного врага»
+  // (в том числе его улучшения на 6/14), «Ловкий исследователь» — «Исследователя природы» (и его улучшения на 6/10).
+  function rangerHasFavoredFoe() { return (data.features || []).some((f) => /^Избранный противник$/i.test(f.name || "")); }
+  function rangerHasDeftExplorer() { return (data.features || []).some((f) => /^Ловкий исследователь$/i.test(f.name || "")); }
+  function rangerOptionalSkipped(name) {
+    return (rangerHasFavoredFoe() && /^Улучшенный избранный враг/.test(name)) || (rangerHasDeftExplorer() && /^Более опытный следопыт/.test(name));
+  }
   function currentLevelUpPicks() {
     const c = levelUpEligibleClasses()[levelUpState.classIndex];
     const cls = c && getClass(c.id);
@@ -2298,8 +2306,8 @@ export async function renderSheet(id) {
     }
     if (cls.id === "ranger") {
       const names = (cls.features?.[newLevel] || []).map((x) => splitFeatureText(x).name);
-      if (names.some((n) => /^Улучшенный избранный враг/.test(n))) picks.push({ id: "enemy", type: "enemy" });
-      if (names.some((n) => /^Более опытный следопыт/.test(n))) picks.push({ id: "terrain", type: "terrain" });
+      if (!rangerHasFavoredFoe() && names.some((n) => /^Улучшенный избранный враг/.test(n))) picks.push({ id: "enemy", type: "enemy" });
+      if (!rangerHasDeftExplorer() && names.some((n) => /^Более опытный следопыт/.test(n))) picks.push({ id: "terrain", type: "terrain" });
     }
     return picks;
   }
@@ -2374,6 +2382,7 @@ export async function renderSheet(id) {
         f.name !== ARCHETYPE_FEATURE_MARKER &&
         !SPELL_CIRCLE_UNLOCK_FEATURE_NAME.test(f.name) &&
         !SPELLCASTING_INTRO_FEATURE_NAME.test(f.name) &&
+        !rangerOptionalSkipped(f.name) &&
         !(FIRST_FIGHTING_STYLE_FEATURE_NAME.test(f.name) && !cls.level1Choice)
     );
     // Once a subclass is chosen (already, or right here in subclassChoice),
@@ -2870,6 +2879,7 @@ export async function renderSheet(id) {
       .filter(
         (f) =>
           !optReplacedName(f.name) &&
+          !rangerOptionalSkipped(f.name) &&
           !ASI_FEATURE_NAME.test(f.name) &&
           !SUBCLASS_CHOICE_FEATURE_NAME.test(f.name) &&
           f.name !== ARCHETYPE_FEATURE_MARKER &&

@@ -9,6 +9,7 @@ import {
   equipmentNameMatches, expandPackContents, detectAmmoInText, stripStartingGoldMention, splitFeatureText,
   parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, LANGUAGES, LANGUAGE_GROUPS, TOOLS, TOOL_GROUPS, GAMING_SETS, VEHICLE_GROUPS, FEATS,
 } from "../data/dnd5e-data.js";
+import { optionalFeaturesAt } from "../data/optionalFeatures.js";
 import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
@@ -93,6 +94,8 @@ export function renderWizard() {
     favoredEnemyLanguage: "", // a LANGUAGES entry, or "custom", or "" (no language / skip)
     favoredEnemyLanguageCustom: "", // free-text language name, when favoredEnemyLanguage === "custom"
     favoredTerrain: "", // Следопыт: one of RANGER_FAVORED_TERRAIN_TYPES
+    optFavoredFoe: false, // Следопыт, Tasha's: «Избранный противник» вместо «Избранного врага»
+    optDeftExplorer: false, // Следопыт, Tasha's: «Ловкий исследователь» вместо «Исследователя природы»
     name: "",
   };
 
@@ -209,9 +212,9 @@ export function renderWizard() {
       if (cls && cls.toolChoice && state.chosenClassTools.length < cls.toolChoice.count) return false;
     }
     if (stepId === "rangerFavored") {
-      if (!state.favoredEnemy || !state.favoredTerrain) return false;
-      if (state.favoredEnemy === "Гуманоиды" && (!state.favoredEnemyHumanoid1.trim() || !state.favoredEnemyHumanoid2.trim())) return false;
-      if (state.favoredEnemyLanguage === "custom" && !state.favoredEnemyLanguageCustom.trim()) return false;
+      if ((!state.optFavoredFoe && !state.favoredEnemy) || (!state.optDeftExplorer && !state.favoredTerrain)) return false;
+      if (!state.optFavoredFoe && state.favoredEnemy === "Гуманоиды" && (!state.favoredEnemyHumanoid1.trim() || !state.favoredEnemyHumanoid2.trim())) return false;
+      if (!state.optFavoredFoe && state.favoredEnemyLanguage === "custom" && !state.favoredEnemyLanguageCustom.trim()) return false;
     }
     return true;
   }
@@ -442,7 +445,7 @@ export function renderWizard() {
           <div class="grid cols-2" style="margin-top:8px;">
             ${choice.options
               .map(
-                (o, i) => `
+                (o, i) => (o.only && !o.only.includes(cls.id)) ? "" : `
               <div class="card selectable ${state.level1ChoiceIndex === i ? "selected" : ""}" data-level1-choice="${i}">
                 <h4>${escapeHtml(o.name)}</h4>
                 <p>${escapeHtml(o.desc)}</p>
@@ -482,6 +485,19 @@ export function renderWizard() {
         <p class="muted">💡 На 1 уровне следопыт выбирает тип избранного врага и тип избранной местности (не подкласс — «Архетип следопыта» выбирается на 3 уровне).</p>
       </div>
       <div class="panel">
+        <h4 style="margin-top:0;">Опциональные умения</h4>
+        <p class="muted" style="margin-top:0;">Tasha's Cauldron of Everything — только с разрешения Мастера. Заменяют основные умения 1 уровня.</p>
+        ${optionalFeaturesAt("ranger", 1).map((o) => {
+          const key = o.name === "Избранный противник" ? "foe" : "deft";
+          const on_ = key === "foe" ? state.optFavoredFoe : state.optDeftExplorer;
+          return `<label class="row" style="gap:10px;align-items:flex-start;margin-top:8px;">
+            <input type="checkbox" data-ranger-optional="${key}" ${on_ ? "checked" : ""} style="margin-top:4px;" />
+            <div><strong>${escapeHtml(o.name)}</strong> <span class="muted" style="font-style:italic;">— 1-й уровень, опциональное умение следопыта; заменяет «${key === "foe" ? "Избранный враг" : "Исследователь природы"}»</span>
+              <p style="white-space:pre-line;margin:4px 0;">${escapeHtml(o.desc)}</p></div>
+          </label>`;
+        }).join("")}
+      </div>
+      ${state.optFavoredFoe ? "" : `<div class="panel">
         <h3 style="margin-top:0;">Избранный враг</h3>
         <div class="grid cols-3">
           ${RANGER_FAVORED_ENEMY_TYPES.map(
@@ -520,8 +536,8 @@ export function renderWizard() {
         </div>`
             : ""
         }
-      </div>
-      <div class="panel">
+      </div>`}
+      ${state.optDeftExplorer ? "" : `<div class="panel">
         <h3 style="margin-top:0;">Исследователь природы (местность)</h3>
         <div class="grid cols-3">
           ${RANGER_FAVORED_TERRAIN_TYPES.map(
@@ -531,7 +547,7 @@ export function renderWizard() {
             </div>`
           ).join("")}
         </div>
-      </div>`;
+      </div>`}`;
   }
 
   // Splits a class's free-text startEquipment string into groups (separated
@@ -1982,6 +1998,8 @@ export function renderWizard() {
       state.favoredEnemyLanguage = "";
       state.favoredEnemyLanguageCustom = "";
       state.favoredTerrain = "";
+      state.optFavoredFoe = false;
+      state.optDeftExplorer = false;
       render();
     });
     on(app, "click", "[data-action=change-class]", () => {
@@ -2018,6 +2036,11 @@ export function renderWizard() {
     });
     on(app, "input", "[data-favored-enemy-language-custom]", (e, el) => {
       state.favoredEnemyLanguageCustom = el.value;
+    });
+    on(app, "change", "[data-ranger-optional]", (e, el) => {
+      if (el.dataset.rangerOptional === "foe") state.optFavoredFoe = el.checked;
+      else state.optDeftExplorer = el.checked;
+      render();
     });
     on(app, "click", "[data-favored-terrain]", (e, el) => {
       state.favoredTerrain = el.dataset.favoredTerrain;
@@ -2535,6 +2558,13 @@ export function renderWizard() {
           } else {
             data.features.push({ name: `${cls.level1Choice.label}: ${level1Choice.name}`, source: cls.name, desc: level1Choice.desc });
           }
+        } else if (cls.id === "ranger" && split.name === "Избранный враг" && state.optFavoredFoe) {
+          const o = optionalFeaturesAt("ranger", 1).find((x) => x.name === "Избранный противник");
+          data.features.push({ name: o.name, source: `${cls.name} — опциональное (Tasha's Cauldron of Everything)`, desc: o.desc, optional: true });
+        } else if (cls.id === "ranger" && split.name === "Исследователь природы" && state.optDeftExplorer) {
+          const o = optionalFeaturesAt("ranger", 1).find((x) => x.name === "Ловкий исследователь");
+          data.features.push({ name: o.name, source: `${cls.name} — опциональное (Tasha's Cauldron of Everything)`, desc: o.desc, optional: true });
+          data.proficiencies.languages.push("+1 на выбор (Ловкий исследователь)", "+1 на выбор (Ловкий исследователь)");
         } else if (cls.id === "ranger" && split.name === "Избранный враг" && state.favoredEnemy) {
           // Personalizes the generic "выберите тип избранного врага" card
           // with the actual pick made in stepRangerFavored(), instead of
