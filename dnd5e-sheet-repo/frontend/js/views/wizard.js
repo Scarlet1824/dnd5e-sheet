@@ -1570,7 +1570,7 @@ export function renderWizard() {
   // than guessed at. Returns { count } or null.
   function parseFreeSkillChoiceGrant(desc) {
     const text = String(desc || "");
-    const m = /владение\s+(одним|одна|одно|двумя|тремя|четырьмя|пятью)\s+навык(?:ом|ами|а)\s+на\s+выбор\.?\s*$/i.exec(text.trim());
+    const m = /(?:владение|овладеваете)\s+(одним|одна|одно|двумя|тремя|четырьмя|пятью)\s+навык(?:ом|ами|а)\s+на\s+(?:ваш\s+)?выбор\.?\s*$/i.exec(text.trim());
     if (!m) return null;
     const words = { ...SKILL_CHOICE_COUNT_WORDS, "тремя": 3, "четырьмя": 4, "пятью": 5 };
     return { count: words[m[1].toLowerCase()] || 1 };

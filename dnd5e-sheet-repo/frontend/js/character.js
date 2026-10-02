@@ -79,6 +79,9 @@ export function skillBonus(data, skillId) {
   // already has it, so only a skill with neither gets the half bonus added.
   if (!proficient && !expert && HALF_PROFICIENCY_ABILITIES.includes(skill.ability) && hasRemarkableAthlete(data)) {
     bonus += Math.ceil(proficiencyBonus(data) / 2);
+  } else if (!proficient && !expert && hasJackOfAllTrades(data)) {
+    // Бард «Мастер на все руки»: половина бонуса мастерства (округление вниз) к проверкам без владения.
+    bonus += Math.floor(proficiencyBonus(data) / 2);
   }
   // Самурай «Элегантный придворный»: к проверкам Харизмы (Убеждение) прибавляется модификатор Мудрости.
   if (skillId === "persuasion" && (data.features || []).some((f) => /^Элегантный придворный$/i.test(f.name || ""))) {
@@ -104,6 +107,9 @@ export function saveBonus(data, abilityId) {
 // Rage's use count, etc.) rather than parsing the prose, since it's a
 // single fixed Champion feature rather than a phrasing that varies across
 // sourcebooks.
+export function hasJackOfAllTrades(data) {
+  return (data.features || []).some((f) => /^(Мастер на все руки|Разностороннее дарование)/i.test(f.name || ""));
+}
 const REMARKABLE_ATHLETE_FEATURE_NAME = /^Выдающийся атлет$/i;
 const HALF_PROFICIENCY_ABILITIES = ["str", "dex", "con"];
 function hasRemarkableAthlete(data) {
@@ -325,7 +331,8 @@ export function initiativeBonusAuto(data) {
   // Плут, Дуэлянт (Swashbuckler) «Лихая удаль»: "Вы добавляете свой
   // модификатор Харизмы к результату броска инициативы."
   const rakishAudacity = (data.features || []).some((f) => /^Лихая удаль$/i.test(f.name || "")) ? getAbilityMod(data, "cha") : 0;
-  return getAbilityMod(data, "dex") + alert + rakishAudacity;
+  const jack = hasJackOfAllTrades(data) ? Math.floor(proficiencyBonus(data) / 2) : 0;
+  return getAbilityMod(data, "dex") + alert + rakishAudacity + jack;
 }
 
 export function spellSaveDC(data) {

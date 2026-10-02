@@ -549,6 +549,7 @@ export async function renderSheet(id) {
       else if (isBard && /^Знаток$/i.test(n)) { f.name = "Компетентность"; changed = true; }
       else if (isBard && /^Песнь отдыха$/i.test(n) && (f.desc || "").length < 200) { f.desc = bardData["Песнь отдыха"]; changed = true; }
       else if (/Паладин/i.test(f.source || "") && /^Праведное восстановление$/i.test(n) && /^Вы можете потратить одно использование/.test(f.desc || "")) { f.name = "Использование божественной силы"; changed = true; }
+      else if (/^Истории с того света$/i.test(n) && /\n\nИстории духов/.test(f.desc || "")) { f.desc = f.desc.slice(0, f.desc.indexOf("\n\nИстории духов")); changed = true; }
       else if (/^Боевой стиль: Слепой бой$/i.test(n)) { f.name = "Боевой стиль: Сражение вслепую"; changed = true; }
     });
     if (changed) doSave();
@@ -1386,6 +1387,7 @@ export async function renderSheet(id) {
       ...((data.spellcasting && data.spellcasting.cantrips) || []),
       ...((data.spellcasting && data.spellcasting.known) || []),
       ...((data.spellcasting && data.spellcasting.prepared) || []),
+      ...((levelUpState.magicSecrets && levelUpState.magicSecrets.picked) || []),
     ]);
     const options = SPELLS.filter(
       (s) => s.level >= 1 && s.level <= maxCircle && (s.classes.includes(spellList) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id)
@@ -1415,7 +1417,7 @@ export async function renderSheet(id) {
   function knownCantripChoicePanelHtml(cls, newLevel, c) {
     const sc = levelUpState.knownCantripChoice;
     const need = knownCantripGrowthCount(cls, newLevel, c);
-    const alreadyKnown = new Set((data.spellcasting && data.spellcasting.cantrips) || []);
+    const alreadyKnown = new Set([...((data.spellcasting && data.spellcasting.cantrips) || []), ...((levelUpState.magicSecrets && levelUpState.magicSecrets.picked) || [])]);
     const options = SPELLS.filter((s) => s.level === 0 && (s.classes.includes(spellListFor(cls, c)) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
     return `
@@ -1548,22 +1550,46 @@ export async function renderSheet(id) {
   // than a level number, so it keeps working if another subclass later gets
   // its own second-style feature at a different level.
   const SECOND_FIGHTING_STYLE_FEATURE_NAME = "Дополнительный боевой стиль";
+  // Подклассы вне воинских классов, дающие боевой стиль из ограниченного списка (Коллегия мечей).
+  const SUB_STYLE_FEATURES = { swords: { feature: "Боевой стиль", options: ["Дуэлянт", "Сражение двумя оружиями"] } };
+  function subStyleSpec(cls, subName, level) {
+    const sub = subName && (cls.subclasses || []).find((s) => s.name.toLowerCase() === String(subName).toLowerCase());
+    const spec = sub && SUB_STYLE_FEATURES[sub.slug];
+    return spec && (sub.features || []).some((sf) => sf.name === spec.feature && sf.level === level) ? spec : null;
+  }
+  function levelUpStyleFeatureName(cls, subName, level) {
+    const spec = subStyleSpec(cls, subName, level);
+    return spec ? spec.feature : SECOND_FIGHTING_STYLE_FEATURE_NAME;
+  }
+  function levelUpStyleOptions(cls, subName, level) {
+    const spec = subStyleSpec(cls, subName, level);
+    const all = (getClass("fighter").level1Choice.options || []).filter((o) => !o.only || o.only.includes(cls.id));
+    return spec ? all.filter((o) => spec.options.includes(o.name)) : (cls.level1Choice && cls.level1Choice.options) || [];
+  }
   function levelHasFightingStyleChoice(c, cls, newLevel) {
-    if (!c || !c.subclass || !cls.level1Choice || cls.level1Choice.type !== "fightingStyle") return false;
+    if (!c || !c.subclass) return false;
+    if (subStyleSpec(cls, c.subclass, newLevel)) return true;
+    if (!cls.level1Choice || cls.level1Choice.type !== "fightingStyle") return false;
     const sub = (cls.subclasses || []).find((s) => s.name.toLowerCase() === c.subclass.toLowerCase());
     if (!sub) return false;
     return (sub.features || []).some((sf) => sf.name === SECOND_FIGHTING_STYLE_FEATURE_NAME && sf.level === newLevel);
+  }
+  function levelUpActiveSubName(c) {
+    return (levelUpState.subclassChoice && levelUpState.subclassChoice.name) || (c && c.subclass) || "";
   }
   function freshFightingStyleChoiceState() {
     return { name: "" };
   }
   function fightingStyleChoicePanelHtml(cls) {
     const sc = levelUpState.fightingStyleChoice;
-    const current = currentFightingStyleName(cls);
-    const options = (cls.level1Choice.options || []).filter((o) => o.name !== current && (!o.only || o.only.includes(cls.id)));
+    const lc = levelUpEligibleClasses()[levelUpState.classIndex];
+    const lvl = ((lc && lc.level) || 1) + 1;
+    const subName = levelUpActiveSubName(lc);
+    const current = cls.level1Choice ? currentFightingStyleName(cls) : "";
+    const options = levelUpStyleOptions(cls, subName, lvl).filter((o) => o.name !== current && (!o.only || o.only.includes(cls.id)));
     return `
       <div class="panel" style="margin:10px 0;">
-        <h4 style="margin-top:0;">${escapeHtml(SECOND_FIGHTING_STYLE_FEATURE_NAME)}</h4>
+        <h4 style="margin-top:0;">${escapeHtml(levelUpStyleFeatureName(cls, subName, lvl))}</h4>
         <div class="grid cols-2">
           ${options
             .map(
@@ -1647,6 +1673,38 @@ export async function renderSheet(id) {
   function expertiseChoiceIncomplete() {
     const ec = levelUpState.expertiseChoice;
     return !!(ec && ec.picked.length < Math.min(ec.count, expertiseOptions().length));
+  }
+  // ---- Магические секреты (Бард 10/14/18) и «Дополнительные тайны магии» Коллегии знаний (6) -----------------
+  function magicSecretsInfo(cls, newLevel, c) {
+    if (!cls || cls.id !== "bard") return { count: 0 };
+    const raw = (cls.features && cls.features[newLevel]) || [];
+    if (raw.some((f) => /^Магические секреты/.test(f))) return { count: 2, cantrips: false };
+    const sub = c && c.subclass && (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(c.subclass).toLowerCase());
+    if (sub && (sub.features || []).some((sf) => sf.name === "Дополнительные тайны магии" && sf.level === newLevel)) return { count: 2, cantrips: true };
+    return { count: 0 };
+  }
+  function magicSecretsOptions(newLevel, info) {
+    const sp = data.spellcasting || {};
+    const known = new Set([...(sp.cantrips || []), ...(sp.known || []), ...(sp.prepared || []), ...((levelUpState.knownSpellChoice && levelUpState.knownSpellChoice.spellIds) || []), ...((levelUpState.knownCantripChoice && levelUpState.knownCantripChoice.cantripIds) || [])]);
+    return SPELLS.filter((s) => s.level <= maxSpellCircleForLevel(newLevel) && (s.level >= 1 || info.cantrips) && !known.has(s.id)).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
+  }
+  function magicSecretsPanelHtml(cls, newLevel, c) {
+    const ms = levelUpState.magicSecrets;
+    const info = magicSecretsInfo(cls, newLevel, c);
+    if (!ms || !info.count) return "";
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">${info.cantrips ? "Дополнительные тайны магии" : "Магические секреты"} — заклинания любого класса (${ms.picked.length}/${info.count})</h4>
+        <p class="muted" style="margin-top:0;font-size:0.82rem;">Выберите ${info.count} заклинания из списка любого класса${info.cantrips ? " (можно заговоры)" : ""}, круг не выше ${maxSpellCircleForLevel(newLevel)}-го. Они считаются заклинаниями барда.</p>
+        <div class="grid cols-2">
+          ${magicSecretsOptions(newLevel, info).map((s) => `<label class="row" style="gap:6px;"><input type="checkbox" data-level-up-magic-secret="${s.id}" ${ms.picked.includes(s.id) ? "checked" : ""} ${!ms.picked.includes(s.id) && ms.picked.length >= info.count ? "disabled" : ""} /> ${spellHoverNameHtml(s)} <span class="muted" style="font-size:0.75rem;">${s.level ? s.level + " кр." : "заговор"}</span></label>`).join("")}
+        </div>
+      </div>`;
+  }
+  function magicSecretsIncomplete(cls, newLevel, c) {
+    const ms = levelUpState.magicSecrets;
+    const info = magicSecretsInfo(cls, newLevel, c);
+    return !!(ms && info.count && ms.picked.length < info.count);
   }
   // ---- Универсальность воина: смена боевого стиля на уровне с «Увеличением характеристик» --------------------
   function currentBaseStyleCard(cls) {
@@ -2495,7 +2553,7 @@ export async function renderSheet(id) {
         : [];
     // Дополнительный боевой стиль gets its own picker below instead of
     // this plain descriptive card, whenever that picker is on offer.
-    const archetypeFeatures = archetypeFeaturesRaw.filter((f) => !(levelUpState.fightingStyleChoice && f.name === SECOND_FIGHTING_STYLE_FEATURE_NAME));
+    const archetypeFeatures = archetypeFeaturesRaw.filter((f) => !(levelUpState.fightingStyleChoice && f.name === levelUpStyleFeatureName(cls, levelUpActiveSubName(c), newLevel)));
     const optPicked = levelUpOptionalList(cls, newLevel).filter((o) => (levelUpState.optionalPicked || []).includes(o.name));
     const allFeaturesBeforeOpt = [...features, ...archetypeFeatures];
     const allFeatures = allFeaturesBeforeOpt.filter((f) => !optPicked.some((o) => optionalReplaces(o, f.name)));
@@ -2557,6 +2615,7 @@ export async function renderSheet(id) {
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
       ${expertisePanelHtml()}
+      ${magicSecretsPanelHtml(cls, newLevel, c)}
       ${styleSwapPanelHtml(cls)}
       ${styleCantripsPanelHtml()}
       ${levelUpPicksPanelHtml()}
@@ -2581,6 +2640,7 @@ export async function renderSheet(id) {
           fightingStyleChoiceIncomplete() ||
           baseFightingStyleChoiceIncomplete() ||
           expertiseChoiceIncomplete() ||
+          magicSecretsIncomplete(cls, newLevel, c) ||
           styleCantripsIncomplete() ||
           toolChoiceIncomplete() ||
           subSkillChoiceIncomplete() ||
@@ -2645,6 +2705,13 @@ export async function renderSheet(id) {
       ec.picked = [...cur].slice(0, ec.count);
       refreshLevelUpModal();
     });
+    on(modal, "change", "[data-level-up-magic-secret]", (e, el) => {
+      const ms = levelUpState.magicSecrets;
+      if (!ms) return;
+      const id = el.dataset.levelUpMagicSecret;
+      ms.picked = el.checked ? [...new Set([...ms.picked, id])] : ms.picked.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
     on(modal, "change", "[data-level-up-style-swap]", (e, el) => {
       levelUpState.styleSwap.name = el.value;
       refreshLevelUpModal();
@@ -2701,6 +2768,7 @@ export async function renderSheet(id) {
       levelUpState.spellbookChoice = ccls && levelHasSpellbookGrowth(ccls, newLevel) ? freshSpellbookChoiceState() : null;
       levelUpState.knownSpellChoice = ccls && knownSpellGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownSpellChoiceState() : null;
       levelUpState.knownCantripChoice = ccls && knownCantripGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownCantripChoiceState() : null;
+      levelUpState.magicSecrets = { picked: [] };
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-subclass]", (e, el) => {
@@ -2714,6 +2782,7 @@ export async function renderSheet(id) {
       const newLevel = (c.level || 1) + 1;
       levelUpState.toolChoice = cls && levelHasCraftToolChoice(cls, levelUpState.subclassChoice.name, newLevel) ? freshToolChoiceState(cls, levelUpState.subclassChoice.name, newLevel) : null;
       levelUpState.subSkillChoice = resolveSubSkillChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
+      levelUpState.fightingStyleChoice = subStyleSpec(cls, levelUpState.subclassChoice.name, newLevel) ? freshFightingStyleChoiceState() : null;
       levelUpState.multiPick = resolveMultiPickState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.bonusChoice = resolveBonusChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
       levelUpState.subLanguageChoice = resolveSubLanguageChoiceState(cls, levelUpState.subclassChoice.name, newLevel);
@@ -2744,6 +2813,11 @@ export async function renderSheet(id) {
       const v = el.value;
       if (sc.count === 1) {
         sc.picked = v ? [v] : [];
+      } else if (el.tagName === "SELECT") {
+        const idx = Number(el.dataset.levelUpSubSkillIndex) || 0;
+        const arr = Array.from({ length: sc.count }, (_, i) => sc.picked[i] || "");
+        arr[idx] = v;
+        sc.picked = arr.map((x, i) => (x && arr.indexOf(x) !== i ? "" : x));
       } else if (el.checked) {
         if (!sc.picked.includes(v) && sc.picked.length < sc.count) sc.picked.push(v);
       } else {
@@ -3023,7 +3097,17 @@ export async function renderSheet(id) {
           !(picksSnapshot.some((p) => p.type === "terrain") && /^Более опытный следопыт/.test(f.name))
       )
       .forEach((f) => {
-        if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) return;
+        if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) {
+          // Повтор умения на новом уровне (рост кости, «ещё 2 навыка» и т.п.): короткая отдельная карточка вместо полного текста.
+          const repeatedLevels = Object.keys(cls.features || {}).some((lv) => Number(lv) < newLevel && (cls.features[lv] || []).some((x) => splitFeatureText(x).name === f.name));
+          if (repeatedLevels && f.desc && f.desc.length < 160) {
+            const nm = `${f.name} (${newLevel} ур.)`;
+            if (!(data.features || []).some((existing) => existing.name === nm && existing.source === cls.name)) {
+              data.features.push({ name: nm, source: cls.name, desc: `На ${newLevel}-м уровне: ${f.desc.charAt(0).toLowerCase()}${f.desc.slice(1)}${/[.!?]$/.test(f.desc) ? "" : "."}` });
+            }
+          }
+          return;
+        }
         data.features.push({ name: f.name, source: cls.name, desc: f.desc || "" });
         applyFeatureProficiencyGrants(f.name, f.desc || "");
       });
@@ -3036,7 +3120,11 @@ export async function renderSheet(id) {
       const sub = (cls.subclasses || []).find((s) => s.name === levelUpState.subclassChoice.name);
       if (sub) {
         c.subclass = sub.name;
-        applySubclassFeaturesAtLevel(cls, sub, newLevel, { withIntro: true, excludeNames: (sub.features || []).filter((sf) => sf.level === newLevel && optReplacedName(sf.name)).map((sf) => sf.name) });
+        applySubclassFeaturesAtLevel(cls, sub, newLevel, { withIntro: true, excludeNames: [...(levelUpState.fightingStyleChoice && subStyleSpec(cls, sub.name, newLevel) ? [subStyleSpec(cls, sub.name, newLevel).feature] : []), ...(sub.features || []).filter((sf) => sf.level === newLevel && optReplacedName(sf.name)).map((sf) => sf.name)] });
+        if (levelUpState.fightingStyleChoice && levelUpState.fightingStyleChoice.name && subStyleSpec(cls, sub.name, newLevel)) {
+          const sopt = levelUpStyleOptions(cls, sub.name, newLevel).find((o) => o.name === levelUpState.fightingStyleChoice.name);
+          if (sopt) data.features.push({ name: `Боевой стиль: ${sopt.name}`, source: subclassFeatureSource(cls, sub.name), desc: sopt.desc });
+        }
         if (sub.slug === "totem-warrior" && levelUpState.subclassChoice.totem) {
           const opt = totemSpiritOptions(sub).find((o) => o.name === levelUpState.subclassChoice.totem);
           const card = (data.features || []).find((f) => f.name === "Тотемный дух" && f.source === subclassFeatureSource(cls, sub.name));
@@ -3094,14 +3182,14 @@ export async function renderSheet(id) {
           // Дополнительный боевой стиль gets its own real style card below
           // instead of this plain descriptive one, when the picker fired.
           excludeNames: [
-            ...(levelUpState.fightingStyleChoice ? [SECOND_FIGHTING_STYLE_FEATURE_NAME] : []),
+            ...(levelUpState.fightingStyleChoice ? [levelUpStyleFeatureName(cls, sub.name, newLevel)] : []),
             ...(sub.features || []).filter((sf) => sf.level === newLevel && optReplacedName(sf.name)).map((sf) => sf.name),
           ],
         });
         if (levelUpState.fightingStyleChoice && levelUpState.fightingStyleChoice.name) {
-          const opt = (cls.level1Choice.options || []).find((o) => o.name === levelUpState.fightingStyleChoice.name);
+          const opt = levelUpStyleOptions(cls, sub.name, newLevel).find((o) => o.name === levelUpState.fightingStyleChoice.name);
           if (opt) {
-            data.features.push({ name: `${SECOND_FIGHTING_STYLE_FEATURE_NAME}: ${opt.name}`, source: subclassFeatureSource(cls, sub.name), desc: opt.desc });
+            data.features.push({ name: `${subStyleSpec(cls, sub.name, newLevel) ? "Боевой стиль" : SECOND_FIGHTING_STYLE_FEATURE_NAME}: ${opt.name}`, source: subclassFeatureSource(cls, sub.name), desc: opt.desc });
           }
         }
       }
@@ -3185,6 +3273,16 @@ export async function renderSheet(id) {
         if (!data.spellcasting.known.includes(id)) data.spellcasting.known.push(id);
       });
     }
+    if (levelUpState.magicSecrets && magicSecretsInfo(cls, newLevel, c).count) {
+      if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+      if (!data.spellcasting.known) data.spellcasting.known = [];
+      if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+      levelUpState.magicSecrets.picked.forEach((id) => {
+        const sp = SPELLS.find((x) => x.id === id);
+        const arr = sp && sp.level === 0 ? data.spellcasting.cantrips : data.spellcasting.known;
+        if (!arr.includes(id)) arr.push(id);
+      });
+    }
     if (levelUpState.knownCantripChoice) {
       if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
       if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
@@ -3225,6 +3323,7 @@ export async function renderSheet(id) {
       spellbookChoice: cls && levelHasSpellbookGrowth(cls, newLevel) ? freshSpellbookChoiceState() : null,
       knownSpellChoice: cls && knownSpellGrowthCount(cls, newLevel, c) > 0 ? freshKnownSpellChoiceState() : null,
       knownCantripChoice: cls && knownCantripGrowthCount(cls, newLevel, c) > 0 ? freshKnownCantripChoiceState() : null,
+      magicSecrets: { picked: [] },
     };
     levelUpModalEl = openModal(levelUpModalBodyHtml(), { wide: true });
     wireLevelUpModal(levelUpModalEl);
