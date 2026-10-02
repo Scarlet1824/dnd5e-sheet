@@ -757,3 +757,8 @@ textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; mi
 
 /* Round 59: domain / oath spells -- thin glowing blue frame */
 .spell-card.domain-spell { border-color: #5ab4ff; box-shadow: 0 0 0 1px #5ab4ff, 0 0 10px 1px rgba(90, 180, 255, 0.55); }
+
+/* Page behind an open modal does not scroll */
+html.modal-open, html.modal-open body { overflow: hidden; }
+.modal-backdrop { overscroll-behavior: contain; }
+.modal { overscroll-behavior: contain; }

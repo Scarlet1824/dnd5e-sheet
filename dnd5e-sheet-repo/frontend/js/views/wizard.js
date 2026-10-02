@@ -12,7 +12,7 @@ import {
 import { blankCharacter } from "../character.js";
 import { rollExpr, formatModifier } from "../dice.js";
 import { spellCardHtml } from "../spellCard.js";
-import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras } from "../featChoices.js";
+import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml } from "../featChoices.js";
 
 // Следопыт's own 1st-level choices (Избранный враг / Природный следопыт):
 // not a subclass and not shaped like Воин's level1Choice (a single named
@@ -204,7 +204,7 @@ export function renderWizard() {
       if (featGrant && !state.chosenRaceFeatId) return false;
       if (featGrant) {
         const rf = FEATS.find((f) => f.id === state.chosenRaceFeatId);
-        if (rf && featExtrasIncomplete(rf, state.raceFeatSel)) return false;
+        if (rf && featExtrasIncomplete(rf, state.raceFeatSel, { proficiencies: { weapons: [], languages: [], skills: [], tools: [], expertise: [] }, spellcasting: { cantrips: [], known: [] } })) return false;
       }
       const cls = CLASSES.find((c) => c.id === state.classId);
       if (cls && cls.toolChoice && state.chosenClassTools.length < cls.toolChoice.count) return false;
@@ -1341,7 +1341,7 @@ export function renderWizard() {
         <div class="row" style="margin-bottom:10px;">
           <select data-race-feat-select style="flex:1;min-width:200px;">
             <option value="">Выберите черту…</option>
-            ${FEATS.map((f) => `<option value="${f.id}" ${f.id === state.chosenRaceFeatId ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
+            ${featSelectOptionsHtml(state.chosenRaceFeatId)}
           </select>
         </div>
         ${
@@ -1385,7 +1385,7 @@ export function renderWizard() {
                   })()
                 : ""
             }
-            ${featExtrasHtml(feat, state.raceFeatSel, { proficiencies: { weapons: [], languages: [] }, spellcasting: { cantrips: [], known: [] } })}
+            ${featExtrasHtml(feat, state.raceFeatSel, { proficiencies: { weapons: [], languages: [], skills: [], tools: [], expertise: [] }, spellcasting: { cantrips: [], known: [] } })}
           </div>`
             : ""
         }

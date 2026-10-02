@@ -39,3 +39,13 @@ startRouter();
   window.addEventListener("scroll", update, { passive: true });
   update();
 })();
+
+// While a modal (card / description / roll window) is open the sheet behind it
+// must not scroll: lock the page scroll for as long as #modal-root has content.
+(function setupModalScrollLock() {
+  const root = document.getElementById("modal-root");
+  if (!root) return;
+  const apply = () => document.documentElement.classList.toggle("modal-open", root.childElementCount > 0);
+  new MutationObserver(apply).observe(root, { childList: true });
+  apply();
+})();

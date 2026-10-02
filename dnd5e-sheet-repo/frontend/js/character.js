@@ -247,6 +247,11 @@ function dualWielderACBonus(data) {
   const leftMelee = attacks.some((a) => a.hand === "left" && a.rangeType !== "ranged");
   return rightMelee && leftMelee ? 1 : 0;
 }
+// «Призрачный клинок» (Eberron): +1 к КД, когда держите двойной скимитар двумя руками.
+function revenantBladeACBonus(data) {
+  if (!(data.feats || []).some((f) => f.id === "revenant-blade")) return 0;
+  return (data.weapons || []).some((w) => /двойной скимитар/i.test(w.name || "") && w.equipped !== false) ? 1 : 0;
+}
 // Manual overrides (data.overrides.{ac,init,speed}): when set, the player has
 // typed the final value into the box themselves, so it replaces the computed one.
 export function manualOverride(data, key) {
@@ -291,10 +296,12 @@ export function armorClassAuto(data) {
       const flatBase = unarmoredFlatACBase(data);
       base = (flatBase !== null ? flatBase : 10) + dexMod;
     }
+    // «Драконья шкура» (XGE): без доспеха КД = 13 + Лов (щит можно).
+    if ((data.feats || []).some((f) => f.id === "dragon-hide")) base = Math.max(base, 13 + dexMod);
   }
   const shieldBonus = data.shieldEquipped ? Number(data.shieldACBonus ?? SHIELD_DEFAULT_AC_BONUS) : 0;
   const featureBonus = passiveArmorFeatureACBonus(data, armor);
-  return base + shieldBonus + featureBonus + bladesongACBonus(data, armor) + dualWielderACBonus(data);
+  return base + shieldBonus + featureBonus + bladesongACBonus(data, armor) + dualWielderACBonus(data) + revenantBladeACBonus(data);
 }
 
 export function initiativeBonus(data) {
@@ -330,6 +337,7 @@ export function spellAttackBonus(data) {
 export function speedBonusSources(data) {
   const sources = [];
   if ((data.feats || []).some((f) => f.id === "mobile")) sources.push({ label: "Подвижный", amount: 10 });
+  if ((data.feats || []).some((f) => f.id === "squat-nimbleness")) sources.push({ label: "Низкорослое проворство", amount: 5 });
   if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
   // Варвар «Быстрота» (5 ур.): +10 футов, пока не надет тяжёлый доспех.
   if ((data.features || []).some((f) => /^Быстрота$/i.test(f.name || ""))) {

@@ -11,7 +11,7 @@ import {
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
-import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras } from "../featChoices.js";
+import { newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
 
 // showRollResult() (diceModal.js) fires this on `document` after every roll
 // anywhere in the app, so the inline roll-log on the sheet's main tab can
@@ -120,6 +120,7 @@ export async function renderSheet(id) {
   let featChosenSpellClass = "wizard";
   let featChosenCantrips = [];
   let featChosenSpell = "";
+  let featNewSel = newFeatSel(); // выборы черт из data-управляемой системы (featChoices.js: picks/grant/cards)
   const ELEMENTAL_ADEPT_DAMAGE_TYPES = [
     { id: "acid", label: "Кислота" },
     { id: "cold", label: "Холод" },
@@ -747,7 +748,7 @@ export async function renderSheet(id) {
   function restoreArtifactUses(rechargeKinds) {
     (data.artifacts || []).forEach((a) => {
       const u = a.uses;
-      if (u && u.enabled && rechargeKinds.includes(u.recharge === "dawn" ? "long" : u.recharge || "long")) a.usesState = Array(Math.max(1, Number(u.max) || 1)).fill(true);
+      if (u && u.enabled && !(u.recharge === "dawn" && parseDiceFromText(u.dawnDice)) && rechargeKinds.includes(u.recharge === "dawn" ? "long" : u.recharge || "long")) a.usesState = Array(Math.max(1, Number(u.max) || 1)).fill(true);
     });
   }
   function restoreFeatureUses(rechargeKinds) {
@@ -1618,7 +1619,7 @@ export async function renderSheet(id) {
             ? `<div style="margin:6px 0 0 26px;">
           <select data-asi-feat style="width:auto;min-width:220px;">
             <option value="">Выберите черту…</option>
-            ${FEATS.map((f) => `<option value="${f.id}" ${asi.featId === f.id ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
+            ${featSelectOptionsHtml(asi.featId)}
           </select>
           ${
             feat
@@ -1659,7 +1660,7 @@ export async function renderSheet(id) {
       if (!asi.featId) return true;
       const f = FEATS.find((x) => x.id === asi.featId);
       if (f && f.skillChoice && asi.featSkills.length < f.skillChoice.count) return true;
-      return featExtrasIncomplete(f, asi.sel);
+      return featExtrasIncomplete(f, asi.sel, data);
     }
     return !asi.abilities[0] || (!asi.singleAbility && !asi.abilities[1]);
   }
@@ -3780,6 +3781,18 @@ export async function renderSheet(id) {
     if (PSIONIC_POWER_FEATURE_NAME.test(f.name || "")) return { max: 2 * proficiencyBonus(data), recharge: "long" };
     return parseUsesFromText(f.desc);
   }
+  // Списывает одно использование карточки умения (если у неё есть счётчик).
+  function spendFeatureUse(f) {
+    if (!f) return;
+    const uses = resolveFeatureUses(f);
+    if (!uses || !(uses.max > 0) || uses.max === Infinity) return;
+    const arr = usesArrayFor(f, uses.max);
+    const j = arr.lastIndexOf(true);
+    if (j < 0) return;
+    arr[j] = false;
+    setFeatureUsesState(f, arr);
+    doSave();
+  }
   function featureUsesHtml(f, i) {
     const uses = resolveFeatureUses(f);
     if (!uses || uses.max <= 0) return "";
@@ -4662,6 +4675,8 @@ export async function renderSheet(id) {
   function artifactCardHtml(a, i) {
     const u = a.uses || {};
     const usesMax = Math.max(1, Number(u.max) || 1);
+    const edit = !a.saved;
+    const dawnD = parseDiceFromText(u.dawnDice);
     const spells = (a.spells || []).map((sl, si) => {
       const sp = SPELLS.find((x) => x.id === sl.id);
       if (!sp) return "";
@@ -4670,25 +4685,29 @@ export async function renderSheet(id) {
         <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;">
           <button type="button" class="small" data-action="open-artifact-spell" data-spell="${sp.id}" title="Открыть карточку заклинания">✨ ${escapeHtml(sp.name)}</button>
           <span class="muted" style="font-size:0.8rem;">${sp.level === 0 ? "заговор" : sp.level + "-й круг"}</span>
-          <label class="muted" style="font-size:0.8rem;">исп.:
+          ${edit ? `<label class="muted" style="font-size:0.8rem;">исп.:
             <input type="number" min="0" max="20" style="width:52px;" data-artifact-spell-max data-index="${i}" data-spell-index="${si}" value="${max}" title="0 — без счётчика" />
-          </label>
+          </label>` : ""}
           ${max > 0 ? `<span class="feature-card-uses" style="padding:0;">${artifactPipsHtml(artifactUsesArray(sl.usesState, max), "toggle-artifact-spell-use", i, si)}</span>` : ""}
-          <button type="button" class="small danger" data-action="remove-artifact-spell" data-index="${i}" data-spell-index="${si}" title="Убрать заклинание">✕</button>
+          ${edit ? `<button type="button" class="small danger" data-action="remove-artifact-spell" data-index="${i}" data-spell-index="${si}" title="Убрать заклинание">✕</button>` : ""}
         </div>`;
     }).join("");
     const dmgDice = parseDiceFromText(a.damage);
-    return `
-      <div class="feature-card artifact-card" style="height:auto;">
-        <button class="feature-card-remove" data-action="remove-artifact" data-index="${i}" title="Удалить">✕</button>
-        <div class="row" style="gap:8px;align-items:center;padding-right:28px;">
+    const usesPips = u.enabled ? `<span class="feature-card-uses" style="padding:0;">${artifactPipsHtml(artifactUsesArray(a.usesState, usesMax), "toggle-artifact-use", i)}</span>` : "";
+    const dawnBtn = u.enabled && dawnD ? `<button type="button" class="small" data-action="roll-artifact-dawn" data-index="${i}" title="Бросить восстановление зарядов на рассвете">🌅 Рассвет: +${escapeHtml(dawnD.raw)}</button>` : "";
+    const header = `
+        <div class="row" style="gap:8px;align-items:center;padding-right:28px;flex-wrap:wrap;">
           <button type="button" class="small" data-action="toggle-artifact-open" data-index="${i}" title="${a.open ? "Свернуть" : "Развернуть"}">${a.open ? "▾" : "▸"}</button>
-          <input type="text" class="feature-card-title" style="flex:1;min-width:0;" data-artifact-field="name" data-index="${i}" value="${escapeHtml(a.name || "")}" placeholder="Название артефакта" />
+          ${edit
+            ? `<input type="text" class="feature-card-title" style="flex:1;min-width:0;" data-artifact-field="name" data-index="${i}" value="${escapeHtml(a.name || "")}" placeholder="Название предмета" />`
+            : `<strong class="feature-card-title" style="flex:1;min-width:0;">${escapeHtml(a.name || "Магический предмет")}</strong>`}
           ${a.damageOn && dmgDice ? `<span class="badge" title="Урон включён">⚡ ${escapeHtml(dmgDice.raw)}</span>` : ""}
-        </div>
-        ${
-          a.open
-            ? `
+          <button type="button" class="small ${a.attuned ? "primary" : ""}" data-action="toggle-artifact-attune" data-index="${i}" title="Настройка на предмет">${a.attuned ? "✦ Настроен" : "◇ Не настроен"}</button>
+        </div>`;
+    let body = "";
+    if (a.open) {
+      if (edit) {
+        body = `
         <label class="feature-card-desc" style="margin-top:8px;">
           <textarea data-artifact-field="desc" data-index="${i}" rows="3" placeholder="Описание, свойства, настройка…">${escapeHtml(a.desc || "")}</textarea>
         </label>
@@ -4700,16 +4719,13 @@ export async function renderSheet(id) {
           <button type="button" class="small feature-card-roll" data-action="roll-artifact-damage" data-index="${i}">🎲 Бросить</button>
         </div>
         <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
-          <label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-artifact-uses-enabled data-index="${i}" ${u.enabled ? "checked" : ""} /> Использования</label>
-          ${
-            u.enabled
-              ? `<input type="number" min="1" max="30" style="width:60px;" data-artifact-uses-max data-index="${i}" value="${usesMax}" />
+          <label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-artifact-uses-enabled data-index="${i}" ${u.enabled ? "checked" : ""} /> Использования / заряды</label>
+          ${u.enabled ? `<input type="number" min="1" max="30" style="width:60px;" data-artifact-uses-max data-index="${i}" value="${usesMax}" />
           <select data-artifact-recharge data-index="${i}" style="width:auto;">
             ${Object.entries(ARTIFACT_RECHARGE).map(([k, l]) => `<option value="${k}" ${(u.recharge || "long") === k ? "selected" : ""}>${l}</option>`).join("")}
           </select>
-          <span class="feature-card-uses" style="padding:0;">${artifactPipsHtml(artifactUsesArray(a.usesState, usesMax), "toggle-artifact-use", i)}</span>`
-              : ""
-          }
+          <label class="muted" style="font-size:0.85rem;">на рассвете: <input type="text" style="width:90px;" data-artifact-dawn-dice data-index="${i}" value="${escapeHtml(u.dawnDice || "")}" placeholder="1к6+4" title="Сколько зарядов возвращается на рассвете (кубик), напр. 1к6+4. Пусто — без броска." /></label>
+          ${usesPips}` : ""}
         </div>
         <div style="margin-top:10px;">
           <span class="muted">Заклинания предмета:</span>
@@ -4721,17 +4737,35 @@ export async function renderSheet(id) {
             </select>
             <button type="button" class="small primary" data-action="add-artifact-spell" data-index="${i}">+ Добавить</button>
           </div>
-        </div>`
-            : ""
-        }
+        </div>
+        <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" class="primary" data-action="save-artifact" data-index="${i}">💾 Сохранить</button></div>`;
+      } else {
+        body = `
+        ${a.desc ? `<div style="margin-top:8px;white-space:pre-wrap;line-height:1.4;">${escapeHtml(a.desc)}</div>` : ""}
+        ${dmgDice ? `<div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <span class="muted">Урон:</span><strong>${escapeHtml(dmgDice.raw)}${a.damageType ? " " + escapeHtml(a.damageType) : ""}</strong>
+          <button type="button" class="small ${a.damageOn ? "primary" : ""}" data-action="toggle-artifact-damage" data-index="${i}" title="Включённый урон добавляется в окно урона оружия">${a.damageOn ? "⚡ Урон включён" : "Включить урон"}</button>
+          <button type="button" class="small feature-card-roll" data-action="roll-artifact-damage" data-index="${i}">🎲 Бросить</button>
+        </div>` : ""}
+        ${u.enabled ? `<div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <span class="muted">Заряды (${escapeHtml(ARTIFACT_RECHARGE[u.recharge || "long"])}):</span>${usesPips}${dawnBtn}</div>` : ""}
+        ${spells ? `<div style="margin-top:8px;"><span class="muted">Заклинания предмета:</span>${spells}</div>` : ""}
+        <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" class="small" data-action="edit-artifact" data-index="${i}">✎ Редактировать</button></div>`;
+      }
+    }
+    return `
+      <div class="feature-card artifact-card" style="height:auto;">
+        <button class="feature-card-remove" data-action="remove-artifact" data-index="${i}" title="Удалить">✕</button>
+        ${header}${body}
       </div>`;
   }
   function artifactsPanelHtml() {
     const list = data.artifacts || [];
+    const attuned = list.filter((x) => x.attuned).length;
     return `
       <div class="panel">
-        <div class="row between"><h2 style="margin:0;">Артефакты</h2><button class="small primary" data-action="add-artifact">+ Добавить артефакт</button></div>
-        ${list.length ? `<div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;">${list.map(artifactCardHtml).join("")}</div>` : '<p class="muted">Магические предметы и артефакты: карточка с описанием, уроном, использованиями и заклинаниями.</p>'}
+        <div class="row between"><h2 style="margin:0;">Магические предметы${list.length ? ` <span class="muted" style="font-size:0.8rem;font-weight:normal;">настроено: ${attuned}/3</span>` : ""}</h2><button class="small primary" data-action="add-artifact">+ Добавить предмет</button></div>
+        ${list.length ? `<div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;">${list.map(artifactCardHtml).join("")}</div>` : '<p class="muted">Магические предметы: карточка с описанием, уроном, зарядами (в т.ч. восстановление на рассвете), настройкой и заклинаниями.</p>'}
       </div>`;
   }
   function inventoryTab() {
@@ -4831,17 +4865,18 @@ export async function renderSheet(id) {
         <div class="row" style="margin-bottom:10px;">
           <select data-feat-select style="flex:1;min-width:200px;">
             <option value="">Выберите черту…</option>
-            ${FEATS.map((f) => `<option value="${f.id}" ${f.id === featPreviewId ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
+            ${featSelectOptionsHtml(featPreviewId)}
           </select>
-          <button class="small primary" data-action="add-feat" ${preview && !(preview.id === "martial-adept" && featChosenManeuvers.length < 2) ? "" : "disabled"}>+ Добавить</button>
+          <button class="small primary" data-action="add-feat" ${preview && !(preview.id === "martial-adept" && featChosenManeuvers.length < 2) && !featPicksIncomplete(preview, featNewSel, data) ? "" : "disabled"}>+ Добавить</button>
         </div>
         ${
           preview
             ? `
           <div class="card" style="margin-bottom:10px;border-color:var(--gold-dim);">
-            <h4 style="margin:0 0 4px;">${escapeHtml(preview.name)}</h4>
+            <h4 style="margin:0 0 4px;">${escapeHtml(preview.name)}${preview.nameEn ? ` <span class="muted" style="font-weight:normal;font-size:0.8rem;">[${escapeHtml(preview.nameEn)}]</span>` : ""}</h4>
+            <p class="muted" style="margin:0 0 4px;font-size:0.8rem;">${escapeHtml(preview.source || "Книга игрока")}</p>
             ${preview.prereq ? `<p class="muted" style="margin:0 0 4px;">Требование: ${escapeHtml(preview.prereq)}</p>` : ""}
-            <p style="margin:0 0 8px;">${escapeHtml(preview.desc)}</p>
+            <p style="margin:0 0 8px;white-space:pre-line;">${escapeHtml(preview.desc)}</p>
             ${
               preview.abilityIncrease && preview.abilityIncrease.choices.length > 1
                 ? `
@@ -4965,6 +5000,7 @@ export async function renderSheet(id) {
               </div>`
                 : ""
             }
+            ${featPicksHtml(preview, featNewSel, data)}
           </div>`
             : ""
         }
@@ -4979,8 +5015,9 @@ export async function renderSheet(id) {
               <h4 style="margin:0;">${escapeHtml(f.name)}</h4>
               <button class="small danger" data-action="remove-feat" data-index="${i}">✕</button>
             </div>
+            ${(() => { const src = (FEATS.find((x) => x.id === f.id) || {}).source; return src && src !== "Книга игрока" ? `<p class="muted" style="margin:2px 0;font-size:0.8rem;">${escapeHtml(src)}</p>` : ""; })()}
             ${f.prereq ? `<p class="muted" style="margin:2px 0;">Требование: ${escapeHtml(f.prereq)}</p>` : ""}
-            <p>${escapeHtml(f.desc || "")}</p>
+            <p style="white-space:pre-line;">${escapeHtml(f.desc || "")}</p>
             ${f.grantedAbility ? `<p class="muted" style="margin:2px 0;">Характеристика: +${f.grantedAmount} ${ABILITIES.find((a) => a.id === f.grantedAbility)?.label || f.grantedAbility}</p>` : ""}
             ${f.grantedSkills && f.grantedSkills.length ? `<p class="muted" style="margin:2px 0;">Навыки: ${f.grantedSkills.map((s) => SKILLS.find((x) => x.id === s)?.label || s).join(", ")}</p>` : ""}
           </div>`
@@ -5053,6 +5090,7 @@ export async function renderSheet(id) {
                   // featureDiceInfo's generic "к20"/"к10" match is
                   // suppressed for both, same treatment as Скрытая атака.
                   const noRollButton =
+                    !!f.rider ||
                     /^Скрытая атака(?![a-zа-яё])/i.test(f.name || "") ||
                     BARD_INSPIRATION_FEATURE_NAME.test(f.name || "") ||
                     /^Проклятие ведьмовского клинка$/i.test(f.name || "") ||
@@ -5839,10 +5877,10 @@ export async function renderSheet(id) {
     // Free-form extra dice (see the "Дополнительные кубики к урону" builder
     // in startDamageRoll) -- rolled and added just like any other bonus,
     // each die type gets its own breakdown entries.
-    (extraDice || []).forEach(({ sides, count, label }) => {
+    (extraDice || []).forEach(({ sides, count, label, flat }) => {
       if (!count || !sides) return;
       const rolls = rollDice(count, sides);
-      const sum = rolls.reduce((s, v) => s + v, 0);
+      const sum = rolls.reduce((s, v) => s + v, 0) + (flat || 0);
       total += sum;
       parts.push(`${label ? label + " " : ""}${count}к${sides}: [${rolls.join(", ")}]`);
       rolls.forEach((v) => breakdown.push({ value: v, label: label ? `${label} (к${sides})` : `доп. к${sides}` }));
@@ -5926,6 +5964,12 @@ export async function renderSheet(id) {
     if (has(/^Угроза из засады$/)) list.push({ id: "ambush", label: "Угроза из засады", note: "дополнительная атака в первый ход боя", sides: 8, count: 1 });
     if (has(/^Добыча убийцы$/)) list.push({ id: "slayer-prey", label: "Добыча убийцы", note: "первое попадание за ход по выбранной цели", sides: 6, count: 1 });
     if (has(/^Ужасающие удары$/)) list.push({ id: "dread-strikes", label: "Ужасающие удары", note: "психическая энергия, раз в ход", sides: rangerLvl >= 11 ? 6 : 4, count: 1 });
+    // Карточки умений с кубиком урона (черты: «Удар великанов», «Точный удар» и др.) — поле rider.
+    (data.features || []).forEach((f, fi) => {
+      const r = f.rider;
+      if (!r || !r.sides) return;
+      list.push({ id: `feature-${fi}`, label: f.name, note: r.note || "", sides: Number(r.sides), count: Number(r.count) || 1, flat: r.flatPb ? proficiencyBonus(data) : 0, consume: !!r.consume, featureIndex: fi });
+    });
     (data.artifacts || []).forEach((art, ai) => {
       const d = art.damageOn && parseDiceFromText(art.damage);
       if (!d) return;
@@ -6015,7 +6059,7 @@ export async function renderSheet(id) {
           : ""
       }
       ${riders
-        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" ${r.auto ? "checked" : ""} /> добавить «${escapeHtml(r.label)}» (${isCrit ? r.count * 2 : r.count}к${r.sides}) — ${escapeHtml(r.note)}</label>`)
+        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" ${r.auto ? "checked" : ""} /> добавить «${escapeHtml(r.label)}» (${isCrit ? r.count * 2 : r.count}к${r.sides}${r.flat ? "+" + r.flat : ""}) — ${escapeHtml(r.note)}${r.consume ? " · тратит использование" : ""}</label>`)
         .join("")}
       ${
         smiteAvailable
@@ -6082,7 +6126,11 @@ export async function renderSheet(id) {
       closeModal();
       const riderDice = [];
       modal.querySelectorAll("[data-use-rider]").forEach((cb) => {
-        if (cb.checked) { const r = riders[Number(cb.dataset.useRider)]; riderDice.push({ sides: r.sides, count: isCrit ? r.count * 2 : r.count, label: r.label }); }
+        if (cb.checked) {
+          const r = riders[Number(cb.dataset.useRider)];
+          riderDice.push({ sides: r.sides, count: isCrit ? r.count * 2 : r.count, label: r.label, flat: r.flat || 0 });
+          if (r.consume && r.featureIndex !== undefined) spendFeatureUse(data.features[r.featureIndex]);
+        }
       });
       doRollAttackDamage(a, useSpecial, isCrit, useSneak, useDuelist, useVersatile, useSuperiority, smiteLevel, useSmiteUndead, [...extraDice, ...riderDice]);
     });
@@ -6172,8 +6220,10 @@ export async function renderSheet(id) {
     featChosenLanguages = [];
     featChosenCantrips = [];
     featChosenSpell = "";
+    featNewSel = newFeatSel();
     render();
   });
+  wireFeatPicks(app, () => featNewSel, () => FEATS.find((f) => f.id === featPreviewId), render);
   on(app, "change", "[data-feat-ability-choice]", (e, el) => {
     featChosenAbility = el.value;
   });
@@ -6314,6 +6364,7 @@ export async function renderSheet(id) {
         entry.grantedSpell = featChosenSpell;
       }
     }
+    applyFeatPicks(data, feat, entry, featNewSel);
     data.feats.push(entry);
     applyConHpRetroactive(conModBefore, getAbilityMod(data, "con"));
     if (feat.id === TOUGH_FEAT_ID) applyToughFeatHpGrant();
@@ -6353,11 +6404,13 @@ export async function renderSheet(id) {
     featChosenLanguages = [];
     featChosenCantrips = [];
     featChosenSpell = "";
+    featNewSel = newFeatSel();
     doSave();
     render();
   });
   on(app, "click", "[data-action=remove-feat]", (e, el) => {
     const [feat] = data.feats.splice(Number(el.dataset.index), 1);
+    if (feat) revertFeatExtras(data, feat);
     // Undo the mechanical effects this feat granted, if any.
     if (feat && feat.grantedAbility) {
       data.abilities[feat.grantedAbility] = Math.max(1, (Number(data.abilities[feat.grantedAbility]) || 10) - feat.grantedAmount);
@@ -6513,7 +6566,7 @@ export async function renderSheet(id) {
   // Артефакты
   const artifactAt = (el) => (data.artifacts || [])[Number(el.dataset.index)];
   on(app, "click", "[data-action=add-artifact]", () => {
-    (data.artifacts = data.artifacts || []).push({ name: "Новый артефакт", desc: "", open: true, damage: "", damageType: "", damageOn: false, uses: { enabled: false, max: 1, recharge: "long" }, usesState: [], spells: [] });
+    (data.artifacts = data.artifacts || []).push({ name: "Новый магический предмет", desc: "", open: true, saved: false, attuned: false, damage: "", damageType: "", damageOn: false, uses: { enabled: false, max: 1, recharge: "long" }, usesState: [], spells: [] });
     doSave(); render();
   });
   on(app, "click", "[data-action=remove-artifact]", (e, el) => {
@@ -6522,6 +6575,21 @@ export async function renderSheet(id) {
   });
   on(app, "click", "[data-action=toggle-artifact-open]", (e, el) => { const a = artifactAt(el); if (a) { a.open = !a.open; doSave(); render(); } });
   on(app, "input", "[data-artifact-field]", (e, el) => { const a = artifactAt(el); if (a) { a[el.dataset.artifactField] = el.value; doSave(); } });
+  on(app, "click", "[data-action=save-artifact]", (e, el) => { const a = artifactAt(el); if (a) { a.saved = true; doSave(); render(); } });
+  on(app, "click", "[data-action=edit-artifact]", (e, el) => { const a = artifactAt(el); if (a) { a.saved = false; doSave(); render(); } });
+  on(app, "click", "[data-action=toggle-artifact-attune]", (e, el) => { const a = artifactAt(el); if (a) { a.attuned = !a.attuned; doSave(); render(); } });
+  on(app, "input", "[data-artifact-dawn-dice]", (e, el) => { const a = artifactAt(el); if (a) { a.uses = a.uses || {}; a.uses.dawnDice = el.value; doSave(); } });
+  on(app, "click", "[data-action=roll-artifact-dawn]", (e, el) => {
+    const a = artifactAt(el); const d = a && a.uses && parseDiceFromText(a.uses.dawnDice); if (!d) return;
+    const max = Math.max(1, Number(a.uses.max) || 1);
+    const arr = artifactUsesArray(a.usesState, max);
+    const r = rollExpr(d.expr);
+    const gain = Math.max(0, r.total);
+    let restored = 0;
+    for (let j = 0; j < arr.length && restored < gain; j++) if (!arr[j]) { arr[j] = true; restored++; }
+    a.usesState = arr; doSave(); render();
+    showRollResult({ label: `${a.name || "Предмет"} — заряды на рассвете`, detail: `${toCyrillicDice(d.expr)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""} · восстановлено: ${restored}${gain > restored ? " (больше максимума)" : ""}`, total: r.total });
+  });
   on(app, "click", "[data-action=toggle-artifact-damage]", (e, el) => { const a = artifactAt(el); if (!a) return; if (!parseDiceFromText(a.damage)) { alert("Сначала впишите урон (например 1к6)."); return; } a.damageOn = !a.damageOn; doSave(); render(); });
   on(app, "click", "[data-action=roll-artifact-damage]", (e, el) => {
     const a = artifactAt(el); const d = a && parseDiceFromText(a.damage); if (!d) return;
@@ -6529,7 +6597,12 @@ export async function renderSheet(id) {
     showRollResult({ label: `${a.name || "Артефакт"} — урон${a.damageType ? " (" + a.damageType + ")" : ""}`, detail: `${toCyrillicDice(d.expr)} = ${r.rolls.join("+")}${r.modifier ? formatModifier(r.modifier) : ""}`, total: r.total });
   });
   on(app, "change", "[data-artifact-uses-enabled]", (e, el) => { const a = artifactAt(el); if (a) { a.uses = a.uses || { max: 1, recharge: "long" }; a.uses.enabled = el.checked; doSave(); render(); } });
-  on(app, "change", "[data-artifact-uses-max]", (e, el) => { const a = artifactAt(el); if (a) { a.uses.max = Math.max(1, Math.min(30, Number(el.value) || 1)); a.usesState = Array(a.uses.max).fill(true); doSave(); render(); } });
+  on(app, "change", "[data-artifact-uses-max]", (e, el) => { const a = artifactAt(el); if (a) { a.uses.max = Math.max(1, Math.min(30, Number(el.value) || 1)); a.usesState = Array(a.uses.max).fill(true); doSave();
+    // re-draw only the pips: a full render() here would swallow the click that moved focus to the next field
+    const holder = el.closest(".feature-card, .card, div");
+    const pipsEl = holder && holder.querySelector(".feature-card-uses");
+    if (pipsEl) pipsEl.innerHTML = artifactPipsHtml(artifactUsesArray(a.usesState, a.uses.max), "toggle-artifact-use", Number(el.dataset.index));
+    else render(); } });
   on(app, "change", "[data-artifact-recharge]", (e, el) => { const a = artifactAt(el); if (a) { a.uses.recharge = el.value; doSave(); } });
   on(app, "click", "[data-action=toggle-artifact-use]", (e, el) => {
     const a = artifactAt(el); if (!a) return;
