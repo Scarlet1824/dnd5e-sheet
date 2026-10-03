@@ -69,7 +69,11 @@ export function getRollLog() {
   }
 }
 
+let rollSink = null;
+export function setRollSink(fn) { rollSink = typeof fn === "function" ? fn : null; }
+
 export function pushRollLog(entry) {
+  try { if (rollSink) rollSink(entry); } catch { /* sink errors never break rolling */ }
   const log = getRollLog();
   log.unshift({ ...entry, at: new Date().toISOString() });
   sessionStorage.setItem(rollLogKey(), JSON.stringify(log.slice(0, LOG_LIMIT)));

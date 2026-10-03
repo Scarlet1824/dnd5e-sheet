@@ -35,3 +35,6 @@ CREATE INDEX IF NOT EXISTS idx_characters_user ON characters(user_id);
 
 -- Roll log is intentionally NOT persisted server-side (client-only, like the Daggerheart
 -- reference app) to keep writes cheap. Revisit if the user wants cross-device roll history.
+
+-- Кампании (мастер + игроки + Discord webhook): см. migration-campaigns.sql
+-- (для уже созданной базы выполните этот файл отдельно).

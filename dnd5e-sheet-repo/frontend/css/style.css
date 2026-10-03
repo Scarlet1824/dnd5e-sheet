@@ -767,3 +767,14 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 .spell-card-grant-row .spell-card-badge { display: inline-block; white-space: normal; }
 
 .spell-card-cast { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border, rgba(128,128,128,0.35)); }
+
+/* Раунд 80: кампании */
+.small-link { font-size: 0.85rem; color: var(--accent, #8e44ad); text-decoration: none; }
+.campaign-row { display: flex; justify-content: space-between; gap: 8px; padding: 10px; border: 1px solid var(--border, #ccc); border-radius: 8px; margin-bottom: 6px; cursor: pointer; }
+.join-code { font-family: monospace; font-size: 1.1rem; letter-spacing: 2px; }
+.member-card .hp-bar { position: relative; height: 18px; background: #0002; border-radius: 9px; overflow: hidden; margin: 6px 0; }
+.member-card .hp-bar > div { height: 100%; }
+.member-card .hp-bar > span { position: absolute; inset: 0; text-align: center; font-size: 0.75rem; line-height: 18px; font-weight: 600; }
+.mstats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
+.mstat { display: flex; flex-direction: column; align-items: center; min-width: 52px; }
+.mstat b { font-size: 1.05rem; } .mstat small { font-size: 0.65rem; opacity: .7; }

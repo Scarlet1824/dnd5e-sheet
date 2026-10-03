@@ -8,6 +8,7 @@ function topBar(activeUser) {
     <div class="top-bar">
       <a href="#/characters" class="brand">⚔ D&D 5e</a>
       <div class="row">
+        <a href="#/campaigns" class="small-link">Кампании</a>
         <span class="muted">${escapeHtml(activeUser?.email || "")}</span>
         <button data-action="logout" class="small">Выйти</button>
       </div>

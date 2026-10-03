@@ -11,7 +11,7 @@ import {
 } from "../character.js";
 import { SPELL_EFFECTS } from "../data/spellEffects.js";
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
-import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter, pushRollLog } from "../dice.js";
+import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter, pushRollLog, setRollSink } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
 import { featAlreadyTaken, FEAT_TAKEN_MESSAGE, proficiencyCovered, dedupeProficiencyCategories, newFeatSel, featExtrasHtml, featExtrasIncomplete, wireFeatExtras, applyFeatExtras, featSelectOptionsHtml, featInfoHtml, featPicksHtml, featPicksIncomplete, wireFeatPicks, applyFeatPicks, revertFeatExtras, featHasNew } from "../featChoices.js";
 
@@ -167,12 +167,72 @@ export async function renderSheet(id) {
   let backgroundCustomOpen = false;
   let rollLogPanelOpen = false; // main tab: whether the bottom-right "Журнал бросков" list is expanded (the log itself keeps logging either way)
 
+  // Краткая сводка для мастера (кампании): считается на клиенте, хранится в characters.summary.
+  function buildSummary() {
+    const safe = (f, d) => { try { const v = f(); return v == null ? d : v; } catch { return d; } };
+    const sc = data.spellcasting || {};
+    const slots = [];
+    for (let l = 1; l <= 9; l++) {
+      const max = Number((sc.slots || {})[l]) || 0;
+      if (!max) continue;
+      const filled = Array.isArray((sc.slotsFilled || {})[l]) ? sc.slotsFilled[l].slice(0, max).filter(Boolean).length + Math.max(0, max - sc.slotsFilled[l].length) : max;
+      slots.push({ l, max, left: filled });
+    }
+    const resources = [];
+    (data.features || []).forEach((f) => {
+      if (Array.isArray(f.usesState) && f.usesState.length) resources.push({ n: String(f.name || "").slice(0, 40), max: f.usesState.length, left: f.usesState.filter(Boolean).length });
+    });
+    const hd = safe(() => hitDiceInfo(), null);
+    return {
+      hp: { cur: Number(data.hp?.current) || 0, max: safe(() => effectiveMaxHp(data), Number(data.hp?.max) || 0), temp: Number(data.hp?.temp) || 0 },
+      ac: safe(() => armorClass(data), null),
+      init: safe(() => initiativeBonus(data), null),
+      pp: safe(() => passivePerception(data), null),
+      dc: sc.ability ? safe(() => spellSaveDC(data), null) : null,
+      atk: sc.ability ? safe(() => spellAttackBonus(data), null) : null,
+      exh: safe(() => exhaustionLevel(data), 0),
+      cond: (data.conditions || []).slice(0, 20),
+      slots,
+      hd: hd ? { die: hd.die, cur: hd.current, total: hd.total } : null,
+      res: resources.slice(0, 30),
+    };
+  }
+
+  // Дубли бросков в Discord через кампанию (если персонаж привязан): очередь с паузой, чтобы не упереться в лимит вебхука.
+  (function setupRollRelay() {
+    setRollSink(null);
+    const cid = character.campaignId;
+    if (!cid) return;
+    const queue = [];
+    let busy = false;
+    let lastKey = "", lastAt = 0;
+    const pump = async () => {
+      if (busy) return;
+      busy = true;
+      while (queue.length) {
+        const item = queue.shift();
+        try { await api.sendRoll(cid, item); } catch { /* молча */ }
+        await new Promise((r) => setTimeout(r, 750));
+      }
+      busy = false;
+    };
+    setRollSink((e) => {
+      const key = `${e.label}|${e.total}|${e.detail || ""}`;
+      const now = Date.now();
+      if (key === lastKey && now - lastAt < 400) return;
+      lastKey = key; lastAt = now;
+      if (queue.length >= 20) queue.shift();
+      queue.push({ characterName: data.name || "Герой", label: e.label || "Бросок", detail: String(e.detail || "").replace(/<[^>]+>/g, ""), total: e.total, isCrit: !!e.isCrit, isFumble: !!e.isFumble });
+      pump();
+    });
+  })();
+
   const saveIndicator = () => $("[data-save-indicator]");
   const doSave = debounce(async () => {
     const el = saveIndicator();
     if (el) { el.textContent = "Сохранение…"; el.className = "save-indicator saving"; }
     try {
-      await api.updateCharacter(id, { name: data.name, edition: data.edition, data });
+      await api.updateCharacter(id, { name: data.name, edition: data.edition, data, summary: buildSummary() });
       const el2 = saveIndicator();
       if (el2) { el2.textContent = "Сохранено ✓"; el2.className = "save-indicator saved"; }
     } catch (err) {

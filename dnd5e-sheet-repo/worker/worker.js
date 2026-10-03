@@ -18,6 +18,9 @@
  *   GET    /api/characters/:id  (auth)                              -> { character }
  *   PUT    /api/characters/:id  (auth) { name, edition, data }      -> { character }
  *   DELETE /api/characters/:id  (auth)                              -> { ok: true }
+ *   Кампании: GET/POST /api/campaigns, POST /api/campaigns/join, GET/PUT/DELETE /api/campaigns/:id,
+ *             PUT /api/campaigns/:id/character, DELETE /api/campaigns/:id/membership,
+ *             DELETE /api/campaigns/:id/members/:userId, POST /api/campaigns/:id/roll (дубль броска в Discord)
  */
 
 const SESSION_TTL_DAYS = 30;
@@ -230,7 +233,18 @@ async function handleGetCharacter(request, env, user, id) {
     .bind(id, user.id)
     .first();
   if (!row) return json({ error: "Персонаж не найден." }, 404);
-  return json({ character: characterRowToJson(row) });
+  const character = characterRowToJson(row);
+  try {
+    const m = await env.DB.prepare(
+      "SELECT campaign_id FROM campaign_members WHERE character_id = ? AND user_id = ? LIMIT 1"
+    )
+      .bind(id, user.id)
+      .first();
+    if (m) character.campaignId = m.campaign_id;
+  } catch {
+    /* таблицы кампаний ещё нет */
+  }
+  return json({ character });
 }
 
 async function handleUpdateCharacter(request, env, user, id) {
@@ -247,13 +261,25 @@ async function handleUpdateCharacter(request, env, user, id) {
   const name = (body.name || data.name || "Безымянный герой").toString().slice(0, 200);
   const edition = body.edition === "2024" ? "2024" : "2014";
 
-  await env.DB.prepare(
-    `UPDATE characters
-     SET name = ?, edition = ?, class_label = ?, level = ?, data = ?, updated_at = datetime('now')
-     WHERE id = ? AND user_id = ?`
-  )
-    .bind(name, edition, classLabel, level, JSON.stringify(data), id, user.id)
-    .run();
+  const summary = body.summary && typeof body.summary === "object" ? JSON.stringify(body.summary).slice(0, 20000) : null;
+  try {
+    await env.DB.prepare(
+      `UPDATE characters
+       SET name = ?, edition = ?, class_label = ?, level = ?, data = ?, summary = ?, updated_at = datetime('now')
+       WHERE id = ? AND user_id = ?`
+    )
+      .bind(name, edition, classLabel, level, JSON.stringify(data), summary, id, user.id)
+      .run();
+  } catch {
+    // колонка summary ещё не добавлена миграцией — сохраняем без неё
+    await env.DB.prepare(
+      `UPDATE characters
+       SET name = ?, edition = ?, class_label = ?, level = ?, data = ?, updated_at = datetime('now')
+       WHERE id = ? AND user_id = ?`
+    )
+      .bind(name, edition, classLabel, level, JSON.stringify(data), id, user.id)
+      .run();
+  }
 
   const row = await env.DB.prepare("SELECT * FROM characters WHERE id = ?").bind(id).first();
   return json({ character: characterRowToJson(row) });
@@ -264,10 +290,236 @@ async function handleDeleteCharacter(request, env, user, id) {
   return json({ ok: true });
 }
 
+
+// ---------- кампании ----------
+
+const WEBHOOK_RE = /^https:\/\/(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+$/;
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function makeJoinCode() {
+  const arr = new Uint8Array(6);
+  crypto.getRandomValues(arr);
+  return [...arr].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("");
+}
+
+function maskWebhook(url) {
+  if (!url) return "";
+  const m = url.match(/^(https:\/\/[^/]+\/api\/webhooks\/\d+\/)([\w-]+)$/);
+  return m ? `${m[1]}…${m[2].slice(-4)}` : "задан";
+}
+
+async function getCampaignRole(env, campaignId, userId) {
+  const c = await env.DB.prepare("SELECT * FROM campaigns WHERE id = ?").bind(campaignId).first();
+  if (!c) return { campaign: null, role: null };
+  if (c.owner_id === userId) return { campaign: c, role: "gm" };
+  const m = await env.DB.prepare("SELECT * FROM campaign_members WHERE campaign_id = ? AND user_id = ?")
+    .bind(campaignId, userId)
+    .first();
+  return { campaign: c, role: m ? "player" : null, member: m };
+}
+
+async function handleListCampaigns(request, env, user) {
+  const { results } = await env.DB.prepare(
+    `SELECT c.id, c.name, c.join_code, c.owner_id,
+            (SELECT COUNT(*) FROM campaign_members m WHERE m.campaign_id = c.id) AS members
+     FROM campaigns c
+     WHERE c.owner_id = ? OR c.id IN (SELECT campaign_id FROM campaign_members WHERE user_id = ?)
+     ORDER BY c.created_at DESC`
+  )
+    .bind(user.id, user.id)
+    .all();
+  return json({
+    campaigns: results.map((c) => ({
+      id: c.id,
+      name: c.name,
+      role: c.owner_id === user.id ? "gm" : "player",
+      joinCode: c.owner_id === user.id ? c.join_code : undefined,
+      members: c.members,
+    })),
+  });
+}
+
+async function handleCreateCampaign(request, env, user) {
+  const body = await readJson(request);
+  const name = body && typeof body.name === "string" ? body.name.trim().slice(0, 100) : "";
+  if (!name) return json({ error: "Укажите название кампании." }, 400);
+  const id = uuid();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const code = makeJoinCode();
+      await env.DB.prepare("INSERT INTO campaigns (id, owner_id, name, join_code) VALUES (?, ?, ?, ?)")
+        .bind(id, user.id, name, code)
+        .run();
+      return json({ campaign: { id, name, role: "gm", joinCode: code, members: 0 } }, 201);
+    } catch (e) {
+      if (attempt === 4) throw e;
+    }
+  }
+}
+
+async function handleJoinCampaign(request, env, user) {
+  const body = await readJson(request);
+  const code = body && typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
+  if (!code) return json({ error: "Введите код приглашения." }, 400);
+  const c = await env.DB.prepare("SELECT * FROM campaigns WHERE join_code = ?").bind(code).first();
+  if (!c) return json({ error: "Кампания с таким кодом не найдена." }, 404);
+  if (c.owner_id !== user.id) {
+    await env.DB.prepare("INSERT OR IGNORE INTO campaign_members (campaign_id, user_id) VALUES (?, ?)")
+      .bind(c.id, user.id)
+      .run();
+  }
+  return json({ campaign: { id: c.id, name: c.name, role: c.owner_id === user.id ? "gm" : "player" } });
+}
+
+async function handleGetCampaign(request, env, user, id) {
+  const { campaign, role, member } = await getCampaignRole(env, id, user.id);
+  if (!campaign || !role) return json({ error: "Кампания не найдена." }, 404);
+  if (role === "player") {
+    return json({
+      campaign: { id: campaign.id, name: campaign.name, role, hasWebhook: !!campaign.webhook_url },
+      myCharacterId: member.character_id || null,
+    });
+  }
+  let rows = [];
+  try {
+    const q = await env.DB.prepare(
+      `SELECT m.user_id AS user_id, u.email AS email, m.character_id AS character_id,
+              c.name AS cname, c.class_label AS class_label, c.level AS level, c.summary AS summary, c.updated_at AS updated_at
+       FROM campaign_members m
+       JOIN users u ON u.id = m.user_id
+       LEFT JOIN characters c ON c.id = m.character_id
+       WHERE m.campaign_id = ?
+       ORDER BY m.joined_at`
+    )
+      .bind(id)
+      .all();
+    rows = q.results;
+  } catch {
+    const q = await env.DB.prepare(
+      `SELECT m.user_id AS user_id, u.email AS email, m.character_id AS character_id,
+              c.name AS cname, c.class_label AS class_label, c.level AS level, NULL AS summary, c.updated_at AS updated_at
+       FROM campaign_members m
+       JOIN users u ON u.id = m.user_id
+       LEFT JOIN characters c ON c.id = m.character_id
+       WHERE m.campaign_id = ?`
+    )
+      .bind(id)
+      .all();
+    rows = q.results;
+  }
+  return json({
+    campaign: {
+      id: campaign.id,
+      name: campaign.name,
+      role,
+      joinCode: campaign.join_code,
+      hasWebhook: !!campaign.webhook_url,
+      webhookMasked: maskWebhook(campaign.webhook_url),
+    },
+    members: rows.map((r) => {
+      let summary = null;
+      try { summary = r.summary ? JSON.parse(r.summary) : null; } catch { /* ignore */ }
+      return {
+        userId: r.user_id,
+        email: r.email,
+        characterId: r.character_id,
+        name: r.cname,
+        classLabel: r.class_label,
+        level: r.level,
+        updatedAt: r.updated_at,
+        summary,
+      };
+    }),
+  });
+}
+
+async function handleUpdateCampaign(request, env, user, id) {
+  const { campaign, role } = await getCampaignRole(env, id, user.id);
+  if (!campaign || role !== "gm") return json({ error: "Кампания не найдена." }, 404);
+  const body = await readJson(request);
+  if (!body) return json({ error: "Некорректное тело запроса." }, 400);
+  let name = campaign.name;
+  let webhook = campaign.webhook_url;
+  if (typeof body.name === "string" && body.name.trim()) name = body.name.trim().slice(0, 100);
+  if (typeof body.webhookUrl === "string") {
+    const w = body.webhookUrl.trim();
+    if (w === "") webhook = null;
+    else if (WEBHOOK_RE.test(w)) webhook = w;
+    else return json({ error: "Это не похоже на ссылку Discord webhook (https://discord.com/api/webhooks/…)." }, 400);
+  }
+  await env.DB.prepare("UPDATE campaigns SET name = ?, webhook_url = ? WHERE id = ?").bind(name, webhook, id).run();
+  return json({ ok: true, hasWebhook: !!webhook, webhookMasked: maskWebhook(webhook), name });
+}
+
+async function handleDeleteCampaign(request, env, user, id) {
+  const { campaign, role } = await getCampaignRole(env, id, user.id);
+  if (!campaign || role !== "gm") return json({ error: "Кампания не найдена." }, 404);
+  await env.DB.prepare("DELETE FROM campaign_members WHERE campaign_id = ?").bind(id).run();
+  await env.DB.prepare("DELETE FROM campaigns WHERE id = ?").bind(id).run();
+  return json({ ok: true });
+}
+
+async function handleSetMyCharacter(request, env, user, id) {
+  const { campaign, role } = await getCampaignRole(env, id, user.id);
+  if (!campaign || role !== "player") return json({ error: "Вы не участвуете в этой кампании." }, 404);
+  const body = await readJson(request);
+  const characterId = body && typeof body.characterId === "string" && body.characterId ? body.characterId : null;
+  if (characterId) {
+    const ch = await env.DB.prepare("SELECT id FROM characters WHERE id = ? AND user_id = ?").bind(characterId, user.id).first();
+    if (!ch) return json({ error: "Персонаж не найден." }, 404);
+  }
+  await env.DB.prepare("UPDATE campaign_members SET character_id = ? WHERE campaign_id = ? AND user_id = ?")
+    .bind(characterId, id, user.id)
+    .run();
+  return json({ ok: true });
+}
+
+async function handleLeaveCampaign(request, env, user, id) {
+  await env.DB.prepare("DELETE FROM campaign_members WHERE campaign_id = ? AND user_id = ?").bind(id, user.id).run();
+  return json({ ok: true });
+}
+
+async function handleKickMember(request, env, user, id, memberId) {
+  const { campaign, role } = await getCampaignRole(env, id, user.id);
+  if (!campaign || role !== "gm") return json({ error: "Кампания не найдена." }, 404);
+  await env.DB.prepare("DELETE FROM campaign_members WHERE campaign_id = ? AND user_id = ?").bind(id, memberId).run();
+  return json({ ok: true });
+}
+
+// Дубль броска в Discord: webhook хранится только на сервере и игрокам не отдаётся.
+async function handleCampaignRoll(request, env, user, id, ctx) {
+  const { campaign, role } = await getCampaignRole(env, id, user.id);
+  if (!campaign || !role) return json({ error: "Кампания не найдена." }, 404);
+  if (!campaign.webhook_url) return json({ ok: true, sent: false });
+  const body = await readJson(request);
+  if (!body) return json({ error: "Некорректное тело запроса." }, 400);
+  const str = (v, n) => String(v == null ? "" : v).slice(0, n);
+  const payload = {
+    username: str(body.characterName || "Герой", 80) || "Герой",
+    allowed_mentions: { parse: [] },
+    embeds: [
+      {
+        title: str(body.label, 250) || "Бросок",
+        description: str(body.detail, 1500),
+        color: body.isCrit ? 0x2ecc71 : body.isFumble ? 0xe74c3c : 0x8e44ad,
+        fields: [{ name: "Результат", value: str(body.total, 100) || "—", inline: true }],
+      },
+    ],
+  };
+  const post = fetch(campaign.webhook_url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+  if (ctx && ctx.waitUntil) ctx.waitUntil(post);
+  else await post;
+  return json({ ok: true, sent: true });
+}
+
 // ---------- router ----------
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const cors = corsHeaders(env);
 
     if (request.method === "OPTIONS") {
@@ -297,6 +549,23 @@ export default {
           response = await handleListCharacters(request, env, user);
         } else if (path === "/api/characters" && request.method === "POST") {
           response = await handleCreateCharacter(request, env, user);
+        } else if (path === "/api/campaigns" && request.method === "GET") {
+          response = await handleListCampaigns(request, env, user);
+        } else if (path === "/api/campaigns" && request.method === "POST") {
+          response = await handleCreateCampaign(request, env, user);
+        } else if (path === "/api/campaigns/join" && request.method === "POST") {
+          response = await handleJoinCampaign(request, env, user);
+        } else if (/^\/api\/campaigns\//.test(path)) {
+          const m = path.match(/^\/api\/campaigns\/([a-zA-Z0-9-]+)(?:\/([a-z]+)(?:\/([a-zA-Z0-9-]+))?)?$/);
+          if (!m) response = json({ error: "Not found." }, 404);
+          else if (!m[2] && request.method === "GET") response = await handleGetCampaign(request, env, user, m[1]);
+          else if (!m[2] && request.method === "PUT") response = await handleUpdateCampaign(request, env, user, m[1]);
+          else if (!m[2] && request.method === "DELETE") response = await handleDeleteCampaign(request, env, user, m[1]);
+          else if (m[2] === "character" && request.method === "PUT") response = await handleSetMyCharacter(request, env, user, m[1]);
+          else if (m[2] === "membership" && request.method === "DELETE") response = await handleLeaveCampaign(request, env, user, m[1]);
+          else if (m[2] === "members" && m[3] && request.method === "DELETE") response = await handleKickMember(request, env, user, m[1], m[3]);
+          else if (m[2] === "roll" && request.method === "POST") response = await handleCampaignRoll(request, env, user, m[1], ctx);
+          else response = json({ error: "Not found." }, 404);
         } else {
           const match = path.match(/^\/api\/characters\/([a-zA-Z0-9-]+)$/);
           if (match && request.method === "GET") {

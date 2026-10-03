@@ -4,6 +4,7 @@ import { renderAuth } from "./views/auth.js";
 import { renderList } from "./views/list.js";
 import { renderSheet } from "./views/sheet.js";
 import { renderWizard } from "./views/wizard.js";
+import { renderCampaigns, renderCampaign } from "./views/campaigns.js";
 
 function requireAuth(fn) {
   return (params) => {
@@ -18,6 +19,8 @@ function requireAuth(fn) {
 route("#/login", renderAuth);
 route("#/characters", requireAuth(renderList));
 route("#/characters/:id", requireAuth((p) => renderSheet(p.id)));
+route("#/campaigns", requireAuth(renderCampaigns));
+route("#/campaigns/:id", requireAuth((p) => renderCampaign(p.id)));
 route("#/wizard", requireAuth(renderWizard));
 route("#/", () => navigate(getToken() ? "#/characters" : "#/login"));
 notFound(() => navigate("#/"));

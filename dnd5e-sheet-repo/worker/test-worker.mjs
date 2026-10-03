@@ -73,7 +73,9 @@ function makeMockDB() {
         return characters.filter((c) => c.id === bound[0] && c.user_id === bound[1]);
       }
       if (s.startsWith("UPDATE characters")) {
-        const [name, edition, class_label, level, data, id, user_id] = bound;
+        const hasSum = bound.length === 8;
+        const [name, edition, class_label, level, data] = bound;
+        const [id, user_id] = bound.slice(hasSum ? 6 : 5);
         const c = characters.find((x) => x.id === id && x.user_id === user_id);
         if (c) Object.assign(c, { name, edition, class_label, level, data, updated_at: new Date().toISOString() });
         return [];

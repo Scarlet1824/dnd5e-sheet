@@ -73,4 +73,15 @@ export const api = {
   getCharacter: (id) => request(`/api/characters/${id}`),
   updateCharacter: (id, payload) => request(`/api/characters/${id}`, { method: "PUT", body: payload }),
   deleteCharacter: (id) => request(`/api/characters/${id}`, { method: "DELETE" }),
+  // кампании
+  listCampaigns: () => request("/api/campaigns"),
+  createCampaign: (name) => request("/api/campaigns", { method: "POST", body: { name } }),
+  joinCampaign: (code) => request("/api/campaigns/join", { method: "POST", body: { code } }),
+  getCampaign: (id) => request(`/api/campaigns/${id}`),
+  updateCampaign: (id, body) => request(`/api/campaigns/${id}`, { method: "PUT", body }),
+  deleteCampaign: (id) => request(`/api/campaigns/${id}`, { method: "DELETE" }),
+  setMyCharacter: (id, characterId) => request(`/api/campaigns/${id}/character`, { method: "PUT", body: { characterId } }),
+  leaveCampaign: (id) => request(`/api/campaigns/${id}/membership`, { method: "DELETE" }),
+  kickMember: (id, userId) => request(`/api/campaigns/${id}/members/${userId}`, { method: "DELETE" }),
+  sendRoll: (id, body) => request(`/api/campaigns/${id}/roll`, { method: "POST", body }),
 };
