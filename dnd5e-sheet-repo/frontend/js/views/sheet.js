@@ -2357,8 +2357,9 @@ export async function renderSheet(id) {
     return { free, pactOnly, circles };
   }
   function spellCastHtml(sp) {
-    if (sp.level !== 1) return "";
+    if (sp.level > 2 || (sp.level === 0 && !SPELL_EFFECTS[sp.id])) return "";
     const info = spellCastInfo(sp);
+    if (sp.level === 0) return `<div class="row" style="gap:8px;align-items:center;"><button type="button" class="small primary" data-action="cast-spell" data-spell="${sp.id}">✨ Применить</button><span class="muted" style="font-size:0.8rem;">заговор — без ячейки</span></div>`;
     if (info.free) return `<div class="row" style="gap:8px;align-items:center;"><button type="button" class="small primary" data-action="cast-spell" data-spell="${sp.id}">✨ Применить</button><span class="muted" style="font-size:0.8rem;">без траты ячейки</span></div>`;
     if (!info.circles.length) return `<div class="row" style="gap:8px;align-items:center;"><button type="button" class="small primary" disabled title="Нет ячеек заклинаний этого круга">✨ Применить</button><span class="muted" style="font-size:0.8rem;">нет ячеек</span></div>`;
     const pactCircle = info.circles[info.circles.length - 1].c;
@@ -2389,23 +2390,52 @@ export async function renderSheet(id) {
     }
     if (eff.save && dc !== null) addRow("save", `<p style="margin:0;">Спасбросок цели: <strong>${abilLabel(eff.save)}</strong>, Сл <strong>${dc}</strong>${eff.half ? " — при успехе половина урона" : ""}.</p>`);
     const rollRows = [];
+    const totalLvl = (data.classes || []).reduce((n, c) => n + (Number(c.level) || 0), 0);
+    const tiers = sp.level === 0 ? (totalLvl >= 5 ? 1 : 0) + (totalLvl >= 11 ? 1 : 0) + (totalLvl >= 17 ? 1 : 0) : 0;
+    const castMod = abilId ? getAbilityMod(data, abilId) : 0;
+    const withMod = (expr, add) => (add ? `${expr}${add > 0 ? "+" : ""}${add}` : expr);
+    const spellDmgExpr = (d) => {
+      const m = String(d.expr).match(/^(\d*)d(\d+)([+-]\d+)?$/i);
+      if (!m) return d.expr;
+      let count = m[1] ? parseInt(m[1], 10) : 1;
+      const sides = m[2];
+      if (d.tier) count = count * (tiers + 1);
+      if (d.tierOnly) count = count * tiers;
+      if (d.up) { const n = d.upEvery ? (d.upCeil ? Math.ceil(steps / d.upEvery) : Math.floor(steps / d.upEvery)) : steps; const u = String(d.up).match(/^(\d*)d(\d+)$/i); count += (u && u[1] ? parseInt(u[1], 10) : 1) * n; }
+      if (count <= 0) return d.mod ? String(castMod) : null;
+      return withMod(`${count}d${sides}`, (m[3] ? parseInt(m[3], 10) : 0) + (d.mod ? castMod : 0));
+    };
     (eff.dmg || []).forEach((d, i) => {
-      const expr = scaleSpellExpr(d.expr, d.up, steps);
+      const expr = spellDmgExpr(d);
+      if (expr == null) return;
+      if (/^-?\d+$/.test(expr)) { rollRows.push({ key: `dmg${i}`, label: `Урон${d.label ? ` (${d.label})` : ""}`, fixed: Number(expr), type: d.type, kind: "dmg", save: d.save }); return; }
       rollRows.push({ key: `dmg${i}`, label: `Урон${d.label ? ` (${d.label})` : ""}`, expr, type: d.type, kind: "dmg", save: d.save });
     });
+    if (eff.bonus) rollRows.push({ key: "bonus", label: eff.bonus.label, expr: eff.bonus.expr, kind: "bonus" });
+    let beamCount = 0;
+    if (eff.beams) {
+      beamCount = eff.beams.base + (eff.beams.perStep ? steps * eff.beams.perStep : 0) + (eff.beams.tier ? tiers : 0);
+      const agon = eff.beams.agonizing && (data.features || []).some((f) => /Мучительный взрыв/i.test(f.name || ""));
+      const bExpr = withMod(eff.beams.expr, agon ? castMod : 0);
+      const bonus = spellAttackBonus(data);
+      for (let b = 1; b <= beamCount; b++) {
+        addRow(`beam${b}`, `<div class="row between" style="gap:8px;align-items:center;flex-wrap:wrap;"><span><strong>Луч ${b}</strong> <span class="muted">${bonus === null ? "" : formatModifier(bonus)} · ${escapeHtml(toCyrillicDice(bExpr))} (${escapeHtml(eff.beams.type)})</span></span><span class="row" style="gap:6px;align-items:center;"><button type="button" class="small primary" data-beam-attack ${bonus === null ? "disabled" : ""}>🎲 Атака</button><label class="muted" style="font-size:0.8rem;"><input type="checkbox" data-row-crit /> крит</label><button type="button" class="small danger" data-beam-dmg="${escapeHtml(bExpr)}" data-beam-type="${escapeHtml(eff.beams.type)}">💥 Урон</button></span></div><div class="muted" data-cast-out style="margin-top:4px;"></div>`);
+      }
+    }
     if (eff.darts) { const n = eff.darts.base + steps; rollRows.push({ key: "darts", label: `Дротики: ${n} шт. по ${toCyrillicDice(eff.darts.expr)}`, expr: eff.darts.expr, count: n, type: eff.darts.type, kind: "dmg" }); }
     if (eff.heal) { const m = eff.heal.mod && abilId ? getAbilityMod(data, abilId) : 0; rollRows.push({ key: "heal", label: "Лечение", expr: `${scaleSpellExpr(eff.heal.expr, eff.heal.up, steps)}${m ? (m > 0 ? "+" : "") + m : ""}`, type: "хиты", kind: "heal" }); }
     if (eff.temp) { const flat = eff.temp.upFlat ? eff.temp.upFlat * steps : 0; if (eff.temp.flat != null) rollRows.push({ key: "temp", label: "Временные хиты", fixed: eff.temp.flat + flat, kind: "temp" }); else { const m = String(eff.temp.expr).match(/^(.*?)([+-]\d+)?$/); rollRows.push({ key: "temp", label: "Временные хиты", expr: `${m[1]}${(Number(m[2] || 0) + flat) ? ((Number(m[2] || 0) + flat) > 0 ? "+" : "") + (Number(m[2] || 0) + flat) : ""}`, kind: "temp" }); } }
     if (eff.pool) rollRows.push({ key: "pool", label: "Пул хитов существ", expr: scaleSpellExpr(eff.pool.expr, eff.pool.up, steps), kind: "pool" });
-    rollRows.forEach((r) => addRow(r.key, `<div class="row between" style="gap:8px;align-items:center;"><span><strong>${escapeHtml(r.label)}</strong>${r.expr && !r.count ? ` — ${escapeHtml(toCyrillicDice(r.expr))}` : ""}${r.fixed != null ? ` — ${r.fixed}` : ""}${r.type && r.kind === "dmg" ? ` <span class="muted">(${escapeHtml(r.type)})</span>` : ""}</span><button type="button" class="small ${r.kind === "heal" || r.kind === "temp" ? "" : "danger"}" data-cast-roll="${r.key}">${r.kind === "heal" || r.kind === "temp" ? "💚" : "💥"} Бросить</button></div><div class="muted" data-cast-out style="margin-top:4px;"></div>`));
+    rollRows.forEach((r) => addRow(r.key, `<div class="row between" style="gap:8px;align-items:center;"><span><strong>${escapeHtml(r.label)}</strong>${r.expr && !r.count ? ` — ${escapeHtml(toCyrillicDice(r.expr))}` : ""}${r.fixed != null ? ` — ${r.fixed}` : ""}${r.type && r.kind === "dmg" ? ` <span class="muted">(${escapeHtml(r.type)})</span>` : ""}</span><button type="button" class="small ${r.kind === "heal" || r.kind === "temp" || r.kind === "bonus" ? "" : "danger"}" data-cast-roll="${r.key}">${r.kind === "heal" || r.kind === "temp" ? "💚" : r.kind === "bonus" ? "🎲" : "💥"} Бросить</button></div><div class="muted" data-cast-out style="margin-top:4px;"></div>`));
     const hasDmg = rollRows.some((r) => r.kind === "dmg");
     const body = `
       <h3>${escapeHtml(sp.name)}</h3>
-      <p class="muted" style="margin:0 0 6px;">${free ? "Без траты ячейки." : `Потрачена ячейка ${circle}-го круга.`}${steps ? ` Заклинание усилено (+${steps} к кругу).` : ""}</p>
+      <p class="muted" style="margin:0 0 6px;">${free || sp.level === 0 ? (sp.level === 0 ? "Заговор — без ячейки." : "Без траты ячейки.") : `Потрачена ячейка ${circle}-го круга.`}${steps ? ` Заклинание усилено (+${steps} к кругу).` : ""}</p>
       ${eff.note ? `<p class="muted" style="margin:0 0 6px;">${escapeHtml(eff.note)}</p>` : ""}
       ${rows.length ? "" : `<p>Заклинание применено — бросков для него нет, действуйте по описанию.</p>`}
+      ${eff.weapon ? `<p style="margin:0 0 6px;">Атака оружием — бросок атаки сделайте на листе оружия.</p>` : ""}
       ${rows.join("")}
-      ${eff.attack && hasDmg ? `<label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-cast-crit /> Критическое попадание (двойные кости урона)</label>` : ""}
+      ${(eff.attack || eff.weapon) && hasDmg ? `<label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-cast-crit /> Критическое попадание (двойные кости урона)</label>` : ""}
       <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" data-action="close-modal">Закрыть</button></div>`;
     const modal = openModal(body, { wide: false });
     on(modal, "click", "[data-action=close-modal]", () => { closeModal(); render(); });
@@ -2419,6 +2449,26 @@ export async function renderSheet(id) {
       out(el).innerHTML = `<strong style="color:var(--text);">${escapeHtml(txt)}</strong>`;
       const cb = modal.querySelector("[data-cast-crit]"); if (cb) cb.checked = r.isCrit;
       log(`${sp.name}: атака`, txt, r.total);
+    });
+    on(modal, "click", "[data-beam-attack]", (e, el) => {
+      const bonus = spellAttackBonus(data);
+      const dis = exhaustionDisadvantage("attack");
+      const r = rollD20({ modifier: bonus, mode: dis ? "disadvantage" : "normal" });
+      const txt = `к20: [${r.second != null ? `${r.first}, ${r.second}` : r.first}] ${formatModifier(bonus)} = ${r.total}${r.isCrit ? " — КРИТ!" : r.isFumble ? " — промах (1)" : ""}`;
+      const row = el.closest("[data-cast-row]");
+      row.querySelector("[data-cast-out]").textContent = txt;
+      row.querySelector("[data-row-crit]").checked = r.isCrit;
+      log(`${sp.name}: атака`, txt, r.total);
+    });
+    on(modal, "click", "[data-beam-dmg]", (e, el) => {
+      const row = el.closest("[data-cast-row]");
+      const crit = row.querySelector("[data-row-crit]").checked;
+      const ex = crit ? doubleDiceCount(el.dataset.beamDmg) : el.dataset.beamDmg;
+      const rr = rollExpr(ex);
+      const prev = row.querySelector("[data-cast-out]").textContent;
+      const txt = `${prev ? prev + " · " : ""}урон ${rr.rolls.join("+")}${rr.modifier ? formatModifier(rr.modifier) : ""} = ${rr.total} (${el.dataset.beamType})${crit ? " (крит)" : ""}`;
+      row.querySelector("[data-cast-out]").textContent = txt;
+      log(`${sp.name}: урон луча`, txt, rr.total);
     });
     on(modal, "click", "[data-cast-roll]", (e, el) => {
       const r0 = rollRows.find((x) => x.key === el.dataset.castRoll);
@@ -2435,7 +2485,7 @@ export async function renderSheet(id) {
           parts.push(`${rr.rolls.join("+")}${rr.modifier ? formatModifier(rr.modifier) : ""}`);
         }
       }
-      const unit = r0.kind === "heal" ? "хитов" : r0.kind === "temp" ? "врем. хитов" : r0.kind === "pool" ? "хитов (пул)" : `урона${r0.type ? ` (${r0.type})` : ""}`;
+      const unit = r0.kind === "bonus" ? "(бонус к проверке)" : r0.kind === "heal" ? "хитов" : r0.kind === "temp" ? "врем. хитов" : r0.kind === "pool" ? "хитов (пул)" : `урона${r0.type ? ` (${r0.type})` : ""}`;
       const txt = `${r0.count ? parts.map((x) => `[${x}]`).join(" ") : parts.join("")} = ${total} ${unit}${crit ? " (крит)" : ""}${r0.save ? ` · спасбросок цели ${abilLabel(r0.save)} Сл ${dc}` : ""}`;
       out(el).innerHTML = `<strong style="color:var(--text);">${escapeHtml(txt)}</strong>`;
       log(`${sp.name}: ${r0.label.toLowerCase()}`, txt, total);
@@ -8686,7 +8736,7 @@ export async function renderSheet(id) {
     if (!sp) return;
     const info = spellCastInfo(sp);
     let circle = sp.level;
-    if (!info.free) {
+    if (!info.free && sp.level > 0) {
       const row = el.closest(".spell-card-cast");
       const selEl = row && row.querySelector("[data-cast-slot]");
       circle = selEl ? Number(selEl.value) : info.circles.length ? info.circles[info.circles.length - 1].c : sp.level;
