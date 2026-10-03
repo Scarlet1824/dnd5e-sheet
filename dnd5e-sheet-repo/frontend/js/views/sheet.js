@@ -2,7 +2,7 @@ import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeMod
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -1367,6 +1367,7 @@ export async function renderSheet(id) {
   // needed); the picker's count is just the difference from the level below.
   const KNOWN_SPELLS_BY_LEVEL = {
     bard: { 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 10: 14, 11: 15, 12: 15, 13: 16, 14: 18, 15: 19, 16: 19, 17: 20, 18: 22, 19: 22, 20: 22 },
+    sorcerer: { 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 10: 11, 11: 12, 12: 12, 13: 13, 14: 13, 15: 14, 16: 14, 17: 15, 18: 15, 19: 15, 20: 15 },
     ranger: { 1: 0, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 5, 8: 5, 9: 6, 10: 6, 11: 7, 12: 7, 13: 8, 14: 8, 15: 9, 16: 9, 17: 10, 18: 10, 19: 11, 20: 11 },
   };
   // Same idea, but for CANTRIPS known -- only Бард grows this count post-1st
@@ -1719,6 +1720,30 @@ export async function renderSheet(id) {
   function expertiseChoiceIncomplete() {
     const ec = levelUpState.expertiseChoice;
     return !!(ec && ec.picked.length < Math.min(ec.count, expertiseOptions().length));
+  }
+  // ---- Метамагия чародея (3-й уровень — два варианта, 10-й и 17-й — по одному) ---------------------------------
+  function levelMetamagicCount(cls, newLevel) {
+    const raw = (cls && cls.features && cls.features[newLevel]) || [];
+    if (!cls || cls.id !== "sorcerer" || !raw.some((f) => /^Метамагия/.test(f))) return 0;
+    return newLevel === 3 ? 2 : 1;
+  }
+  function metamagicOptions() {
+    const have = new Set((data.features || []).map((f) => f.name));
+    return (METAMAGIC_OPTIONS || []).filter((m) => !have.has(`Метамагия: ${m.name}`));
+  }
+  function metamagicPanelHtml() {
+    const mc = levelUpState.metamagicChoice;
+    if (!mc) return "";
+    const opts = metamagicOptions();
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Метамагия — выберите ${mc.count} (${mc.picked.length}/${mc.count})</h4>
+        ${opts.map((m) => `<label class="row" style="gap:8px;align-items:flex-start;margin-top:6px;"><input type="checkbox" data-level-up-metamagic="${escapeHtml(m.name)}" ${mc.picked.includes(m.name) ? "checked" : ""} ${!mc.picked.includes(m.name) && mc.picked.length >= mc.count ? "disabled" : ""} style="margin-top:4px;" /><span><strong>${escapeHtml(m.name)}</strong><br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(m.desc || "")}</span></span></label>`).join("")}
+      </div>`;
+  }
+  function metamagicIncomplete() {
+    const mc = levelUpState.metamagicChoice;
+    return !!(mc && mc.picked.length < Math.min(mc.count, metamagicOptions().length));
   }
   // ---- Магические секреты (Бард 10/14/18) и «Дополнительные тайны магии» Коллегии знаний (6) -----------------
   function magicSecretsInfo(cls, newLevel, c) {
@@ -2661,6 +2686,7 @@ export async function renderSheet(id) {
       ${levelUpState.fightingStyleChoice ? fightingStyleChoicePanelHtml(cls) : ""}
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
       ${expertisePanelHtml()}
+      ${metamagicPanelHtml()}
       ${magicSecretsPanelHtml(cls, newLevel, c)}
       ${styleSwapPanelHtml(cls)}
       ${styleCantripsPanelHtml()}
@@ -2686,6 +2712,7 @@ export async function renderSheet(id) {
           fightingStyleChoiceIncomplete() ||
           baseFightingStyleChoiceIncomplete() ||
           expertiseChoiceIncomplete() ||
+          metamagicIncomplete() ||
           magicSecretsIncomplete(cls, newLevel, c) ||
           styleCantripsIncomplete() ||
           toolChoiceIncomplete() ||
@@ -2754,6 +2781,13 @@ export async function renderSheet(id) {
       ec.picked = [...cur].slice(0, ec.count);
       refreshLevelUpModal();
     });
+    on(modal, "change", "[data-level-up-metamagic]", (e, el) => {
+      const mc = levelUpState.metamagicChoice;
+      if (!mc) return;
+      const n = el.dataset.levelUpMetamagic;
+      mc.picked = el.checked ? [...new Set([...mc.picked, n])].slice(0, mc.count) : mc.picked.filter((x) => x !== n);
+      refreshLevelUpModal();
+    });
     on(modal, "change", "[data-level-up-magic-secret]", (e, el) => {
       const ms = levelUpState.magicSecrets;
       if (!ms) return;
@@ -2808,6 +2842,7 @@ export async function renderSheet(id) {
       levelUpState.asi = ccls && levelHasAsiChoice(ccls, newLevel) ? freshAsiState() : null;
       levelUpState.optionalPicked = [];
       levelUpState.expertiseChoice = ccls && levelExpertiseCount(ccls, newLevel) ? { count: levelExpertiseCount(ccls, newLevel), picked: [] } : null;
+      levelUpState.metamagicChoice = ccls && levelMetamagicCount(ccls, newLevel) ? { count: levelMetamagicCount(ccls, newLevel), picked: [] } : null;
       levelUpState.styleSwap = ccls && canSwapFightingStyle(ccls, newLevel) ? { name: "" } : null;
       levelUpState.styleCantrips = {};
       levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, newLevel) ? freshSubclassChoiceState() : null;
@@ -3163,6 +3198,10 @@ export async function renderSheet(id) {
         }
         data.features.push({ name: f.name, source: cls.name, desc: f.desc || "" });
         applyFeatureProficiencyGrants(f.name, f.desc || "");
+        if (cls.id === "monk" && f.name === "Алмазная душа") {
+          if (!Array.isArray(data.proficiencies.savingThrows)) data.proficiencies.savingThrows = [];
+          ABILITIES.forEach((a) => { if (!data.proficiencies.savingThrows.includes(a.id)) data.proficiencies.savingThrows.push(a.id); });
+        }
       });
     if (levelUpState.asi) applyAsiChoice(levelUpState.asi);
     if (levelUpState.subclassChoice && levelUpState.subclassChoice.name) {
@@ -3250,6 +3289,12 @@ export async function renderSheet(id) {
     if (levelUpState.expertiseChoice) {
       if (!Array.isArray(data.proficiencies.expertise)) data.proficiencies.expertise = [];
       levelUpState.expertiseChoice.picked.forEach((id) => { if (!data.proficiencies.expertise.includes(id)) data.proficiencies.expertise.push(id); });
+    }
+    if (levelUpState.metamagicChoice) {
+      levelUpState.metamagicChoice.picked.forEach((n) => {
+        const m = (METAMAGIC_OPTIONS || []).find((x) => x.name === n);
+        if (m && !(data.features || []).some((f) => f.name === `Метамагия: ${n}`)) data.features.push({ name: `Метамагия: ${n}`, source: cls.name, desc: m.desc || "" });
+      });
     }
     if (levelUpState.styleSwap && levelUpState.styleSwap.name) {
       const opt = styleOptionsFor(cls).find((o) => o.name === levelUpState.styleSwap.name);
@@ -3360,6 +3405,7 @@ export async function renderSheet(id) {
       classIndex: 0,
       optionalPicked: [],
       expertiseChoice: cls && levelExpertiseCount(cls, newLevel) ? { count: levelExpertiseCount(cls, newLevel), picked: [] } : null,
+      metamagicChoice: cls && levelMetamagicCount(cls, newLevel) ? { count: levelMetamagicCount(cls, newLevel), picked: [] } : null,
       styleSwap: cls && canSwapFightingStyle(cls, newLevel) ? { name: "" } : null,
       styleCantrips: {},
       hpMethod: "average",
@@ -4740,6 +4786,9 @@ export async function renderSheet(id) {
     // Опциональные «Праведное восстановление» (паладин: 3/7/15 ур.) и «Использование божественной силы» (жрец: 2/6/18 ур.): 1/2/3 использования, продолжительный отдых.
     if (/^Праведное восстановление$/i.test(f.name || "")) { const L = ((data.classes || []).find((c) => c.id === "paladin") || {}).level || 3; return { max: L >= 15 ? 3 : L >= 7 ? 2 : 1, recharge: "long" }; }
     if (/^Использование божественной силы$/i.test(f.name || "")) { const isPal = /Паладин/i.test(f.source || ""); const L = ((data.classes || []).find((c) => c.id === (isPal ? "paladin" : "cleric")) || {}).level || (isPal ? 3 : 2); return { max: isPal ? (L >= 15 ? 3 : L >= 7 ? 2 : 1) : (L >= 18 ? 3 : L >= 6 ? 2 : 1), recharge: "long" }; }
+    // Монах «Ци» (очков = уровень монаха, короткий отдых) и чародей «Исток магии» (очков = уровень чародея, продолжительный отдых).
+    if (/^Ци$/i.test(f.name || "") && /Монах/i.test(f.source || "")) return { max: ((data.classes || []).find((c) => c.id === "monk") || {}).level || 2, recharge: "short" };
+    if (/^Исток магии$/i.test(f.name || "") && /Чародей/i.test(f.source || "")) return { max: ((data.classes || []).find((c) => c.id === "sorcerer") || {}).level || 2, recharge: "long" };
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
     if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
     // Клинок души «Псионическая сила»: "количество... равно вашему
