@@ -765,3 +765,5 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 
 .spell-card-grant-row { margin: 0 0 6px; }
 .spell-card-grant-row .spell-card-badge { display: inline-block; white-space: normal; }
+
+.spell-card-cast { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border, rgba(128,128,128,0.35)); }

@@ -14374,3 +14374,6 @@ export const LUNAR_PHASES = [
   const ds = sub("divine-soul");
   if (ds) ds.expandedSpells = SPELLS.filter((sp) => (sp.classes || []).includes("cleric")).map((sp) => sp.id);
 })();
+
+// Раунд 77: заклинания из «Acquisition Incorporated» убраны из каталога.
+for (let i = SPELLS.length - 1; i >= 0; i--) if (SPELLS[i].source === "Acquisition Incorporated") SPELLS.splice(i, 1);

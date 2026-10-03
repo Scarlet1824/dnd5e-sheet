@@ -9,6 +9,7 @@ import {
   passivePerception, passiveInvestigation, passiveInsight, armorClass, initiativeBonus, spellSaveDC, spellAttackBonus,
   speedBonusSources, totalSpeed, manualOverride, armorClassAuto, initiativeBonusAuto, totalSpeedAuto, exhaustionLevel, effectiveMaxHp, speedBeforeExhaustion, initiativeAdvantageSource,
 } from "../character.js";
+import { SPELL_EFFECTS } from "../data/spellEffects.js";
 import { openD20RollModal, showRollResult, d20VectorSvg } from "../diceModal.js";
 import { rollExpr, rollDice, rollD20, formatModifier, getRollLog, clearRollLog, setRollLogCharacter, pushRollLog } from "../dice.js";
 import { spellCardHtml, spellHoverNameHtml } from "../spellCard.js";
@@ -604,7 +605,7 @@ export async function renderSheet(id) {
   (function migrateRound75() {
     let changed = false;
     const before = (data.features || []).length;
-    data.features = (data.features || []).filter((f) => !(/Чародей/i.test(f.source || "") && /^Метамагия \(\d+ ур\.\)$/.test(f.name || "")));
+    data.features = (data.features || []).filter((f) => !((/Чародей/i.test(f.source || "") && /^Метамагия \(\d+ ур\.\)$/.test(f.name || "")) || (/Бард/i.test(f.source || "") && /^Бардовское вдохновение \(\d+ ур\.\)$/.test(f.name || ""))));
     if (data.features.length !== before) changed = true;
     if ((data.features || []).some((f) => /^Драконий предок/.test(f.name || "") && /драконьей/i.test(f.source || ""))) {
       if (!data.proficiencies) data.proficiencies = {};
@@ -2340,6 +2341,106 @@ export async function renderSheet(id) {
         ${paras.map((t) => `<p style="margin:4px 0;font-size:0.9rem;">${escapeHtml(t)}</p>`).join("")}</details>`;
     }).join("");
   }
+  // ---- Применение заклинаний (кнопка «Применить» на карточке; пока заклинания 1-го круга) -------------
+  const castSlotChoice = {};
+  function spellCastInfo(sp) {
+    const sc = data.spellcasting || {};
+    const grant = spellGrantSource(sp.id);
+    const free = !!(grant && grant.free);
+    const casterClasses = (data.classes || []).filter((c) => getClass(c.id)?.spellcasting);
+    const pactOnly = casterClasses.length > 0 && casterClasses.every((c) => getClass(c.id).spellcasting.pact);
+    const circles = [];
+    for (let c = sp.level; c <= 9; c++) {
+      const max = Number((sc.slots || {})[c]) || 0;
+      if (max > 0) circles.push({ c, max, avail: spellSlotsArrayFor(sc, c).filter(Boolean).length });
+    }
+    return { free, pactOnly, circles };
+  }
+  function spellCastHtml(sp) {
+    if (sp.level !== 1) return "";
+    const info = spellCastInfo(sp);
+    if (info.free) return `<div class="row" style="gap:8px;align-items:center;"><button type="button" class="small primary" data-action="cast-spell" data-spell="${sp.id}">✨ Применить</button><span class="muted" style="font-size:0.8rem;">без траты ячейки</span></div>`;
+    if (!info.circles.length) return `<div class="row" style="gap:8px;align-items:center;"><button type="button" class="small primary" disabled title="Нет ячеек заклинаний этого круга">✨ Применить</button><span class="muted" style="font-size:0.8rem;">нет ячеек</span></div>`;
+    const pactCircle = info.circles[info.circles.length - 1].c;
+    const chosen = info.pactOnly ? pactCircle : (castSlotChoice[sp.id] && info.circles.some((x) => x.c === castSlotChoice[sp.id]) ? castSlotChoice[sp.id] : (info.circles.find((x) => x.avail > 0) || info.circles[0]).c);
+    const sel = info.pactOnly
+      ? `<span class="muted" style="font-size:0.8rem;">ячейка ${pactCircle}-го круга (${info.circles[info.circles.length - 1].avail}/${info.circles[info.circles.length - 1].max})</span>`
+      : `<select data-cast-slot data-spell="${sp.id}" style="flex:none;width:auto;" title="Круг ячейки заклинаний">${info.circles.map((x) => `<option value="${x.c}" ${x.c === chosen ? "selected" : ""}>${x.c}-й круг (${x.avail}/${x.max})</option>`).join("")}</select>`;
+    return `<div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;"><button type="button" class="small primary" data-action="cast-spell" data-spell="${sp.id}">✨ Применить</button>${sel}</div>`;
+  }
+  function scaleSpellExpr(expr, up, steps) {
+    const m = String(expr).match(/^(\d*)d(\d+)([+-]\d+)?$/i);
+    const u = up && String(up).match(/^(\d*)d(\d+)$/i);
+    if (!m || !u || !steps) return expr;
+    const count = (m[1] ? parseInt(m[1], 10) : 1) + (u[1] ? parseInt(u[1], 10) : 1) * steps;
+    return `${count}d${m[2]}${m[3] || ""}`;
+  }
+  function openSpellCast(sp, circle, free) {
+    const eff = SPELL_EFFECTS[sp.id] || {};
+    const steps = Math.max(0, circle - sp.level);
+    const abilId = data.spellcasting && data.spellcasting.ability;
+    const abilLabel = (id) => (ABILITIES.find((a) => a.id === id) || {}).label || id;
+    const dc = spellSaveDC(data);
+    const rows = [];
+    const addRow = (key, html) => rows.push(`<div class="panel panel-tight" style="margin:8px 0;" data-cast-row="${key}">${html}</div>`);
+    if (eff.attack) {
+      const bonus = spellAttackBonus(data);
+      addRow("attack", `<div class="row between" style="gap:8px;align-items:center;"><span><strong>Атака заклинанием</strong> ${bonus === null ? "" : formatModifier(bonus)}</span><button type="button" class="small primary" data-cast-attack ${bonus === null ? "disabled" : ""}>🎲 Бросить атаку</button></div><div class="muted" data-cast-out style="margin-top:4px;"></div>`);
+    }
+    if (eff.save && dc !== null) addRow("save", `<p style="margin:0;">Спасбросок цели: <strong>${abilLabel(eff.save)}</strong>, Сл <strong>${dc}</strong>${eff.half ? " — при успехе половина урона" : ""}.</p>`);
+    const rollRows = [];
+    (eff.dmg || []).forEach((d, i) => {
+      const expr = scaleSpellExpr(d.expr, d.up, steps);
+      rollRows.push({ key: `dmg${i}`, label: `Урон${d.label ? ` (${d.label})` : ""}`, expr, type: d.type, kind: "dmg", save: d.save });
+    });
+    if (eff.darts) { const n = eff.darts.base + steps; rollRows.push({ key: "darts", label: `Дротики: ${n} шт. по ${toCyrillicDice(eff.darts.expr)}`, expr: eff.darts.expr, count: n, type: eff.darts.type, kind: "dmg" }); }
+    if (eff.heal) { const m = eff.heal.mod && abilId ? getAbilityMod(data, abilId) : 0; rollRows.push({ key: "heal", label: "Лечение", expr: `${scaleSpellExpr(eff.heal.expr, eff.heal.up, steps)}${m ? (m > 0 ? "+" : "") + m : ""}`, type: "хиты", kind: "heal" }); }
+    if (eff.temp) { const flat = eff.temp.upFlat ? eff.temp.upFlat * steps : 0; if (eff.temp.flat != null) rollRows.push({ key: "temp", label: "Временные хиты", fixed: eff.temp.flat + flat, kind: "temp" }); else { const m = String(eff.temp.expr).match(/^(.*?)([+-]\d+)?$/); rollRows.push({ key: "temp", label: "Временные хиты", expr: `${m[1]}${(Number(m[2] || 0) + flat) ? ((Number(m[2] || 0) + flat) > 0 ? "+" : "") + (Number(m[2] || 0) + flat) : ""}`, kind: "temp" }); } }
+    if (eff.pool) rollRows.push({ key: "pool", label: "Пул хитов существ", expr: scaleSpellExpr(eff.pool.expr, eff.pool.up, steps), kind: "pool" });
+    rollRows.forEach((r) => addRow(r.key, `<div class="row between" style="gap:8px;align-items:center;"><span><strong>${escapeHtml(r.label)}</strong>${r.expr && !r.count ? ` — ${escapeHtml(toCyrillicDice(r.expr))}` : ""}${r.fixed != null ? ` — ${r.fixed}` : ""}${r.type && r.kind === "dmg" ? ` <span class="muted">(${escapeHtml(r.type)})</span>` : ""}</span><button type="button" class="small ${r.kind === "heal" || r.kind === "temp" ? "" : "danger"}" data-cast-roll="${r.key}">${r.kind === "heal" || r.kind === "temp" ? "💚" : "💥"} Бросить</button></div><div class="muted" data-cast-out style="margin-top:4px;"></div>`));
+    const hasDmg = rollRows.some((r) => r.kind === "dmg");
+    const body = `
+      <h3>${escapeHtml(sp.name)}</h3>
+      <p class="muted" style="margin:0 0 6px;">${free ? "Без траты ячейки." : `Потрачена ячейка ${circle}-го круга.`}${steps ? ` Заклинание усилено (+${steps} к кругу).` : ""}</p>
+      ${eff.note ? `<p class="muted" style="margin:0 0 6px;">${escapeHtml(eff.note)}</p>` : ""}
+      ${rows.length ? "" : `<p>Заклинание применено — бросков для него нет, действуйте по описанию.</p>`}
+      ${rows.join("")}
+      ${eff.attack && hasDmg ? `<label class="row" style="gap:6px;align-items:center;"><input type="checkbox" data-cast-crit /> Критическое попадание (двойные кости урона)</label>` : ""}
+      <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" data-action="close-modal">Закрыть</button></div>`;
+    const modal = openModal(body, { wide: false });
+    on(modal, "click", "[data-action=close-modal]", () => { closeModal(); render(); });
+    const out = (el) => el.closest("[data-cast-row]").querySelector("[data-cast-out]");
+    const log = (label, detail, total) => { pushRollLog({ label, detail, total }); document.dispatchEvent(new CustomEvent("dnd5e:roll-logged")); };
+    on(modal, "click", "[data-cast-attack]", (e, el) => {
+      const bonus = spellAttackBonus(data);
+      const dis = exhaustionDisadvantage("attack");
+      const r = rollD20({ modifier: bonus, mode: dis ? "disadvantage" : "normal" });
+      const txt = `к20: [${r.second != null ? `${r.first}, ${r.second}` : r.first}] ${formatModifier(bonus)} = ${r.total}${r.isCrit ? " — КРИТ!" : r.isFumble ? " — промах (1)" : ""}${dis ? ` (помеха: ${dis})` : ""}`;
+      out(el).innerHTML = `<strong style="color:var(--text);">${escapeHtml(txt)}</strong>`;
+      const cb = modal.querySelector("[data-cast-crit]"); if (cb) cb.checked = r.isCrit;
+      log(`${sp.name}: атака`, txt, r.total);
+    });
+    on(modal, "click", "[data-cast-roll]", (e, el) => {
+      const r0 = rollRows.find((x) => x.key === el.dataset.castRoll);
+      if (!r0) return;
+      const crit = !!(modal.querySelector("[data-cast-crit]") || {}).checked && r0.kind === "dmg";
+      let total = 0; const parts = [];
+      if (r0.fixed != null) { total = r0.fixed; parts.push(String(r0.fixed)); }
+      else {
+        const times = r0.count || 1;
+        for (let i = 0; i < times; i++) {
+          const ex = crit ? doubleDiceCount(r0.expr) : r0.expr;
+          const rr = rollExpr(ex);
+          total += rr.total;
+          parts.push(`${rr.rolls.join("+")}${rr.modifier ? formatModifier(rr.modifier) : ""}`);
+        }
+      }
+      const unit = r0.kind === "heal" ? "хитов" : r0.kind === "temp" ? "врем. хитов" : r0.kind === "pool" ? "хитов (пул)" : `урона${r0.type ? ` (${r0.type})` : ""}`;
+      const txt = `${r0.count ? parts.map((x) => `[${x}]`).join(" ") : parts.join("")} = ${total} ${unit}${crit ? " (крит)" : ""}${r0.save ? ` · спасбросок цели ${abilLabel(r0.save)} Сл ${dc}` : ""}`;
+      out(el).innerHTML = `<strong style="color:var(--text);">${escapeHtml(txt)}</strong>`;
+      log(`${sp.name}: ${r0.label.toLowerCase()}`, txt, total);
+    });
+  }
   // Чародей «Гибкое колдовство» (Исток магии): окно обмена очков чародейства на ячейки заклинаний и обратно.
   const FLEX_SLOT_COST = { 1: 2, 2: 3, 3: 5, 4: 6, 5: 7 };
   function sorceryPointsFeature() {
@@ -2627,7 +2728,7 @@ export async function renderSheet(id) {
   }
   function subSkillChoicePanelHtml() {
     const sc = levelUpState.subSkillChoice;
-    const already = new Set(sc.kind === "save" ? data.proficiencies?.savingThrows || [] : data.proficiencies?.skills || []);
+    const already = new Set(sc.kind === "save" ? data.proficiencies?.savingThrows || [] : [...(data.proficiencies?.skills || []), ...(data.proficiencies?.expertise || [])]);
     if (sc.kind === "save" || sc.note || sc.cantripOptions) {
       const opts = sc.optionIds || [];
       const labelOf = (id) => (sc.kind === "save" ? (ABILITIES.find((a) => a.id === id) || {}).label : (SKILLS.find((x) => x.id === id) || {}).label) || id;
@@ -3697,7 +3798,7 @@ export async function renderSheet(id) {
         if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) {
           // Повтор умения на новом уровне (рост кости, «ещё 2 навыка» и т.п.): короткая отдельная карточка вместо полного текста.
           const repeatedLevels = Object.keys(cls.features || {}).some((lv) => Number(lv) < newLevel && (cls.features[lv] || []).some((x) => splitFeatureText(x).name === f.name));
-          if (repeatedLevels && f.desc && f.desc.length < 160 && !/^Метамагия$/.test(f.name)) {
+          if (repeatedLevels && f.desc && f.desc.length < 160 && !/^(Метамагия|Бардовское вдохновение)$/.test(f.name)) {
             const nm = `${f.name} (${newLevel} ур.)`;
             if (!(data.features || []).some((existing) => existing.name === nm && existing.source === cls.name)) {
               data.features.push({ name: nm, source: cls.name, desc: `На ${newLevel}-м уровне: ${f.desc.charAt(0).toLowerCase()}${f.desc.slice(1)}${/[.!?]$/.test(f.desc) ? "" : "."}` });
@@ -5797,7 +5898,7 @@ export async function renderSheet(id) {
         <div class="spell-level-section">
           <div class="spell-level-header"><h4>${lvl === 0 ? "Заговоры" : `${lvl}-й круг`}</h4></div>
           <div class="spell-level-divider"></div>
-          <div class="spell-cards">${extraSpells.filter((sp) => sp.level === lvl).map((sp) => spellCardHtml(sp, removeBtn(sp), { known: true })).join("")}</div>
+          <div class="spell-cards">${extraSpells.filter((sp) => sp.level === lvl).map((sp) => spellCardHtml(sp, removeBtn(sp), { known: true, actionsHtml: spellCastHtml(sp) })).join("")}</div>
         </div>`).join("")
       : '<p class="muted">Здесь можно добавить заговор или заклинание любого класса сверх лимита — они не занимают места среди известных/подготовленных.</p>';
     let browseHtml = "";
@@ -5864,7 +5965,7 @@ export async function renderSheet(id) {
           </div>
           <div class="spell-level-divider"></div>
           <div class="spell-cards">${spells
-            .map((sp) => spellCardHtml(sp, spellCardControlHtml(sp, prepCtx), { known: true, domain: !!(prepCtx && prepCtx.domainIds && prepCtx.domainIds.has(sp.id)) || oathSpellIdSet().has(sp.id) }))
+            .map((sp) => spellCardHtml(sp, spellCardControlHtml(sp, prepCtx), { known: true, domain: !!(prepCtx && prepCtx.domainIds && prepCtx.domainIds.has(sp.id)) || oathSpellIdSet().has(sp.id), actionsHtml: spellCastHtml(sp) }))
             .join("")}</div>
         </div>`;
       })
@@ -8578,6 +8679,27 @@ export async function renderSheet(id) {
     const total = r + mod;
     const dc = 5 + graveDamage;
     showRollResult({ label: `Сила могилы: спасбросок Харизмы (Сл ${dc})`, detail: `к20: [${r}] ${formatModifier(mod)} = ${total} — ${total >= dc ? "успех: остаётесь с 1 хитом" : "провал"}`, total, breakdown: [{ value: r, label: "к20" }, { value: mod, label: "модификатор Харизмы" }] });
+  });
+  on(app, "change", "[data-cast-slot]", (e, el) => { castSlotChoice[el.dataset.spell] = Number(el.value); });
+  on(app, "click", "[data-action=cast-spell]", (e, el) => {
+    const sp = SPELLS.find((x) => x.id === el.dataset.spell);
+    if (!sp) return;
+    const info = spellCastInfo(sp);
+    let circle = sp.level;
+    if (!info.free) {
+      const row = el.closest(".spell-card-cast");
+      const selEl = row && row.querySelector("[data-cast-slot]");
+      circle = selEl ? Number(selEl.value) : info.circles.length ? info.circles[info.circles.length - 1].c : sp.level;
+      const sc = data.spellcasting || {};
+      const arr = spellSlotsArrayFor(sc, circle);
+      const idx = arr.lastIndexOf(true);
+      if (idx < 0) { showRollResult({ label: sp.name, detail: `Нет свободных ячеек ${circle}-го круга.`, total: "—" }); return; }
+      arr[idx] = false;
+      sc.slotsFilled = sc.slotsFilled || {};
+      sc.slotsFilled[circle] = arr;
+      doSave();
+    }
+    openSpellCast(sp, circle, info.free);
   });
   on(app, "change", "[data-dragon-pick]", (e, el) => {
     const da = DRAGON_ANCESTRIES.find((d) => d.name === el.value);
