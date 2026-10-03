@@ -6040,7 +6040,7 @@ export async function renderSheet(id) {
   }
   function spellCardControlHtml(sp, prepCtx) {
     if (oathSpellIdSet().has(sp.id)) {
-      return `<span class="spell-card-badge spell-card-badge-domain" title="Заклинание подкласса — всегда подготовлено, не занимает место среди подготовленных">дар подкласса</span>`;
+      return `<span class="spell-card-badge spell-card-badge-domain" title="Заклинание подкласса — всегда подготовлено, не занимает место среди подготовленных">От подкласса</span>`;
     }
     const grantSrc = spellGrantSource(sp.id);
     if (grantSrc) {
@@ -6055,7 +6055,7 @@ export async function renderSheet(id) {
     // the normal checkbox/badge logic below, in both editing and non-editing
     // views -- see currentDomainSpellIds().
     if (prepCtx.domainIds && prepCtx.domainIds.has(sp.id)) {
-      return `<span class="spell-card-badge spell-card-badge-domain" title="Дар домена — подготовлено всегда, не занимает ячейку подготовленных заклинаний">дар домена</span>`;
+      return `<span class="spell-card-badge spell-card-badge-domain" title="Дар домена — подготовлено всегда, не занимает ячейку подготовленных заклинаний">От подкласса</span>`;
     }
     if (!prepCtx.editing) {
       return `<span class="spell-card-badge" title="Подготовлено на сегодня">✓</span>`;
