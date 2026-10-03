@@ -2,7 +2,7 @@ import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeMod
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -628,6 +628,7 @@ export async function renderSheet(id) {
     "Техника тени": ["darkness", "darkvision", "pass-without-trace", "silence"],
     "Среди мёртвых": ["spare-the-dying"],
     "Глаза тьмы": ["darkness"],
+    "Договор цепи": ["find-familiar"],
   };
   // Расовые умения, открывающие заклинания на определённом уровне персонажа (тифлинги и т.п.).
   // Заклинания добавляются в лист автоматически (без ячейки, раз в долгий отдых), убираются при откате уровня.
@@ -1368,6 +1369,7 @@ export async function renderSheet(id) {
   const KNOWN_SPELLS_BY_LEVEL = {
     bard: { 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 10: 14, 11: 15, 12: 15, 13: 16, 14: 18, 15: 19, 16: 19, 17: 20, 18: 22, 19: 22, 20: 22 },
     sorcerer: { 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 10: 11, 11: 12, 12: 12, 13: 13, 14: 13, 15: 14, 16: 14, 17: 15, 18: 15, 19: 15, 20: 15 },
+    warlock: { 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 10: 10, 11: 11, 12: 11, 13: 12, 14: 12, 15: 13, 16: 13, 17: 14, 18: 14, 19: 15, 20: 15 },
     ranger: { 1: 0, 2: 2, 3: 3, 4: 3, 5: 4, 6: 4, 7: 5, 8: 5, 9: 6, 10: 6, 11: 7, 12: 7, 13: 8, 14: 8, 15: 9, 16: 9, 17: 10, 18: 10, 19: 11, 20: 11 },
   };
   // Same idea, but for CANTRIPS known -- only Бард grows this count post-1st
@@ -1388,6 +1390,7 @@ export async function renderSheet(id) {
   const RANGER_MAX_CIRCLE_BY_LEVEL = { 1: 0, 2: 1, 3: 1, 4: 1, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4, 17: 5, 18: 5, 19: 5, 20: 5 };
   function maxKnownSpellCircleForLevel(list, level) {
     if (list === "ranger") return RANGER_MAX_CIRCLE_BY_LEVEL[level] || 0;
+    if (list === "warlock") return (pactSlotsAt(level) || { circle: 1 }).circle;
     return maxSpellCircleForLevel(level);
   }
   // «Треть-заклинатели»: Воин — Мистический рыцарь и Плут — Мистический ловкач. Заклинания из списка волшебника,
@@ -1435,6 +1438,7 @@ export async function renderSheet(id) {
       ...((data.spellcasting && data.spellcasting.known) || []),
       ...((data.spellcasting && data.spellcasting.prepared) || []),
       ...((levelUpState.magicSecrets && levelUpState.magicSecrets.picked) || []),
+      ...(levelUpState.spellSwap && levelUpState.spellSwap.in ? [levelUpState.spellSwap.in] : []),
     ]);
     const options = SPELLS.filter(
       (s) => s.level >= 1 && s.level <= maxCircle && (s.classes.includes(spellList) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id)
@@ -1510,6 +1514,11 @@ export async function renderSheet(id) {
   // app doesn't track third-casters (Eldritch Knight/Arcane Trickster spell
   // slots are folded into the base Воин/Плут class object, not a separate
   // entry), so those don't need their own branch here.
+  // Изобретатель — полузаклинатель с округлением ВВЕРХ (ячейки с 1-го уровня), паладин/следопыт — вниз.
+  function casterLevelShare(cls, lvl) {
+    if (cls.id === "artificer") return Math.ceil(lvl / 2);
+    return cls.spellcasting.startsAtLevel === 2 ? Math.floor(lvl / 2) : lvl;
+  }
   function multiclassCasterLevel(data) {
     let level = 0;
     (data.classes || []).forEach((c) => {
@@ -1517,7 +1526,7 @@ export async function renderSheet(id) {
       const lvl = c.level || 1;
       if (thirdCasterOf(c)) { level += Math.floor(lvl / 3); return; }
       if (!cls || !cls.spellcasting || cls.spellcasting.pact) return;
-      level += cls.spellcasting.startsAtLevel === 2 ? Math.floor(lvl / 2) : lvl;
+      level += casterLevelShare(cls, lvl);
     });
     return level;
   }
@@ -1533,7 +1542,7 @@ export async function renderSheet(id) {
       if (thirdCasterOf(c)) { level += Math.floor(lvl / 3); return; }
       const k = getClass(c.id);
       if (!k || !k.spellcasting || k.spellcasting.pact) return;
-      level += k.spellcasting.startsAtLevel === 2 ? Math.floor(lvl / 2) : lvl;
+      level += casterLevelShare(k, lvl);
     });
     return SPELL_SLOTS_BY_CASTER_LEVEL[Math.min(20, Math.max(0, level))] || [];
   }
@@ -1579,12 +1588,15 @@ export async function renderSheet(id) {
   // caster level, called right after a spellcasting class's level actually
   // changes (see applyLevelUp below).
   function applyLevelUpSpellSlots(cls, c) {
-    if (!(cls.spellcasting && !cls.spellcasting.pact) && !thirdCasterOf(c)) return;
+    const isPact = !!(cls.spellcasting && cls.spellcasting.pact);
+    if (!(cls.spellcasting && !isPact) && !thirdCasterOf(c) && !isPact) return;
     if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
     if (!data.spellcasting.slots) data.spellcasting.slots = {};
     const table = spellSlotsTableFor(data.classes);
+    const pactEntry = (data.classes || []).find((x) => getClass(x.id)?.spellcasting?.pact);
+    const pact = pactEntry ? pactSlotsAt(pactEntry.level || 1) : null;
     for (let circle = 1; circle <= 9; circle++) {
-      data.spellcasting.slots[circle] = table[circle - 1] || 0;
+      data.spellcasting.slots[circle] = (table[circle - 1] || 0) + (pact && pact.circle === circle ? pact.count : 0);
     }
   }
   // Champion's "Дополнительный боевой стиль" (10th level: pick a SECOND
@@ -1744,6 +1756,162 @@ export async function renderSheet(id) {
   function metamagicIncomplete() {
     const mc = levelUpState.metamagicChoice;
     return !!(mc && mc.picked.length < Math.min(mc.count, metamagicOptions().length));
+  }
+  // ---- Колдун: воззвания, договорный дар, мистический арканум ----------------------------------------------------
+  const PACT_BOONS = ["Договор клинка", "Договор цепи", "Договор гримуара", "Договор талисмана"];
+  const ARCANUM_CIRCLE_BY_LEVEL = { 11: 6, 13: 7, 15: 8, 17: 9 };
+  function warlockRaw(cls, newLevel) { return (cls && cls.id === "warlock" && cls.features && cls.features[newLevel]) || []; }
+  function ownedInvocationCards() { return (data.features || []).filter((f) => /^Воззвание: /.test(f.name || "") && f.source === "Колдун"); }
+  function freshWarlockStates(cls, newLevel) {
+    if (!cls || cls.id !== "warlock") return { pact: null, invocations: null, arcanum: null };
+    const raw = warlockRaw(cls, newLevel);
+    const count = raw.some((f) => /^Мистические воззвания/.test(f)) ? (newLevel === 2 ? 2 : 1) : 0;
+    return {
+      pact: raw.some((f) => /^Обряд заключения договора/.test(f)) ? { name: "", cantrips: [] } : null,
+      invocations: count || ownedInvocationCards().length ? { count, picked: [], swapOut: "", swapIn: "" } : null,
+      arcanum: ARCANUM_CIRCLE_BY_LEVEL[newLevel] || arcanumCards().length ? { circle: ARCANUM_CIRCLE_BY_LEVEL[newLevel] || 0, spellId: "", swapOut: "", swapIn: "" } : null,
+    };
+  }
+  function arcanumCards() { return (data.features || []).filter((f) => f.arcanumSpell && f.source === "Колдун"); }
+  function invocationOptions(newLevel) {
+    const own = new Set(ownedInvocationCards().map((f) => f.name.replace(/^Воззвание: /, "")));
+    const pending = (levelUpState.pact && levelUpState.pact.name) || "";
+    const cantrips = new Set([...((data.spellcasting && data.spellcasting.cantrips) || []), ...((levelUpState.knownCantripChoice && levelUpState.knownCantripChoice.cantripIds) || [])]);
+    const picked = new Set((levelUpState.invocations && levelUpState.invocations.picked) || []);
+    return (ELDRITCH_INVOCATIONS || []).filter((o) => {
+      if (own.has(o.name)) return false;
+      const r = o.req || "";
+      const lv = /(\d+)-й уровень колдуна/.exec(r);
+      if (lv && newLevel < Number(lv[1])) return false;
+      const pact = /умение «([^»]+)»/.exec(r);
+      if (pact && pact[1] !== pending && !(data.features || []).some((f) => (f.name || "").startsWith(pact[1]))) return false;
+      if (/мистический заряд/.test(r) && !cantrips.has("eldritch-blast")) return false;
+      return true;
+    }).map((o) => ({ ...o, _picked: picked.has(o.name) }));
+  }
+  function invocationsPanelHtml(cls, newLevel) {
+    const iv = levelUpState.invocations;
+    if (!iv || !cls || cls.id !== "warlock") return "";
+    const opts = invocationOptions(newLevel);
+    const owned = ownedInvocationCards();
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Мистические воззвания${iv.count ? ` — выберите ${iv.count} (${iv.picked.length}/${iv.count})` : ""}</h4>
+        ${opts.map((m) => `<label class="row" style="gap:8px;align-items:flex-start;margin-top:6px;"><input type="checkbox" data-level-up-inv="${escapeHtml(m.name)}" ${m._picked ? "checked" : ""} ${!m._picked && iv.picked.length >= iv.count ? "disabled" : ""} style="margin-top:4px;" /><span><strong>${escapeHtml(m.name)}</strong>${m.req ? ` <span class="muted">(${escapeHtml(m.req)})</span>` : ""}<br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(m.desc || "")}</span></span></label>`).join("")}
+        ${owned.length ? `<p class="muted" style="margin:10px 0 4px;font-size:0.82rem;">Можно заменить одно из имеющихся воззваний (необязательно):</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <select data-level-up-inv-out><option value="">— не заменять —</option>${owned.map((f) => { const n = f.name.replace(/^Воззвание: /, ""); return `<option value="${escapeHtml(n)}" ${iv.swapOut === n ? "selected" : ""}>${escapeHtml(n)}</option>`; }).join("")}</select>
+          <span>→</span>
+          <select data-level-up-inv-in><option value="">— новое воззвание —</option>${opts.filter((o) => !o._picked).map((o) => `<option value="${escapeHtml(o.name)}" ${iv.swapIn === o.name ? "selected" : ""}>${escapeHtml(o.name)}</option>`).join("")}</select>
+        </div>` : ""}
+      </div>`;
+  }
+  function invocationsIncomplete(newLevel) {
+    const iv = levelUpState.invocations;
+    if (!iv) return false;
+    return iv.picked.length < Math.min(iv.count, invocationOptions(newLevel).length) || !!iv.swapOut !== !!iv.swapIn;
+  }
+  function pactCantripOptions() {
+    const have = new Set([...((data.spellcasting && data.spellcasting.cantrips) || []), ...((levelUpState.knownCantripChoice && levelUpState.knownCantripChoice.cantripIds) || [])]);
+    return SPELLS.filter((s) => s.level === 0 && !have.has(s.id)).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  }
+  function pactPanelHtml(cls) {
+    const pc = levelUpState.pact;
+    if (!pc || !cls || cls.id !== "warlock") return "";
+    const texts = cls.classFeatureText || {};
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Договорный дар — выберите один</h4>
+        <div class="grid cols-2">
+          ${PACT_BOONS.map((n) => `<label class="card selectable ${pc.name === n ? "selected" : ""}" style="cursor:pointer;"><input type="radio" name="level-up-pact" data-level-up-pact="${escapeHtml(n)}" ${pc.name === n ? "checked" : ""} style="margin-right:6px;" /><strong>${escapeHtml(n)}</strong><br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(texts[n] || "")}</span></label>`).join("")}
+        </div>
+        ${pc.name === "Договор гримуара" ? `<h4>Заговоры Книги теней — три любых (${pc.cantrips.length}/3)</h4><div class="grid cols-2">${pactCantripOptions().map((s) => `<label class="row" style="gap:6px;"><input type="checkbox" data-level-up-pact-cantrip="${s.id}" ${pc.cantrips.includes(s.id) ? "checked" : ""} ${!pc.cantrips.includes(s.id) && pc.cantrips.length >= 3 ? "disabled" : ""} /> ${spellHoverNameHtml(s)}</label>`).join("")}</div>` : ""}
+      </div>`;
+  }
+  function pactIncomplete() {
+    const pc = levelUpState.pact;
+    return !!(pc && (!pc.name || (pc.name === "Договор гримуара" && pc.cantrips.length < 3)));
+  }
+  function arcanumTakenIds() {
+    return new Set([...((data.spellcasting && data.spellcasting.known) || []), ...((data.spellcasting && data.spellcasting.prepared) || [])]);
+  }
+  function arcanumOptions(circle) {
+    const taken = arcanumTakenIds();
+    return SPELLS.filter((s) => s.level === circle && (s.classes || []).includes("warlock") && !taken.has(s.id)).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  }
+  function arcanumSwapCircle() {
+    const ac = levelUpState.arcanum;
+    const f = ac && ac.swapOut && arcanumCards().find((x) => x.arcanumSpell === ac.swapOut);
+    return f ? f.arcanumCircle : 0;
+  }
+  function arcanumPanelHtml(cls) {
+    const ac = levelUpState.arcanum;
+    if (!ac || !cls || cls.id !== "warlock") return "";
+    const cards = arcanumCards();
+    const spName = (id) => (SPELLS.find((s) => s.id === id) || {}).name || id;
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Мистический арканум</h4>
+        ${ac.circle ? `<p class="muted" style="margin:0 0 6px;font-size:0.82rem;">Выберите заклинание ${ac.circle}-го круга из списка колдуна — его можно наложить один раз за продолжительный отдых без траты ячейки.</p>
+        <select data-level-up-arc><option value="">— выберите заклинание —</option>${arcanumOptions(ac.circle).map((s) => `<option value="${s.id}" ${ac.spellId === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select>` : ""}
+        ${cards.length ? `<p class="muted" style="margin:10px 0 4px;font-size:0.82rem;">Можно заменить одно арканумное заклинание другим того же круга (необязательно):</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <select data-level-up-arc-out><option value="">— не заменять —</option>${cards.map((f) => `<option value="${f.arcanumSpell}" ${ac.swapOut === f.arcanumSpell ? "selected" : ""}>${escapeHtml(spName(f.arcanumSpell))} (${f.arcanumCircle} кр.)</option>`).join("")}</select>
+          <span>→</span>
+          <select data-level-up-arc-in><option value="">— новое заклинание —</option>${(ac.swapOut ? arcanumOptions(arcanumSwapCircle()) : []).map((s) => `<option value="${s.id}" ${ac.swapIn === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select>
+        </div>` : ""}
+      </div>`;
+  }
+  function arcanumIncomplete() {
+    const ac = levelUpState.arcanum;
+    return !!(ac && ((ac.circle && !ac.spellId) || !!ac.swapOut !== !!ac.swapIn));
+  }
+  function arcanumCard(id, circle) {
+    const sp = SPELLS.find((s) => s.id === id);
+    return { name: `Мистический арканум: ${sp ? sp.name : id}`, source: "Колдун", arcanumSpell: id, arcanumCircle: circle, desc: `Вы можете один раз наложить заклинание «${sp ? sp.name : id}» (${circle}-й круг) без траты ячейки. Восстанавливается после продолжительного отдыха.` };
+  }
+  function addArcanumSpell(id, circle) {
+    if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+    const sc = data.spellcasting;
+    if (!sc.known) sc.known = [];
+    if (!sc.granted) sc.granted = {};
+    const card = arcanumCard(id, circle);
+    if (!sc.known.includes(id)) sc.known.push(id);
+    sc.granted[id] = card.name;
+    data.features.push(card);
+  }
+  function applyWarlockPickers(cls) {
+    if (cls.id !== "warlock") return;
+    const pc = levelUpState.pact;
+    if (pc && pc.name) {
+      data.features.push({ name: pc.name, source: "Колдун", desc: (cls.classFeatureText || {})[pc.name] || "" });
+      if (pc.name === "Договор гримуара") {
+        if (!data.spellcasting) data.spellcasting = { ability: null, classFilter: "", cantrips: [], known: [], prepared: [], slots: {} };
+        if (!data.spellcasting.cantrips) data.spellcasting.cantrips = [];
+        if (!data.spellcasting.granted) data.spellcasting.granted = {};
+        pc.cantrips.forEach((id) => { if (!data.spellcasting.cantrips.includes(id)) { data.spellcasting.cantrips.push(id); data.spellcasting.granted[id] = "Договор гримуара"; } });
+      }
+    }
+    const iv = levelUpState.invocations;
+    if (iv) {
+      if (iv.swapOut && iv.swapIn) data.features = data.features.filter((f) => !(f.source === "Колдун" && f.name === `Воззвание: ${iv.swapOut}`));
+      [...iv.picked, ...(iv.swapOut && iv.swapIn ? [iv.swapIn] : [])].forEach((n) => {
+        const o = (ELDRITCH_INVOCATIONS || []).find((x) => x.name === n);
+        if (o && !data.features.some((f) => f.name === `Воззвание: ${n}`)) data.features.push({ name: `Воззвание: ${n}`, source: "Колдун", desc: o.desc || "" });
+      });
+    }
+    const ac = levelUpState.arcanum;
+    if (ac) {
+      if (ac.swapOut && ac.swapIn) {
+        const old = arcanumCards().find((f) => f.arcanumSpell === ac.swapOut);
+        const circle = old ? old.arcanumCircle : 0;
+        data.features = data.features.filter((f) => f !== old);
+        const sc = data.spellcasting;
+        if (sc) { sc.known = (sc.known || []).filter((id) => id !== ac.swapOut); if (sc.granted) delete sc.granted[ac.swapOut]; if (sc.prepared) sc.prepared = sc.prepared.filter((id) => id !== ac.swapOut); }
+        if (circle) addArcanumSpell(ac.swapIn, circle);
+      }
+      if (ac.circle && ac.spellId) addArcanumSpell(ac.spellId, ac.circle);
+    }
   }
   // ---- Стихийные практики (Монах — Путь четырёх стихий: 3/6/11/17 ур.) -----------------------------------------
   const ELEMENTAL_ATTUNEMENT = "Родство со стихией";
@@ -2761,6 +2929,9 @@ export async function renderSheet(id) {
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
       ${expertisePanelHtml()}
       ${metamagicPanelHtml()}
+      ${pactPanelHtml(cls)}
+      ${invocationsPanelHtml(cls, newLevel)}
+      ${arcanumPanelHtml(cls)}
       ${disciplinesPanelHtml(cls, newLevel, c)}
       ${spellSwapPanelHtml(cls, newLevel, c)}
       ${magicSecretsPanelHtml(cls, newLevel, c)}
@@ -2789,6 +2960,9 @@ export async function renderSheet(id) {
           baseFightingStyleChoiceIncomplete() ||
           expertiseChoiceIncomplete() ||
           metamagicIncomplete() ||
+          pactIncomplete() ||
+          invocationsIncomplete(newLevel) ||
+          arcanumIncomplete() ||
           disciplinesIncomplete(cls, newLevel, c) ||
           spellSwapIncomplete(cls, c) ||
           magicSecretsIncomplete(cls, newLevel, c) ||
@@ -2878,6 +3052,27 @@ export async function renderSheet(id) {
       mc.picked = el.checked ? [...new Set([...mc.picked, n])].slice(0, mc.count) : mc.picked.filter((x) => x !== n);
       refreshLevelUpModal();
     });
+    on(modal, "change", "[data-level-up-pact]", (e, el) => { const pc = levelUpState.pact; if (!pc) return; pc.name = el.dataset.levelUpPact; pc.cantrips = []; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-pact-cantrip]", (e, el) => {
+      const pc = levelUpState.pact;
+      if (!pc) return;
+      const id = el.dataset.levelUpPactCantrip;
+      pc.cantrips = el.checked ? [...new Set([...pc.cantrips, id])].slice(0, 3) : pc.cantrips.filter((x) => x !== id);
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-inv]", (e, el) => {
+      const iv = levelUpState.invocations;
+      if (!iv) return;
+      const n = el.dataset.levelUpInv;
+      iv.picked = el.checked ? [...new Set([...iv.picked, n])].slice(0, iv.count) : iv.picked.filter((x) => x !== n);
+      if (iv.swapIn && iv.picked.includes(iv.swapIn)) iv.swapIn = "";
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-inv-out]", (e, el) => { levelUpState.invocations.swapOut = el.value; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-inv-in]", (e, el) => { levelUpState.invocations.swapIn = el.value; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-arc]", (e, el) => { levelUpState.arcanum.spellId = el.value; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-arc-out]", (e, el) => { levelUpState.arcanum.swapOut = el.value; levelUpState.arcanum.swapIn = ""; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-arc-in]", (e, el) => { levelUpState.arcanum.swapIn = el.value; refreshLevelUpModal(); });
     on(modal, "change", "[data-level-up-magic-secret]", (e, el) => {
       const ms = levelUpState.magicSecrets;
       if (!ms) return;
@@ -2933,6 +3128,7 @@ export async function renderSheet(id) {
       levelUpState.optionalPicked = [];
       levelUpState.expertiseChoice = ccls && levelExpertiseCount(ccls, newLevel) ? { count: levelExpertiseCount(ccls, newLevel), picked: [] } : null;
       levelUpState.metamagicChoice = ccls && levelMetamagicCount(ccls, newLevel) ? { count: levelMetamagicCount(ccls, newLevel), picked: [] } : null;
+      Object.assign(levelUpState, freshWarlockStates(ccls, newLevel));
       levelUpState.styleSwap = ccls && canSwapFightingStyle(ccls, newLevel) ? { name: "" } : null;
       levelUpState.styleCantrips = {};
       levelUpState.subclassChoice = ccls && levelHasSubclassChoice(cc, ccls, newLevel) ? freshSubclassChoiceState() : null;
@@ -3408,6 +3604,7 @@ export async function renderSheet(id) {
         if (m && !(data.features || []).some((f) => f.name === `Метамагия: ${n}`)) data.features.push({ name: `Метамагия: ${n}`, source: cls.name, desc: m.desc || "" });
       });
     }
+    applyWarlockPickers(cls);
     if (levelUpState.styleSwap && levelUpState.styleSwap.name) {
       const opt = styleOptionsFor(cls).find((o) => o.name === levelUpState.styleSwap.name);
       const curCard = currentBaseStyleCard(cls);
@@ -3518,6 +3715,7 @@ export async function renderSheet(id) {
       optionalPicked: [],
       expertiseChoice: cls && levelExpertiseCount(cls, newLevel) ? { count: levelExpertiseCount(cls, newLevel), picked: [] } : null,
       metamagicChoice: cls && levelMetamagicCount(cls, newLevel) ? { count: levelMetamagicCount(cls, newLevel), picked: [] } : null,
+      ...freshWarlockStates(cls, newLevel),
       styleSwap: cls && canSwapFightingStyle(cls, newLevel) ? { name: "" } : null,
       styleCantrips: {},
       hpMethod: "average",
@@ -4944,6 +5142,11 @@ export async function renderSheet(id) {
     // Монах «Ци» (очков = уровень монаха, короткий отдых) и чародей «Исток магии» (очков = уровень чародея, продолжительный отдых).
     if (/^Ци$/i.test(f.name || "") && /Монах/i.test(f.source || "")) return { max: ((data.classes || []).find((c) => c.id === "monk") || {}).level || 2, recharge: "short" };
     if (/^Исток магии$/i.test(f.name || "") && /Чародей/i.test(f.source || "")) return { max: ((data.classes || []).find((c) => c.id === "sorcerer") || {}).level || 2, recharge: "long" };
+    if (/^Мистический арканум: /.test(f.name || "")) return { max: 1, recharge: "long" };
+    if (/^Мистический мастер$/i.test(f.name || "")) return { max: 1, recharge: "long" };
+    if (/^Вспышка гениальности$/i.test(f.name || "")) return { max: Math.max(1, getAbilityMod(data, "int")), recharge: "long" };
+    if (/^Хранилище заклинаний$/i.test(f.name || "")) return { max: Math.max(1, 2 * getAbilityMod(data, "int")), recharge: "long" };
+    if (/^Договор талисмана$/i.test(f.name || "")) return { max: proficiencyBonus(data), recharge: "long" };
     if (BATTLEMASTER_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: superiorityDieMax(data), recharge: "any" };
     if (MARTIAL_ADEPT_SUPERIORITY_FEATURE_NAME.test(f.name || "")) return { max: 1, recharge: "any" };
     // Клинок души «Псионическая сила»: "количество... равно вашему

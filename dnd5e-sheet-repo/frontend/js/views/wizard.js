@@ -2412,7 +2412,7 @@ export function renderWizard() {
         cantrips: [...state.chosenCantrips],
         known: [...state.chosenSpells],
         prepared: [],
-        slots: { 1: 2 },
+        slots: { 1: cls.id === "warlock" ? 1 : 2 },
       };
     }
 
