@@ -14,6 +14,7 @@ export async function renderCampaigns() {
   let list = [];
   const draw = (err = "") => {
     mount(`${topBar()}
+      ${noAccess ? `<div class="panel"><p class="error-text">У вас нет доступа к листам: вы не состоите ни в одной кампании. Введите код приглашения мастера ниже.</p></div>` : ""}
       <div class="panel">
         <h2>Кампании</h2>
         ${err ? `<p class="error-text">${escapeHtml(err)}</p>` : ""}
@@ -24,18 +25,30 @@ export async function renderCampaigns() {
           </div>`).join("") : `<p class="muted">Пока нет кампаний.</p>`}
       </div>
       <div class="panel">
-        <h3>Создать кампанию (я мастер)</h3>
-        <div class="row"><input data-new-name placeholder="Название" maxlength="100" /><button data-action="create">Создать</button></div>
+        ${me && me.role === "player" ? `<p class="muted">Создавать кампании могут только мастера — права выдаёт владелец.</p>` : `<h3>Создать кампанию (я мастер)</h3>
+        <div class="row"><input data-new-name placeholder="Название" maxlength="100" /><button data-action="create">Создать</button></div>`}
       </div>
       <div class="panel">
         <h3>Вступить по коду (я игрок)</h3>
         <div class="row"><input data-join-code placeholder="Код приглашения" maxlength="12" style="text-transform:uppercase" /><button data-action="join">Вступить</button></div>
-      </div>`);
+      </div>
+      ${users ? adminPanel(users) : ""}`);
   };
+  let me = null, users = null, noAccess = false;
   try { list = (await api.listCampaigns()).campaigns; } catch (e) { draw(e.message); wire(); return; }
+  try { me = (await api.me()).user; noAccess = me.access === false; } catch { /* ignore */ }
+  if (me && me.role === "owner") { try { users = (await api.adminUsers()).users; } catch { /* ignore */ } }
   draw();
   wire();
   function wire() {
+    on(app, "click", "[data-action=adm-block]", async (e, el) => {
+      const blocked = el.dataset.blocked === "1";
+      if (!blocked && !confirm("Закрыть доступ этому пользователю? Он будет разлогинен.")) return;
+      try { await api.adminUpdateUser(el.dataset.id, { status: blocked ? "active" : "blocked" }); users = (await api.adminUsers()).users; draw(); } catch (er) { draw(er.message); }
+    });
+    on(app, "click", "[data-action=adm-gm]", async (e, el) => {
+      try { await api.adminUpdateUser(el.dataset.id, { isGm: el.dataset.gm !== "1" }); users = (await api.adminUsers()).users; draw(); } catch (er) { draw(er.message); }
+    });
     on(app, "click", "[data-action=open]", (e, el) => navigate(`#/campaigns/${el.dataset.id}`));
     on(app, "click", "[data-action=create]", async () => {
       const name = document.querySelector("[data-new-name]").value.trim();
@@ -48,6 +61,17 @@ export async function renderCampaigns() {
       try { const r = await api.joinCampaign(code); navigate(`#/campaigns/${r.campaign.id}`); } catch (e) { draw(e.message); }
     });
   }
+}
+
+function adminPanel(users) {
+  return `<div class="panel"><h3>Доступ (только владелец)</h3>
+    <p class="muted" style="font-size:.85rem">Регистрация возможна только по коду приглашения мастера. Игрок без кампании активного мастера доступа к листам не имеет. «Закрыть доступ» разлогинивает человека и блокирует вход; листы сохраняются.</p>
+    ${users.map((u) => `<div class="campaign-row" style="cursor:default;flex-wrap:wrap">
+      <span><strong>${escapeHtml(u.email)}</strong> ${u.isOwner ? "👑 владелец" : u.isGm ? "🎲 мастер" : ""} ${u.status === "blocked" ? "⛔ закрыт" : ""}
+        <br><small class="muted">листов: ${u.characters} · кампании: ${escapeHtml(u.campaigns || "—")}</small></span>
+      ${u.isOwner ? "" : `<span class="row"><button class="small" data-action="adm-gm" data-id="${u.id}" data-gm="${u.isGm ? 1 : 0}">${u.isGm ? "Снять права мастера" : "Сделать мастером"}</button>
+        <button class="small ${u.status === "blocked" ? "" : "danger"}" data-action="adm-block" data-id="${u.id}" data-blocked="${u.status === "blocked" ? 1 : 0}">${u.status === "blocked" ? "Вернуть доступ" : "Закрыть доступ"}</button></span>`}
+    </div>`).join("")}</div>`;
 }
 
 const COND_NAMES = {};

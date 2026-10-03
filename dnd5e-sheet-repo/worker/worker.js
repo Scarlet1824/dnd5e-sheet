@@ -7,6 +7,7 @@
  * Bindings required (set in the dashboard under Worker → Settings → Variables):
  *   - D1 database binding named `DB`   (Settings → Bindings → D1 Database)
  *   - Variable `ALLOWED_ORIGIN`        (e.g. https://your-pages-app.pages.dev)
+ *   - Variable `OWNER_EMAIL`           (email владельца: управляет доступом и правами мастеров; регистрируется без кода)
  *
  * Routes:
  *   POST   /api/register        { email, password }                -> { token, user }
@@ -96,22 +97,62 @@ async function readJson(request) {
   }
 }
 
+function isOwnerEmail(env, email) {
+  return !!env.OWNER_EMAIL && String(email).toLowerCase() === String(env.OWNER_EMAIL).toLowerCase().trim();
+}
+
 async function getUserFromRequest(request, env) {
   const auth = request.headers.get("Authorization") || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
   if (!token) return null;
 
-  const row = await env.DB.prepare(
-    `SELECT s.user_id as user_id, s.expires_at as expires_at, u.id as id, u.email as email
-     FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token = ?`
-  )
-    .bind(token)
-    .first();
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT s.user_id as user_id, s.expires_at as expires_at, u.id as id, u.email as email, u.status as status, u.is_gm as is_gm
+       FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token = ?`
+    )
+      .bind(token)
+      .first();
+  } catch {
+    // миграция доступа ещё не выполнена
+    row = await env.DB.prepare(
+      `SELECT s.user_id as user_id, s.expires_at as expires_at, u.id as id, u.email as email
+       FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token = ?`
+    )
+      .bind(token)
+      .first();
+  }
 
   if (!row) return null;
   if (new Date(row.expires_at).getTime() < Date.now()) return null;
-  return { id: row.id, email: row.email, token };
+  const owner = isOwnerEmail(env, row.email);
+  return {
+    id: row.id,
+    email: row.email,
+    token,
+    blocked: !owner && row.status === "blocked",
+    role: owner ? "owner" : row.is_gm ? "gm" : "player",
+  };
+}
+
+// Игрок (не владелец и не мастер) имеет доступ, только пока состоит в кампании активного мастера.
+async function playerHasAccess(env, userId) {
+  try {
+    const r = await env.DB.prepare(
+      `SELECT 1 AS ok FROM campaign_members m
+       JOIN campaigns c ON c.id = m.campaign_id
+       JOIN users o ON o.id = c.owner_id
+       WHERE m.user_id = ? AND COALESCE(o.status, 'active') != 'blocked' LIMIT 1`
+    )
+      .bind(userId)
+      .first();
+    return !!r;
+  } catch {
+    return true; // таблицы кампаний ещё не созданы
+  }
 }
 
 function characterRowToJson(row) {
@@ -149,6 +190,21 @@ async function handleRegister(request, env) {
   const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
   if (existing) return json({ error: "Пользователь с таким email уже существует." }, 409);
 
+  // Регистрация только по коду приглашения мастера (владелец регистрируется свободно).
+  let invite = null;
+  if (!isOwnerEmail(env, email)) {
+    const code = typeof body.inviteCode === "string" ? body.inviteCode.trim().toUpperCase() : "";
+    if (!code) return json({ error: "Для регистрации нужен код приглашения от мастера." }, 403);
+    try {
+      invite = await env.DB.prepare(
+        `SELECT c.id AS id, COALESCE(o.status, 'active') AS ostatus FROM campaigns c JOIN users o ON o.id = c.owner_id WHERE c.join_code = ?`
+      ).bind(code).first();
+    } catch {
+      invite = null;
+    }
+    if (!invite || invite.ostatus === "blocked") return json({ error: "Код приглашения не найден." }, 403);
+  }
+
   const salt = randomHex(16);
   const passwordHash = await hashPassword(body.password, salt);
   const userId = uuid();
@@ -156,6 +212,9 @@ async function handleRegister(request, env) {
   await env.DB.prepare("INSERT INTO users (id, email, password_hash, salt) VALUES (?, ?, ?, ?)")
     .bind(userId, email, passwordHash, salt)
     .run();
+  if (invite) {
+    await env.DB.prepare("INSERT OR IGNORE INTO campaign_members (campaign_id, user_id) VALUES (?, ?)").bind(invite.id, userId).run();
+  }
 
   return startSession(env, userId, email);
 }
@@ -167,14 +226,20 @@ async function handleLogin(request, env) {
   }
   const email = body.email.toLowerCase().trim();
 
-  const user = await env.DB.prepare("SELECT id, email, password_hash, salt FROM users WHERE email = ?")
-    .bind(email)
-    .first();
+  let user;
+  try {
+    user = await env.DB.prepare("SELECT id, email, password_hash, salt, status FROM users WHERE email = ?").bind(email).first();
+  } catch {
+    user = await env.DB.prepare("SELECT id, email, password_hash, salt FROM users WHERE email = ?").bind(email).first();
+  }
   if (!user) return json({ error: "Неверный email или пароль." }, 401);
 
   const attemptedHash = await hashPassword(body.password, user.salt);
   if (!timingSafeEqual(attemptedHash, user.password_hash)) {
     return json({ error: "Неверный email или пароль." }, 401);
+  }
+  if (user.status === "blocked" && !isOwnerEmail(env, user.email)) {
+    return json({ error: "Доступ закрыт владельцем.", code: "BLOCKED" }, 403);
   }
 
   return startSession(env, user.id, user.email);
@@ -195,7 +260,49 @@ async function handleLogout(request, env, user) {
 }
 
 async function handleMe(request, env, user) {
-  return json({ user: { id: user.id, email: user.email } });
+  const access = user.role !== "player" || (await playerHasAccess(env, user.id));
+  return json({ user: { id: user.id, email: user.email, role: user.role, access } });
+}
+
+// ---------- администрирование (только владелец) ----------
+
+async function handleAdminListUsers(request, env, user) {
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.email, u.created_at, COALESCE(u.status,'active') AS status, COALESCE(u.is_gm,0) AS is_gm,
+            (SELECT COUNT(*) FROM characters c WHERE c.user_id = u.id) AS chars,
+            (SELECT COUNT(*) FROM campaigns c WHERE c.owner_id = u.id) AS owned,
+            (SELECT GROUP_CONCAT(c.name, ', ') FROM campaign_members m JOIN campaigns c ON c.id = m.campaign_id WHERE m.user_id = u.id) AS campaigns
+     FROM users u ORDER BY u.created_at`
+  ).all();
+  return json({
+    users: results.map((r) => ({
+      id: r.id,
+      email: r.email,
+      createdAt: r.created_at,
+      status: r.status,
+      isGm: !!r.is_gm,
+      isOwner: isOwnerEmail(env, r.email),
+      characters: r.chars,
+      ownedCampaigns: r.owned,
+      campaigns: r.campaigns || "",
+    })),
+  });
+}
+
+async function handleAdminUpdateUser(request, env, user, id) {
+  const body = await readJson(request);
+  if (!body) return json({ error: "Некорректное тело запроса." }, 400);
+  const target = await env.DB.prepare("SELECT id, email FROM users WHERE id = ?").bind(id).first();
+  if (!target) return json({ error: "Пользователь не найден." }, 404);
+  if (isOwnerEmail(env, target.email)) return json({ error: "Владельца изменить нельзя." }, 400);
+  if (body.status === "blocked" || body.status === "active") {
+    await env.DB.prepare("UPDATE users SET status = ? WHERE id = ?").bind(body.status, id).run();
+    if (body.status === "blocked") await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
+  }
+  if (typeof body.isGm === "boolean") {
+    await env.DB.prepare("UPDATE users SET is_gm = ? WHERE id = ?").bind(body.isGm ? 1 : 0, id).run();
+  }
+  return json({ ok: true });
 }
 
 async function handleListCharacters(request, env, user) {
@@ -340,6 +447,7 @@ async function handleListCampaigns(request, env, user) {
 }
 
 async function handleCreateCampaign(request, env, user) {
+  if (user.role === "player") return json({ error: "Создавать кампании может только мастер. Попросите владельца выдать права мастера." }, 403);
   const body = await readJson(request);
   const name = body && typeof body.name === "string" ? body.name.trim().slice(0, 100) : "";
   if (!name) return json({ error: "Укажите название кампании." }, 400);
@@ -541,6 +649,18 @@ export default {
         const user = await getUserFromRequest(request, env);
         if (!user) {
           response = json({ error: "Требуется авторизация." }, 401);
+        } else if (user.blocked) {
+          response = json({ error: "Доступ закрыт владельцем.", code: "BLOCKED" }, 403);
+        } else if (
+          user.role === "player" &&
+          !["/api/logout", "/api/me", "/api/campaigns", "/api/campaigns/join"].includes(path) &&
+          !(await playerHasAccess(env, user.id))
+        ) {
+          response = json({ error: "Нет доступа: вы не состоите ни в одной кампании. Введите код приглашения мастера.", code: "NO_CAMPAIGN" }, 403);
+        } else if (path === "/api/admin/users" && request.method === "GET" && user.role === "owner") {
+          response = await handleAdminListUsers(request, env, user);
+        } else if (/^\/api\/admin\/users\/[a-zA-Z0-9-]+$/.test(path) && request.method === "PUT" && user.role === "owner") {
+          response = await handleAdminUpdateUser(request, env, user, path.split("/").pop());
         } else if (path === "/api/logout" && request.method === "POST") {
           response = await handleLogout(request, env, user);
         } else if (path === "/api/me" && request.method === "GET") {

@@ -58,13 +58,16 @@ async function request(path, { method = "GET", body, auth = true } = {}) {
     if (res.status === 401) clearSession();
     const err = new Error((data && data.error) || `Ошибка запроса (${res.status})`);
     err.status = res.status;
+    err.code = data && data.code;
+    if (res.status === 403 && err.code === "BLOCKED") { clearSession(); location.hash = "#/login"; }
+    if (res.status === 403 && err.code === "NO_CAMPAIGN" && !location.hash.startsWith("#/campaigns")) location.hash = "#/campaigns";
     throw err;
   }
   return data;
 }
 
 export const api = {
-  register: (email, password) => request("/api/register", { method: "POST", body: { email, password }, auth: false }),
+  register: (email, password, inviteCode) => request("/api/register", { method: "POST", body: { email, password, inviteCode }, auth: false }),
   login: (email, password) => request("/api/login", { method: "POST", body: { email, password }, auth: false }),
   logout: () => request("/api/logout", { method: "POST" }),
   me: () => request("/api/me"),
@@ -73,6 +76,9 @@ export const api = {
   getCharacter: (id) => request(`/api/characters/${id}`),
   updateCharacter: (id, payload) => request(`/api/characters/${id}`, { method: "PUT", body: payload }),
   deleteCharacter: (id) => request(`/api/characters/${id}`, { method: "DELETE" }),
+  // администрирование (только владелец)
+  adminUsers: () => request("/api/admin/users"),
+  adminUpdateUser: (id, body) => request(`/api/admin/users/${id}`, { method: "PUT", body }),
   // кампании
   listCampaigns: () => request("/api/campaigns"),
   createCampaign: (name) => request("/api/campaigns", { method: "POST", body: { name } }),

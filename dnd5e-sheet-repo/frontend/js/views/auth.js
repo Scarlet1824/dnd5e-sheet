@@ -38,7 +38,7 @@ export function renderAuth() {
     const submitBtn = form.querySelector("button[type=submit]");
     submitBtn.disabled = true;
     try {
-      const res = mode === "login" ? await api.login(email, password) : await api.register(email, password);
+      const res = mode === "login" ? await api.login(email, password) : await api.register(email, password, form.inviteCode ? form.inviteCode.value.trim() : "");
       setSession(res.token, res.user);
       navigate("#/characters");
     } catch (err) {
@@ -67,6 +67,7 @@ export function renderAuth() {
               <label>Пароль ${mode === "register" ? "(минимум 8 символов)" : ""}</label>
               <input type="password" name="password" required minlength="8" autocomplete="${mode === "login" ? "current-password" : "new-password"}" />
             </div>
+            ${mode === "register" ? `<div class="col"><label>Код приглашения от мастера</label><input type="text" name="inviteCode" required maxlength="12" style="text-transform:uppercase" autocomplete="off" /></div>` : ""}
             <p class="error-text" data-error style="display:none;"></p>
             <button type="submit" class="primary">${mode === "login" ? "Войти" : "Создать аккаунт"}</button>
           </form>
