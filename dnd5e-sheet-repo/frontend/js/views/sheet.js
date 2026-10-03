@@ -2,7 +2,7 @@ import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeMod
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -1745,6 +1745,80 @@ export async function renderSheet(id) {
     const mc = levelUpState.metamagicChoice;
     return !!(mc && mc.picked.length < Math.min(mc.count, metamagicOptions().length));
   }
+  // ---- Стихийные практики (Монах — Путь четырёх стихий: 3/6/11/17 ур.) -----------------------------------------
+  const ELEMENTAL_ATTUNEMENT = "Родство со стихией";
+  function disciplineSubName(c) { return levelUpActiveSubName(c); }
+  function disciplineActive(cls, newLevel, c) {
+    if (!cls || cls.id !== "monk") return false;
+    const sub = (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(disciplineSubName(c)).toLowerCase());
+    return !!(sub && sub.slug === "four-elements" && [3, 6, 11, 17].includes(newLevel));
+  }
+  function knownDisciplineNames() {
+    return (data.features || []).filter((f) => /^Практика: /.test(f.name || "")).map((f) => f.name.replace(/^Практика: /, ""));
+  }
+  function disciplineOptions(newLevel) {
+    const have = new Set([...knownDisciplineNames(), ELEMENTAL_ATTUNEMENT]);
+    return ELEMENTAL_DISCIPLINES.filter((d) => d.level <= newLevel && !have.has(d.name));
+  }
+  function disciplinesPanelHtml(cls, newLevel, c) {
+    const ds = levelUpState.disciplines;
+    if (!ds || !disciplineActive(cls, newLevel, c)) return "";
+    const opts = disciplineOptions(newLevel);
+    const known = knownDisciplineNames();
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Стихийные практики — выберите 1 (${ds.picked.length}/1)</h4>
+        ${newLevel === 3 ? `<p class="muted" style="margin-top:0;">«${ELEMENTAL_ATTUNEMENT}» вы знаете всегда — она добавится автоматически.</p>` : ""}
+        ${opts.map((d) => `<label class="row" style="gap:8px;align-items:flex-start;margin-top:6px;"><input type="checkbox" data-level-up-discipline="${escapeHtml(d.name)}" ${ds.picked.includes(d.name) ? "checked" : ""} ${!ds.picked.includes(d.name) && ds.picked.length >= 1 ? "disabled" : ""} style="margin-top:4px;" /><span><strong>${escapeHtml(d.name)}</strong>${d.level > 3 ? ` <span class="muted">(${d.level} ур.)</span>` : ""}<br /><span class="muted" style="font-size:0.82rem;">${escapeHtml(d.desc)}</span></span></label>`).join("")}
+        ${newLevel > 3 && known.length ? `
+        <p style="margin:12px 0 4px;"><strong>Заменить изученную практику</strong> <span class="muted">(необязательно)</span></p>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <select data-level-up-discipline-out><option value="">— не заменять —</option>${known.map((n) => `<option value="${escapeHtml(n)}" ${ds.swapOut === n ? "selected" : ""}>${escapeHtml(n)}</option>`).join("")}</select>
+          <span>→</span>
+          <select data-level-up-discipline-in><option value="">— новая практика —</option>${opts.filter((d) => !ds.picked.includes(d.name)).map((d) => `<option value="${escapeHtml(d.name)}" ${ds.swapIn === d.name ? "selected" : ""}>${escapeHtml(d.name)}</option>`).join("")}</select>
+        </div>` : ""}
+      </div>`;
+  }
+  function disciplinesIncomplete(cls, newLevel, c) {
+    const ds = levelUpState.disciplines;
+    if (!ds || !disciplineActive(cls, newLevel, c)) return false;
+    if (ds.picked.length < Math.min(1, disciplineOptions(newLevel).length)) return true;
+    return !!(ds.swapOut && !ds.swapIn) || !!(!ds.swapOut && ds.swapIn);
+  }
+  // ---- Замена одного известного заклинания (Бард/Чародей/Следопыт/Мистический рыцарь и ловкач) ---------------
+  function knownSpellSwapAvailable(cls, c) {
+    const list = spellListFor(cls, c);
+    return !!(list && (KNOWN_SPELLS_BY_LEVEL[list] || thirdCasterOf(c)) && swappableKnownSpells(cls, c).length);
+  }
+  function swappableKnownSpells(cls, c) {
+    const sc = data.spellcasting || {};
+    const list = spellListFor(cls, c);
+    const granted = sc.granted || {};
+    return (sc.known || []).map((id) => SPELLS.find((x) => x.id === id)).filter((sp) => sp && sp.level >= 1 && !granted[sp.id] && (sp.classes || []).includes(list));
+  }
+  function spellSwapPanelHtml(cls, newLevel, c) {
+    const sw = levelUpState.spellSwap;
+    if (!sw || !knownSpellSwapAvailable(cls, c)) return "";
+    const list = spellListFor(cls, c);
+    const maxCircle = thirdCasterOf(c) ? THIRD_MAX_CIRCLE(newLevel) : maxKnownSpellCircleForLevel(list, newLevel);
+    const sc = data.spellcasting || {};
+    const taken = new Set([...(sc.cantrips || []), ...(sc.known || []), ...(sc.prepared || []), ...((levelUpState.knownSpellChoice && levelUpState.knownSpellChoice.spellIds) || []), ...((levelUpState.magicSecrets && levelUpState.magicSecrets.picked) || [])]);
+    const pool = SPELLS.filter((s) => s.level >= 1 && s.level <= maxCircle && (s.classes || []).includes(list) && !taken.has(s.id)).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
+    return `
+      <div class="panel" style="margin:10px 0;">
+        <h4 style="margin-top:0;">Заменить известное заклинание <span class="muted" style="font-weight:normal;">(необязательно)</span></h4>
+        <p class="muted" style="margin-top:0;font-size:0.82rem;">При повышении уровня можно заменить одно известное заклинание другим из списка класса (круг не выше ${maxCircle}-го).</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <select data-level-up-swap-out><option value="">— не заменять —</option>${swappableKnownSpells(cls, c).map((sp) => `<option value="${sp.id}" ${sw.out === sp.id ? "selected" : ""}>${escapeHtml(sp.name)} (${sp.level} кр.)</option>`).join("")}</select>
+          <span>→</span>
+          <select data-level-up-swap-in><option value="">— новое заклинание —</option>${pool.map((sp) => `<option value="${sp.id}" ${sw.in === sp.id ? "selected" : ""}>${escapeHtml(sp.name)} (${sp.level} кр.)</option>`).join("")}</select>
+        </div>
+      </div>`;
+  }
+  function spellSwapIncomplete(cls, c) {
+    const sw = levelUpState.spellSwap;
+    return !!(sw && knownSpellSwapAvailable(cls, c) && (!!sw.out !== !!sw.in));
+  }
   // ---- Магические секреты (Бард 10/14/18) и «Дополнительные тайны магии» Коллегии знаний (6) -----------------
   function magicSecretsInfo(cls, newLevel, c) {
     if (!cls || cls.id !== "bard") return { count: 0 };
@@ -2687,6 +2761,8 @@ export async function renderSheet(id) {
       ${levelUpState.baseFightingStyleChoice ? baseFightingStyleChoicePanelHtml() : ""}
       ${expertisePanelHtml()}
       ${metamagicPanelHtml()}
+      ${disciplinesPanelHtml(cls, newLevel, c)}
+      ${spellSwapPanelHtml(cls, newLevel, c)}
       ${magicSecretsPanelHtml(cls, newLevel, c)}
       ${styleSwapPanelHtml(cls)}
       ${styleCantripsPanelHtml()}
@@ -2713,6 +2789,8 @@ export async function renderSheet(id) {
           baseFightingStyleChoiceIncomplete() ||
           expertiseChoiceIncomplete() ||
           metamagicIncomplete() ||
+          disciplinesIncomplete(cls, newLevel, c) ||
+          spellSwapIncomplete(cls, c) ||
           magicSecretsIncomplete(cls, newLevel, c) ||
           styleCantripsIncomplete() ||
           toolChoiceIncomplete() ||
@@ -2781,6 +2859,18 @@ export async function renderSheet(id) {
       ec.picked = [...cur].slice(0, ec.count);
       refreshLevelUpModal();
     });
+    on(modal, "change", "[data-level-up-discipline]", (e, el) => {
+      const ds = levelUpState.disciplines;
+      if (!ds) return;
+      const n = el.dataset.levelUpDiscipline;
+      ds.picked = el.checked ? [n] : [];
+      if (ds.swapIn === n) ds.swapIn = "";
+      refreshLevelUpModal();
+    });
+    on(modal, "change", "[data-level-up-discipline-out]", (e, el) => { levelUpState.disciplines.swapOut = el.value; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-discipline-in]", (e, el) => { levelUpState.disciplines.swapIn = el.value; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-swap-out]", (e, el) => { levelUpState.spellSwap.out = el.value; refreshLevelUpModal(); });
+    on(modal, "change", "[data-level-up-swap-in]", (e, el) => { levelUpState.spellSwap.in = el.value; refreshLevelUpModal(); });
     on(modal, "change", "[data-level-up-metamagic]", (e, el) => {
       const mc = levelUpState.metamagicChoice;
       if (!mc) return;
@@ -2857,6 +2947,8 @@ export async function renderSheet(id) {
       levelUpState.knownSpellChoice = ccls && knownSpellGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownSpellChoiceState() : null;
       levelUpState.knownCantripChoice = ccls && knownCantripGrowthCount(ccls, newLevel, cc) > 0 ? freshKnownCantripChoiceState() : null;
       levelUpState.magicSecrets = { picked: [] };
+      levelUpState.disciplines = { picked: [], swapOut: "", swapIn: "" };
+      levelUpState.spellSwap = { out: "", in: "" };
       refreshLevelUpModal();
     });
     on(modal, "change", "[data-level-up-subclass]", (e, el) => {
@@ -3290,6 +3382,26 @@ export async function renderSheet(id) {
       if (!Array.isArray(data.proficiencies.expertise)) data.proficiencies.expertise = [];
       levelUpState.expertiseChoice.picked.forEach((id) => { if (!data.proficiencies.expertise.includes(id)) data.proficiencies.expertise.push(id); });
     }
+    if (levelUpState.disciplines && disciplineActive(cls, newLevel, c)) {
+      const ds = levelUpState.disciplines;
+      const sub = (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(c.subclass || "").toLowerCase());
+      const src = sub ? subclassFeatureSource(cls, sub.name) : cls.name;
+      const addCard = (n) => {
+        const d = ELEMENTAL_DISCIPLINES.find((x) => x.name === n);
+        const nm = n === ELEMENTAL_ATTUNEMENT ? n : `Практика: ${n}`;
+        if (d && !(data.features || []).some((f) => f.name === nm)) data.features.push({ name: nm, source: src, desc: d.desc });
+      };
+      if (newLevel === 3) addCard(ELEMENTAL_ATTUNEMENT);
+      if (ds.swapOut && ds.swapIn) data.features = (data.features || []).filter((f) => f.name !== `Практика: ${ds.swapOut}`);
+      if (ds.swapOut && ds.swapIn) addCard(ds.swapIn);
+      ds.picked.forEach(addCard);
+    }
+    if (levelUpState.spellSwap && levelUpState.spellSwap.out && levelUpState.spellSwap.in && data.spellcasting) {
+      const sw = levelUpState.spellSwap;
+      const sc2 = data.spellcasting;
+      sc2.known = (sc2.known || []).map((id) => (id === sw.out ? sw.in : id));
+      if ((sc2.prepared || []).includes(sw.out)) sc2.prepared = sc2.prepared.map((id) => (id === sw.out ? sw.in : id));
+    }
     if (levelUpState.metamagicChoice) {
       levelUpState.metamagicChoice.picked.forEach((n) => {
         const m = (METAMAGIC_OPTIONS || []).find((x) => x.name === n);
@@ -3423,6 +3535,8 @@ export async function renderSheet(id) {
       knownSpellChoice: cls && knownSpellGrowthCount(cls, newLevel, c) > 0 ? freshKnownSpellChoiceState() : null,
       knownCantripChoice: cls && knownCantripGrowthCount(cls, newLevel, c) > 0 ? freshKnownCantripChoiceState() : null,
       magicSecrets: { picked: [] },
+      disciplines: { picked: [], swapOut: "", swapIn: "" },
+      spellSwap: { out: "", in: "" },
     };
     levelUpModalEl = openModal(levelUpModalBodyHtml(), { wide: true });
     wireLevelUpModal(levelUpModalEl);
