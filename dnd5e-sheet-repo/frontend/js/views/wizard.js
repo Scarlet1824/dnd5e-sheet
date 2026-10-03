@@ -7,7 +7,7 @@ import {
   detectArmorIdFromText, textMentionsShield, detectWeaponsInText, weaponRangeType,
   WEAPONS, ARMORS, CLASS_STARTING_GOLD, EQUIPMENT_PACK_DESCRIPTIONS, extractStartingGold,
   equipmentNameMatches, expandPackContents, detectAmmoInText, stripStartingGoldMention, splitFeatureText,
-  parseProficiencyGrantsFromText, DRAGON_ANCESTRIES, TRAIT_NAMED_WEAPON_GRANTS, LANGUAGES, LANGUAGE_GROUPS, TOOLS, TOOL_GROUPS, GAMING_SETS, VEHICLE_GROUPS, FEATS,
+  parseProficiencyGrantsFromText, DRAGON_ANCESTRIES, DIVINE_AFFINITIES, TRAIT_NAMED_WEAPON_GRANTS, LANGUAGES, LANGUAGE_GROUPS, TOOLS, TOOL_GROUPS, GAMING_SETS, VEHICLE_GROUPS, FEATS,
 } from "../data/dnd5e-data.js";
 import { optionalFeaturesAt, additionalSpellIds, ADDITIONAL_SPELLS_NAME, OPTIONAL_CLASS_FEATURES, OPTIONAL_FEATURE_SOURCE } from "../data/optionalFeatures.js";
 import { blankCharacter } from "../character.js";
@@ -87,6 +87,7 @@ export function renderWizard() {
     weaponCategoryChoices: {}, // "gi:oi:mi:pi" -> WEAPONS id, for a "воинское оружие"/"простое оружие" category mention
     classEquipmentDeclined: false, // player chose starting gold instead of the class equipment package
     classGoldRoll: 0, // rolled amount when classEquipmentDeclined is true
+    divineAffinity: "", // Чародей, Божественная душа: склонность (даёт дополнительное заклинание)
     dragonAncestry: "", // Чародей драконьей крови: название выбранного драконьего предка
     level1ChoiceIndex: null, // chosen index into the class's level1Choice.options (fighting style / subclass picked at level 1)
     favoredEnemy: "", // Следопыт: one of RANGER_FAVORED_ENEMY_TYPES
@@ -133,6 +134,7 @@ export function renderWizard() {
       if (!c) return false;
       if (c.level1Choice && state.level1ChoiceIndex == null) return false;
       if (c.id === "sorcerer" && c.level1Choice && c.level1Choice.options[state.level1ChoiceIndex]?.name === "Наследие драконьей крови" && !state.dragonAncestry) return false;
+      if (c.id === "sorcerer" && c.level1Choice && c.level1Choice.options[state.level1ChoiceIndex]?.name === "Божественная душа" && !state.divineAffinity) return false;
     }
     if (stepId === "equipment" && !state.classId) return false;
     if (stepId === "background") {
@@ -460,6 +462,10 @@ export function renderWizard() {
           <h4 style="margin:14px 0 4px;">Драконий предок</h4>
           <p class="muted" style="font-size:0.85rem;margin:0 0 6px;">Выберите вид дракона-предка: от него зависит вид урона ваших умений.</p>
           <div class="grid cols-3">${DRAGON_ANCESTRIES.map((d) => `<div class="card selectable ${state.dragonAncestry === d.name ? "selected" : ""}" data-dragon-ancestry="${escapeHtml(d.name)}"><h4>${escapeHtml(d.name)}</h4><p class="muted">урон: ${escapeHtml(d.damage)}</p></div>`).join("")}</div>` : ""}
+          ${cls.id === "sorcerer" && choice.options[state.level1ChoiceIndex]?.name === "Божественная душа" ? `
+          <h4 style="margin:14px 0 4px;">Склонность («Божественная магия»)</h4>
+          <p class="muted" style="font-size:0.85rem;margin:0 0 6px;">Выберите склонность к источнику божественной силы: она даёт дополнительное заклинание, не занимающее место среди известных. Кроме того, при выборе заклинаний вам доступен список заклинаний жреца.</p>
+          <div class="grid cols-3">${DIVINE_AFFINITIES.map((a) => `<div class="card selectable ${state.divineAffinity === a.name ? "selected" : ""}" data-divine-affinity="${escapeHtml(a.name)}"><h4>${escapeHtml(a.name)}</h4><p class="muted">${escapeHtml((SPELLS.find((x) => x.id === a.spell) || {}).name || "")}</p></div>`).join("")}</div>` : ""}
         </div>`;
     }
 
@@ -2020,7 +2026,7 @@ export function renderWizard() {
       state.classEquipmentDeclined = false;
       state.classGoldRoll = 0;
       state.level1ChoiceIndex = null;
-      state.dragonAncestry = "";
+      state.dragonAncestry = ""; state.divineAffinity = "";
       state.chosenSubclassSkills = [];
       state.chosenSubclassLanguages = [];
       state.subclassLanguageCustom = {};
@@ -2044,10 +2050,11 @@ export function renderWizard() {
       state.subclassLanguageCustom = {};
       render();
     });
+    on(app, "click", "[data-divine-affinity]", (e, el) => { state.divineAffinity = el.dataset.divineAffinity; render(); });
     on(app, "click", "[data-dragon-ancestry]", (e, el) => { state.dragonAncestry = el.dataset.dragonAncestry; render(); });
     on(app, "click", "[data-level1-choice]", (e, el) => {
       state.level1ChoiceIndex = Number(el.dataset.level1Choice);
-      state.dragonAncestry = "";
+      state.dragonAncestry = ""; state.divineAffinity = "";
       // A different subclass pick can grant a different skill-choice list
       // (or none at all) -- clear out any picks that no longer make sense.
       state.chosenSubclassSkills = [];
@@ -2600,6 +2607,13 @@ export function renderWizard() {
                   const da = DRAGON_ANCESTRIES.find((d) => d.name === state.dragonAncestry);
                   if (da) { sfName = `Драконий предок: ${da.name} (${da.damage})`; sfDesc += `\n\nВаш предок — ${da.name.toLowerCase()} дракон; связанный вид урона — ${da.damage}.`; }
                   if (!data.proficiencies.languages.includes("Драконий")) data.proficiencies.languages.push("Драконий");
+                }
+                if (sf.name === "Уста ветра" && !data.proficiencies.languages.includes("Первичный")) data.proficiencies.languages.push("Первичный");
+                if (sf.name === "Божественная магия" && state.divineAffinity) {
+                  data.divineAffinity = state.divineAffinity;
+                  const da2 = DIVINE_AFFINITIES.find((a) => a.name === state.divineAffinity);
+                  const spn = da2 && (SPELLS.find((x) => x.id === da2.spell) || {}).name;
+                  sfDesc += `\n\nВаша склонность — ${state.divineAffinity.toLowerCase()}${spn ? `; дополнительное заклинание: ${spn}` : ""}.`;
                 }
                 data.features.push({ name: sfName, source: `${cls.name} — ${sub.name}`, desc: sfDesc });
                 applyProficiencyGrants(sf.name, sfDesc);

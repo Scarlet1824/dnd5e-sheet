@@ -2,7 +2,7 @@ import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeMod
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, SPIRIT_TALES_TABLE, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS, DRAGON_ANCESTRIES } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, SPIRIT_TALES_TABLE, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS, DRAGON_ANCESTRIES, DIVINE_AFFINITIES, LUNAR_PHASES } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -582,6 +582,25 @@ export async function renderSheet(id) {
     });
     if (changed) doSave();
   })();
+  (function migrateRound76() {
+    let changed = false;
+    (data.features || []).forEach((f) => {
+      if (/Монах/i.test(f.source || "") || /ци|ки/i.test(f.source || "")) {
+        if (f.name === "Удары, усиленные ци") { f.name = "Энергетические удары"; changed = true; }
+        if (f.name === "Атака, подпитанная ки") { f.name = "Атака, наделённая ци"; changed = true; }
+      }
+    });
+    if (changed) doSave();
+  })();
+  (function migrateRound76b() {
+    let changed = false;
+    if ((data.features || []).some((f) => f.name === "Уста ветра" && /шторм/i.test(f.source || ""))) {
+      if (!data.proficiencies) data.proficiencies = {};
+      if (!Array.isArray(data.proficiencies.languages)) data.proficiencies.languages = [];
+      if (!data.proficiencies.languages.includes("Первичный")) { data.proficiencies.languages.push("Первичный"); changed = true; }
+    }
+    if (changed) doSave();
+  })();
   (function migrateRound75() {
     let changed = false;
     const before = (data.features || []).length;
@@ -1049,6 +1068,7 @@ export async function renderSheet(id) {
       </div>
       ${restState.tab === "short" ? shortRestTabHtml() : longRestTabHtml()}
       ${restState.message ? `<div class="panel panel-tight" style="margin:12px 0 0;border-color:var(--accent, currentColor);"><p style="margin:0;font-size:0.9rem;">${escapeHtml(restState.message)}</p></div>` : ""}
+      <div class="row" style="justify-content:flex-end;margin-top:12px;"><button type="button" data-action="close-rest-modal">Закрыть</button></div>
     `;
   }
   function shortRestTabHtml() {
@@ -1218,6 +1238,7 @@ export async function renderSheet(id) {
   // since on() delegates from that root, these survive refreshRestModal()
   // replacing the modal's innerHTML on every tab switch / roll / rest.
   function wireRestModal(modal) {
+    on(modal, "click", "[data-action=close-rest-modal]", () => { closeModal(); render(); });
     on(modal, "click", "[data-rest-tab]", (e, el) => {
       restState.tab = el.dataset.restTab;
       restState.message = "";
@@ -1457,6 +1478,12 @@ export async function renderSheet(id) {
     if (c.id === "rogue" && sub.includes("мистический ловкач")) return { list: "wizard" };
     return null;
   }
+  // Расширенный список заклинаний подкласса (Божественная душа — список жреца и т.п.) для выбора при повышении уровня.
+  function subExpandedSpellIds(c) {
+    const cls = c && getClass(c.id);
+    const sub = cls && c.subclass && (cls.subclasses || []).find((x) => x.name.toLowerCase() === String(c.subclass).toLowerCase());
+    return new Set((sub && sub.expandedSpells) || []);
+  }
   function spellListFor(cls, c) {
     const t = thirdCasterOf(c);
     return t ? t.list : cls.spellcasting && cls.spellcasting.list;
@@ -1493,7 +1520,7 @@ export async function renderSheet(id) {
       ...(levelUpState.spellSwap && levelUpState.spellSwap.in ? [levelUpState.spellSwap.in] : []),
     ]);
     const options = SPELLS.filter(
-      (s) => s.level >= 1 && s.level <= maxCircle && (s.classes.includes(spellList) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id)
+      (s) => s.level >= 1 && s.level <= maxCircle && (s.classes.includes(spellList) || (optionalExtraSpellIds(c && c.id).has(s.id) || subExpandedSpellIds(c).has(s.id))) && !alreadyKnown.has(s.id)
     ).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name, "ru"));
     return `
       <div class="panel" style="margin:10px 0;">
@@ -1521,7 +1548,7 @@ export async function renderSheet(id) {
     const sc = levelUpState.knownCantripChoice;
     const need = knownCantripGrowthCount(cls, newLevel, c);
     const alreadyKnown = new Set([...((data.spellcasting && data.spellcasting.cantrips) || []), ...((levelUpState.magicSecrets && levelUpState.magicSecrets.picked) || [])]);
-    const options = SPELLS.filter((s) => s.level === 0 && (s.classes.includes(spellListFor(cls, c)) || optionalExtraSpellIds(c && c.id).has(s.id)) && !alreadyKnown.has(s.id))
+    const options = SPELLS.filter((s) => s.level === 0 && (s.classes.includes(spellListFor(cls, c)) || (optionalExtraSpellIds(c && c.id).has(s.id) || subExpandedSpellIds(c).has(s.id))) && !alreadyKnown.has(s.id))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
     return `
       <div class="panel" style="margin:10px 0;">
@@ -2281,6 +2308,38 @@ export async function renderSheet(id) {
       document.dispatchEvent(new CustomEvent("dnd5e:roll-logged"));
     });
   }
+  // Лунное чародейство: фаза луны на сегодня; бесплатное заклинание 1-го круга выбранной фазы раз до окончания отдыха.
+  function lunarPhaseControlsHtml() {
+    const cur = data.lunarPhase || "";
+    const ph = LUNAR_PHASES.find((p) => p.name === cur);
+    const spName = ph ? (SPELLS.find((x) => x.id === ph.spell) || {}).name : "";
+    return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">${LUNAR_PHASES.map((p) => `<button type="button" class="small ${p.name === cur ? "primary" : ""}" data-action="set-lunar-phase" data-phase="${p.name}">🌙 ${p.name}</button>`).join("")}${ph ? `<span class="muted" style="font-size:0.85rem;">Бесплатно раз до отдыха: ${escapeHtml(spName)} (1-й круг)</span>` : `<span class="muted" style="font-size:0.85rem;">Выберите фазу после продолжительного отдыха</span>`}</div>`;
+  }
+  // Теневая магия «Сила могилы»: Сл спасброска Харизмы = 5 + полученный урон.
+  let graveDamage = 0;
+  function graveControlsHtml() {
+    const mod = getAbilityMod(data, "cha");
+    return `<label class="muted" style="font-size:0.85rem;">Полученный урон <input type="number" min="0" data-grave-damage value="${graveDamage}" style="width:70px;" /></label><span class="feature-card-dc" data-grave-dc title="Сложность спасброска Харизмы = 5 + полученный урон">Сл ${5 + graveDamage}</span><button class="small feature-card-roll" data-action="roll-grave-save" title="Спасбросок Харизмы">🎲 Спасбросок Хар ${formatModifier(mod)}</button>`;
+  }
+  // Практики Пути четырёх стихий, накладывающие заклинание: описание заклинания показывается прямо в карточке умения.
+  const FEATURE_SPELL_PREVIEW = {
+    "Гонг на вершине горы": ["shatter"], "Дыхание зимы": ["cone-of-cold"], "Земляной вал": ["wall-of-stone"],
+    "Испепеляющий удар": ["burning-hands"], "Кулак четырёх громов": ["thunderwave"], "Натиск штормовых духов": ["gust-of-wind"],
+    "Объятья северного ветра": ["hold-person"], "Осёдланный ветер": ["fly"], "Пламя феникса": ["fireball"],
+    "Прочность вечных гор": ["stoneskin"], "Река голодного пламени": ["wall-of-fire"], "Туманная стойка": ["gaseous-form"],
+  };
+  function featureSpellPreviewHtml(f) {
+    const ids = FEATURE_SPELL_PREVIEW[f.name];
+    if (!ids || !/стихий/i.test(f.source || "")) return "";
+    return ids.map((id) => {
+      const sp = SPELLS.find((x) => x.id === id);
+      if (!sp) return "";
+      const paras = Array.isArray(sp.desc) ? sp.desc : [sp.desc].filter(Boolean);
+      return `<details class="feature-spell-preview" style="margin-top:8px;"><summary style="cursor:pointer;font-weight:600;">✨ Заклинание: ${escapeHtml(sp.name)} <span class="muted" style="font-weight:400;">(${sp.level === 0 ? "заговор" : `${sp.level}-й круг`}, ${escapeHtml(sp.school || "")})</span></summary>
+        <p class="muted" style="margin:6px 0;font-size:0.85rem;">${escapeHtml(sp.castingTime || "—")} · ${escapeHtml(sp.range || "—")} · ${escapeHtml(sp.components || "—")} · ${escapeHtml(sp.duration || "—")}${sp.concentration ? " (конц.)" : ""}</p>
+        ${paras.map((t) => `<p style="margin:4px 0;font-size:0.9rem;">${escapeHtml(t)}</p>`).join("")}</details>`;
+    }).join("");
+  }
   // Чародей «Гибкое колдовство» (Исток магии): окно обмена очков чародейства на ячейки заклинаний и обратно.
   const FLEX_SLOT_COST = { 1: 2, 2: 3, 3: 5, 4: 6, 5: 7 };
   function sorceryPointsFeature() {
@@ -2961,7 +3020,7 @@ export async function renderSheet(id) {
       }
       if (p.type === "terrain") {
         return `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Более опытный следопыт: ещё один тип местности</h4>
-          <div class="row" style="gap:6px;flex-wrap:wrap;">${RANGER_TERRAIN_TYPES.map((t) => `<label class="card selectable ${v.value === t ? "selected" : ""}" style="cursor:pointer;padding:6px 10px;">
+          <div class="row" style="gap:6px;flex-wrap:wrap;">${RANGER_TERRAIN_TYPES.filter((t) => !chosenRangerTerrains().includes(t)).map((t) => `<label class="card selectable ${v.value === t ? "selected" : ""}" style="cursor:pointer;padding:6px 10px;">
             <input type="radio" name="pick-terrain" data-pick-opt="terrain" value="${escapeHtml(t)}" ${v.value === t ? "checked" : ""} style="margin-right:6px;" />${escapeHtml(t)}</label>`).join("")}</div></div>`;
       }
       return `<div class="panel" style="margin:10px 0;"><h4 style="margin-top:0;">Улучшенный избранный враг: ещё один вид врага</h4>
@@ -2989,6 +3048,15 @@ export async function renderSheet(id) {
         if (lang && !(data.proficiencies.languages || []).includes(lang)) data.proficiencies.languages.push(lang);
       }
     });
+  }
+  // Типы местности, уже выбранные следопытом («Исследователь природы» и прошлые «Более опытный следопыт»).
+  function chosenRangerTerrains() {
+    const out = [];
+    (data.features || []).forEach((f) => {
+      const m = /^(?:Исследователь природы|Более опытный следопыт):\s*(.+)$/.exec(f.name || "");
+      if (m) out.push(m[1].trim());
+    });
+    return out;
   }
   function levelUpModalBodyHtml() {
     const classes = levelUpEligibleClasses();
@@ -5363,6 +5431,7 @@ export async function renderSheet(id) {
     if (/^Использование божественной силы$/i.test(f.name || "")) { const isPal = /Паладин/i.test(f.source || ""); const L = ((data.classes || []).find((c) => c.id === (isPal ? "paladin" : "cleric")) || {}).level || (isPal ? 3 : 2); return { max: isPal ? (L >= 15 ? 3 : L >= 7 ? 2 : 1) : (L >= 18 ? 3 : L >= 6 ? 2 : 1), recharge: "long" }; }
     // Монах «Ци» (очков = уровень монаха, короткий отдых) и чародей «Исток магии» (очков = уровень чародея, продолжительный отдых).
     if (/^Ци$/i.test(f.name || "") && /Монах/i.test(f.source || "")) return { max: ((data.classes || []).find((c) => c.id === "monk") || {}).level || 2, recharge: "short" };
+    if (f.name === "Лунное воплощение" && /лун/i.test(f.source || "")) return { max: 1, recharge: "long" };
     if (/^Исток магии$/i.test(f.name || "") && /Чародей/i.test(f.source || "")) return { max: ((data.classes || []).find((c) => c.id === "sorcerer") || {}).level || 2, recharge: "long" };
     if (/^Мистический арканум: /.test(f.name || "")) return { max: 1, recharge: "long" };
     if (/^Мистический мастер$/i.test(f.name || "")) return { max: 1, recharge: "long" };
@@ -5850,6 +5919,10 @@ export async function renderSheet(id) {
   // Уровни заклинаний подкласса: domainSpells, а у Круга земли — по выбранной местности.
   function subclassGrantedTiers(sub) {
     if (sub && sub.terrainSpells) return (data.landTerrain && sub.terrainSpells[data.landTerrain]) || [];
+    if (sub && sub.slug === "divine-soul") {
+      const aff = DIVINE_AFFINITIES.find((a) => a.name === data.divineAffinity);
+      return aff ? [{ level: 1, spells: [aff.spell] }] : [];
+    }
     return (sub && sub.domainSpells) || [];
   }
   function oathSpellIdSet() {
@@ -5866,7 +5939,7 @@ export async function renderSheet(id) {
   }
   function spellCardControlHtml(sp, prepCtx) {
     if (oathSpellIdSet().has(sp.id)) {
-      return `<span class="spell-card-badge spell-card-badge-domain" title="Заклинание клятвы — всегда подготовлено, не занимает место среди подготовленных">дар клятвы</span>`;
+      return `<span class="spell-card-badge spell-card-badge-domain" title="Заклинание подкласса — всегда подготовлено, не занимает место среди подготовленных">дар подкласса</span>`;
     }
     const grantSrc = spellGrantSource(sp.id);
     if (grantSrc) {
@@ -6013,7 +6086,7 @@ export async function renderSheet(id) {
     import("../data/beasts.js")
       .then((m) => { beastsData = m.BEASTS; })
       .catch(() => { beastsData = []; })
-      .finally(() => { beastsLoading = false; if (activeTab === "forms") render(); });
+      .finally(() => { beastsLoading = false; if (activeTab === "forms" || activeTab === "pets") render(); });
   }
   function beastCrNum(cr) {
     const s = String(cr || "0");
@@ -6834,6 +6907,9 @@ export async function renderSheet(id) {
                   const isSurge = /^(Всплеск дикости|Нестабильная отдача)$/i.test(f.name || "");
                   const isTales = /^Истории с того света$/i.test(f.name || "");
                   const isDragonPick = f.name === "Драконий предок" && /драконьей/i.test(f.source || "");
+                  const isDivineMagic = f.name === "Божественная магия" && /божествен/i.test(f.source || "");
+                  const isLunar = f.name === "Лунное воплощение";
+                  const isGrave = f.name === "Сила могилы";
                   const isFlex = /^Исток магии$/i.test(f.name || "") && /Чародей/i.test(f.source || "");
                   // Школа Прорицания «Знамение»: 2к20 (3к20 с «Великого знамения»); значения хранятся на карточке до следующего броска.
                   const isStormAura = /^Аура бури(?::|$)/.test(f.name || "") && /буревестник/i.test(f.source || "");
@@ -6884,7 +6960,7 @@ export async function renderSheet(id) {
                   const interventionBtn = isIntervention
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="1d100" data-label="Божественное вмешательство (успех, если выпало ${clericLevelNow} или меньше)">🎲 Бросить к100</button>`
                     : "";
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isTales && !isFlex && !isDragonPick && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isTales && !isFlex && !isDragonPick && !isDivineMagic && !isLunar && !isGrave && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -6910,9 +6986,10 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isTales ? `<button class="small feature-card-roll" data-action="open-tales-table" title="Открыть таблицу «Истории духов» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isDragonPick ? `<select data-dragon-pick title="Наследие драконьей крови" style="flex:none;width:auto;"><option value="">Выберите предка…</option>${DRAGON_ANCESTRIES.map((d) => `<option value="${d.name}">${d.name} (${d.damage})</option>`).join("")}</select>` : ""}${isFlex ? `<button class="small feature-card-roll" data-action="open-flex-casting" title="Обменять очки чародейства на ячейки и обратно">🔁 Очки ↔ ячейки</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isTales ? `<button class="small feature-card-roll" data-action="open-tales-table" title="Открыть таблицу «Истории духов» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isDivineMagic ? `<select data-divine-affinity title="Склонность" style="flex:none;width:auto;"><option value="">${data.divineAffinity ? "Сменить склонность…" : "Выберите склонность…"}</option>${DIVINE_AFFINITIES.filter((a) => a.name !== data.divineAffinity).map((a) => `<option value="${a.name}">${a.name} (${(SPELLS.find((x) => x.id === a.spell) || {}).name || ""})</option>`).join("")}</select>${data.divineAffinity ? `<span class="muted">Склонность: ${escapeHtml(data.divineAffinity)}</span>` : ""}` : ""}${isLunar ? lunarPhaseControlsHtml() : ""}${isGrave ? graveControlsHtml() : ""}${isDragonPick ? `<select data-dragon-pick title="Наследие драконьей крови" style="flex:none;width:auto;"><option value="">Выберите предка…</option>${DRAGON_ANCESTRIES.map((d) => `<option value="${d.name}">${d.name} (${d.damage})</option>`).join("")}</select>` : ""}${isFlex ? `<button class="small feature-card-roll" data-action="open-flex-casting" title="Обменять очки чародейства на ячейки и обратно">🔁 Очки ↔ ячейки</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
+              ${featureSpellPreviewHtml(f)}
             </div>`
             )
             .join("")}
@@ -6977,23 +7054,115 @@ export async function renderSheet(id) {
       </div>`;
   }
 
+  // ---- Спутники и существа: карточки со статами, как в «Обликах» -------------------------------
+  function petMaxHp(p) { return parseInt(p.hp, 10) || 0; }
+  function petCardHtml(p, i) {
+    const max = petMaxHp(p);
+    const cur = p.hpCur == null ? max : Number(p.hpCur) || 0;
+    const actions = `
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;">
+        <label class="muted" style="font-size:0.82rem;">Хиты <input type="number" data-pet-num="hpCur" data-pet-index="${i}" value="${cur}" style="width:64px;" /> / ${max || "—"}</label>
+        <label class="muted" style="font-size:0.82rem;">Врем. хиты <input type="number" min="0" data-pet-num="tempHp" data-pet-index="${i}" value="${Number(p.tempHp) || 0}" style="width:56px;" /></label>
+      </div>
+      <textarea data-pet-field="desc" data-pet-index="${i}" rows="2" placeholder="Заметки" style="margin-top:6px;">${escapeHtml(p.desc || "")}</textarea>
+      <div class="row" style="gap:8px;margin-top:6px;">
+        <button class="small" data-action="edit-pet" data-index="${i}">✎ Изменить статы</button>
+        <button class="small danger" data-action="remove-pet" data-index="${i}">✕ Удалить</button>
+      </div>`;
+    return beastCardHtml({ ...p, id: `pet-${i}`, name: p.name || "Без имени", sta: p.sta || "Существо", cr: p.cr || "—" }, actions, { active: true });
+  }
   function petsTab() {
+    ensureCompanions();
+    const pets = data.pets || [];
     return `
       <div class="panel">
-        <div class="row between"><h2 style="margin:0;">Спутники и питомцы</h2><button class="small" data-action="add-pet">+ Спутник</button></div>
-        ${(data.pets || [])
-          .map(
-            (p, i) => `
-          <div class="card" style="margin-bottom:8px;">
-            <div class="row between">
-              <input type="text" data-pet-field="name" data-pet-index="${i}" value="${escapeHtml(p.name)}" placeholder="Имя" style="font-weight:bold;flex:1;" />
-              <button class="small danger" data-action="remove-pet" data-index="${i}">✕</button>
-            </div>
-            <textarea data-pet-field="desc" data-pet-index="${i}" rows="2" placeholder="Статы/описание">${escapeHtml(p.desc || "")}</textarea>
-          </div>`
-          )
-          .join("")}
+        <div class="row between" style="flex-wrap:wrap;gap:8px;">
+          <h2 style="margin:0;">Спутники и питомцы</h2>
+          <div class="row" style="gap:8px;"><button class="small" data-action="add-pet">+ Своё существо</button><button class="small" data-action="browse-pet-beasts">+ Зверь из списка</button></div>
+        </div>
+        ${pets.length ? `<div class="spell-cards" style="margin-top:12px;">${pets.map(petCardHtml).join("")}</div>` : `<p class="muted">Спутников пока нет.</p>`}
       </div>`;
+  }
+  // Спутники, которых дают умения: добавляются автоматически (один раз по ключу).
+  const COMPANION_FEATURES = [
+    { key: "hound-of-ill-omen", feature: "Гончая дурного знамения", beastEn: "Dire wolf", make: (b, lvl) => ({
+      name: "Гончая дурного знамения", sta: "Средний Монстр, без мировоззрения", tempHp: Math.floor(lvl / 2),
+      desc: "Вызывается бонусным действием за 3 очка чародейства (цель в 120 футах). Врем. хиты = половина уровня чародея. Проходит сквозь существ и объекты как через труднопроходимую местность; 5 силового урона, если ход закончен внутри объекта. Появляется в пределах 30 футов от цели, бросает инициативу; в свой ход только движется к цели и атакует её. Цель в пределах 5 футов от гончей совершает с помехой спасброски против ваших заклинаний. Длится 1 минуту, пока гончая или цель не умрут или вы не отпустите её.",
+    }) },
+  ];
+  function ensureCompanions() {
+    if (!Array.isArray(data.pets)) data.pets = [];
+    let changed = false;
+    COMPANION_FEATURES.forEach((cf) => {
+      if (!(data.features || []).some((f) => f.name === cf.feature)) return;
+      if (data.pets.some((p) => p.key === cf.key)) return;
+      if (!beastsData) { ensureBeastsLoaded(); return; }
+      const base = beastsData.find((b) => b.en === cf.beastEn);
+      if (!base) return;
+      const lvl = ((data.classes || []).find((c) => c.id === "sorcerer") || {}).level || 6;
+      data.pets.push({ ...JSON.parse(JSON.stringify(base)), ...cf.make(base, lvl), key: cf.key, hpCur: parseInt(base.hp, 10) || 0 });
+      changed = true;
+    });
+    if (changed) doSave();
+    return changed;
+  }
+  const PET_ABIL = [["Сил", "str"], ["Лов", "dex"], ["Тел", "con"], ["Инт", "int"], ["Мдр", "wis"], ["Хар", "cha"]];
+  function petLinesToItems(txt) {
+    return String(txt || "").split(/\n+/).map((l) => l.trim()).filter(Boolean).map((l) => {
+      const m = l.match(/^([^.]{1,60})\.\s+(.*)$/);
+      return m ? { n: m[1], t: m[2] } : { n: "", t: l };
+    });
+  }
+  function petItemsToLines(items) { return (items || []).map((x) => (x.n ? `${x.n}. ${x.t}` : x.t)).join("\n"); }
+  function openPetEditor(index) {
+    const p = index == null ? {} : data.pets[index];
+    const abilVals = PET_ABIL.map(([lab], k) => {
+      const m = String((p.abil || [])[k] || "").match(/(\d+)/);
+      return m ? m[1] : "10";
+    });
+    const actionsSec = (p.sections || []).find((sc) => /Действия/i.test(sc.title)) || { items: [] };
+    const otherSecs = (p.sections || []).filter((sc) => sc !== actionsSec);
+    const f = (label, key, val, w) => `<label style="flex:${w || 1};min-width:120px;"><span class="muted" style="font-size:0.8rem;">${label}</span><input type="text" data-pe="${key}" value="${escapeHtml(val || "")}" /></label>`;
+    const modal = openModal(`
+      <h3>${index == null ? "Новое существо" : "Статы: " + escapeHtml(p.name || "")}</h3>
+      <div class="row" style="gap:8px;flex-wrap:wrap;">${f("Имя", "name", p.name, 2)}${f("Тип и размер", "sta", p.sta, 2)}${f("Опасность", "cr", p.cr)}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;">${f("Класс доспеха", "ac", p.ac)}${f("Хиты (напр. 37 (5к10+10))", "hp", p.hp)}${f("Скорость", "speed", p.speed)}</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px;">${PET_ABIL.map(([lab], k) => `<label style="width:64px;"><span class="muted" style="font-size:0.8rem;">${lab}</span><input type="number" data-pe-abil="${k}" value="${abilVals[k]}" /></label>`).join("")}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;">${f("Чувства", "senses", p.senses, 2)}</div>
+      <label style="display:block;margin-top:6px;"><span class="muted" style="font-size:0.8rem;">Особенности (по строке: «Название. Текст»)</span><textarea data-pe="traits" rows="3">${escapeHtml(petItemsToLines(p.traits))}</textarea></label>
+      <label style="display:block;margin-top:6px;"><span class="muted" style="font-size:0.8rem;">Действия (по строке: «Название. Текст», для атаки пишите «+5 к попаданию … Попадание: 2к6+3 колющего»)</span><textarea data-pe="actions" rows="4">${escapeHtml(petItemsToLines(actionsSec.items))}</textarea></label>
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-top:10px;"><button type="button" data-action="close-modal">Отмена</button><button type="button" class="primary" data-action="save-pet-edit">Сохранить</button></div>`, { wide: true });
+    on(modal, "click", "[data-action=close-modal]", closeModal);
+    on(modal, "click", "[data-action=save-pet-edit]", () => {
+      const g = (k) => modal.querySelector(`[data-pe="${k}"]`).value.trim();
+      if (!g("name")) { modal.querySelector('[data-pe="name"]').focus(); return; }
+      const abil = PET_ABIL.map(([lab], k) => { const v = Number(modal.querySelector(`[data-pe-abil="${k}"]`).value) || 10; const mod = Math.floor((v - 10) / 2); return `${lab}${v} (${mod >= 0 ? "+" : ""}${mod})`; });
+      const sections = [...otherSecs];
+      const acts = petLinesToItems(g("actions"));
+      if (acts.length) sections.unshift({ title: "Действия", items: acts });
+      const np = { ...p, name: g("name"), sta: g("sta"), cr: g("cr"), ac: g("ac"), hp: g("hp"), speed: g("speed"), senses: g("senses"), abil, traits: petLinesToItems(g("traits")), sections };
+      if (np.hpCur == null) np.hpCur = petMaxHp(np);
+      if (index == null) data.pets.push(np); else data.pets[index] = np;
+      closeModal(); doSave(); render();
+    });
+  }
+  function openPetBeastBrowser() {
+    const modal = openModal(`<h3>Зверь из списка</h3><input type="text" data-pb-q placeholder="Поиск по названию…" style="width:100%;margin-bottom:8px;" /><div data-pb-list class="muted">Загрузка…</div><div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" data-action="close-modal">Закрыть</button></div>`, { wide: true });
+    on(modal, "click", "[data-action=close-modal]", closeModal);
+    const paint = () => {
+      const q = modal.querySelector("[data-pb-q]").value.trim().toLowerCase();
+      const list = (beastsData || []).filter((b) => !q || b.name.toLowerCase().includes(q) || (b.en || "").toLowerCase().includes(q)).slice(0, 60);
+      modal.querySelector("[data-pb-list]").innerHTML = list.length ? list.map((b) => `<div class="row between" style="padding:4px 0;border-bottom:1px solid var(--border,#ccc3);"><span>${escapeHtml(b.name)} <span class="muted">· ${escapeHtml(b.cr)} · ${escapeHtml(b.sta || "")}</span></span><button class="small primary" data-pb-add="${b.id}">+ Добавить</button></div>`).join("") : "Ничего не найдено.";
+    };
+    const go = () => paint();
+    if (beastsData) go(); else import("../data/beasts.js").then((m) => { beastsData = m.BEASTS; go(); }).catch(() => { modal.querySelector("[data-pb-list]").textContent = "Не удалось загрузить список."; });
+    on(modal, "input", "[data-pb-q]", paint);
+    on(modal, "click", "[data-pb-add]", (e, el) => {
+      const b = (beastsData || []).find((x) => String(x.id) === el.dataset.pbAdd);
+      if (!b) return;
+      data.pets.push({ ...JSON.parse(JSON.stringify(b)), hpCur: parseInt(b.hp, 10) || 0 });
+      closeModal(); doSave(); render();
+    });
   }
 
   // ---------- wiring (delegated on #app, attached once) ----------
@@ -8390,6 +8559,26 @@ export async function renderSheet(id) {
   on(app, "click", "[data-action=open-wild-table]", () => openWildMagicTable());
   on(app, "click", "[data-action=open-tales-table]", () => openSpiritTalesTable());
   on(app, "click", "[data-action=open-flex-casting]", () => openFlexibleCasting());
+  on(app, "change", "[data-divine-affinity]", (e, el) => {
+    const a = DIVINE_AFFINITIES.find((x) => x.name === el.value);
+    if (!a) return;
+    data.divineAffinity = a.name;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=set-lunar-phase]", (e, el) => { data.lunarPhase = el.dataset.phase; doSave(); render(); });
+  on(app, "input", "[data-grave-damage]", (e, el) => {
+    graveDamage = Math.max(0, Number(el.value) || 0);
+    const dcEl = el.closest(".feature-card-uses").querySelector("[data-grave-dc]");
+    if (dcEl) dcEl.textContent = `Сл ${5 + graveDamage}`;
+  });
+  on(app, "click", "[data-action=roll-grave-save]", () => {
+    const mod = getAbilityMod(data, "cha");
+    const r = rollDice(1, 20)[0];
+    const total = r + mod;
+    const dc = 5 + graveDamage;
+    showRollResult({ label: `Сила могилы: спасбросок Харизмы (Сл ${dc})`, detail: `к20: [${r}] ${formatModifier(mod)} = ${total} — ${total >= dc ? "успех: остаётесь с 1 хитом" : "провал"}`, total, breakdown: [{ value: r, label: "к20" }, { value: mod, label: "модификатор Харизмы" }] });
+  });
   on(app, "change", "[data-dragon-pick]", (e, el) => {
     const da = DRAGON_ANCESTRIES.find((d) => d.name === el.value);
     const card = (data.features || []).find((f) => f.name === "Драконий предок" && /драконьей/i.test(f.source || ""));
@@ -8538,11 +8727,9 @@ export async function renderSheet(id) {
   });
 
   // pets
-  on(app, "click", "[data-action=add-pet]", () => {
-    data.pets.push({ name: "", desc: "" });
-    doSave();
-    render();
-  });
+  on(app, "click", "[data-action=add-pet]", () => openPetEditor(null));
+  on(app, "click", "[data-action=edit-pet]", (e, el) => openPetEditor(Number(el.dataset.index)));
+  on(app, "click", "[data-action=browse-pet-beasts]", () => openPetBeastBrowser());
   on(app, "click", "[data-action=remove-pet]", (e, el) => {
     data.pets.splice(Number(el.dataset.index), 1);
     doSave();
@@ -8551,6 +8738,11 @@ export async function renderSheet(id) {
   on(app, "input", "[data-pet-field]", (e, el) => {
     const i = Number(el.dataset.petIndex);
     data.pets[i][el.dataset.petField] = el.value;
+    doSave();
+  });
+  on(app, "change", "[data-pet-num]", (e, el) => {
+    const i = Number(el.dataset.petIndex);
+    data.pets[i][el.dataset.petNum] = Math.max(el.dataset.petNum === "tempHp" ? 0 : -999, Number(el.value) || 0);
     doSave();
   });
 

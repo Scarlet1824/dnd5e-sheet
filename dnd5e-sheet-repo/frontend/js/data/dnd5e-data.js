@@ -13978,7 +13978,7 @@ export const WILD_MAGIC_SURGE_TABLE = [
       3: ["Монастырская традиция", "Отражение снарядов (реакцией уменьшить урон от дальнобойной атаки)"],
       4: ["Черта или увеличение характеристик", "Медленное падение (реакцией уменьшить урон от падения)"],
       5: ["Дополнительная атака", "Ошеломляющий удар", "Боевые искусства (кость к6)"],
-      6: ["Умение архетипа", "Удары, усиленные ци", "Безоружное перемещение (+15 футов)"],
+      6: ["Умение архетипа", "Энергетические удары", "Безоружное перемещение (+15 футов)"],
       7: ["Уклонение", "Спокойствие разума"],
       8: ["Черта или увеличение характеристик"],
       9: ["Безоружное перемещение (можно бегать по вертикальным поверхностям и жидкостям)"],
@@ -14002,7 +14002,7 @@ export const WILD_MAGIC_SURGE_TABLE = [
       "Медленное падение": "Начиная с 4-го уровня, вы можете реакцией уменьшить урон от падения на количество, равное пятикратному вашему уровню монаха.",
       "Дополнительная атака": "Начиная с 5-го уровня, вы можете атаковать дважды вместо одного раза, когда в свой ход совершаете действие Атака.",
       "Ошеломляющий удар": "Начиная с 5-го уровня, вы можете прервать поток ци в теле противника. Когда вы попадаете по другому существу атакой рукопашным оружием, вы можете потратить 1 очко ци, чтобы совершить ошеломляющий удар. Цель должна преуспеть в спасброске Телосложения, иначе она ошеломлена до конца вашего следующего хода.",
-      "Удары, усиленные ци": "Начиная с 6-го уровня, ваши безоружные удары считаются магическими для преодоления сопротивления и иммунитета к немагическим атакам и урону.",
+      "Энергетические удары": "Начиная с 6-го уровня, ваши безоружные удары считаются магическими для преодоления сопротивления и иммунитета к немагическим атакам и урону.",
       "Уклонение": "Начиная с 7-го уровня, ваша инстинктивная ловкость позволяет вам уклоняться от некоторых эффектов области действия, например, от дыхания синего дракона или заклинания «огненный шар». Когда вы совершаете спасбросок Ловкости, чтобы уменьшить урон вдвое, вы вместо этого не получаете урона при успехе и получаете половину урона при провале.",
       "Спокойствие разума": "Начиная с 7-го уровня, вы можете действием закончить на себе один эффект, вызывающий состояние «очарованный» или «испуганный».",
       "Чистота тела": "На 10-м уровне ваше мастерство над ци даёт вам иммунитет к болезням и яду.",
@@ -14345,3 +14345,32 @@ export const DRAGON_ANCESTRIES = [
   { name: "Бронзовый", damage: "электричество" }, { name: "Медный", damage: "кислота" }, { name: "Золотой", damage: "огонь" },
   { name: "Зелёный", damage: "яд" }, { name: "Красный", damage: "огонь" }, { name: "Серебряный", damage: "холод" }, { name: "Белый", damage: "холод" },
 ];
+
+// Раунд 76: чародей — заклинания подклассов (всегда известны, в лимит не входят), список жреца для Божественной души, склонность.
+export const DIVINE_AFFINITIES = [
+  { name: "Добро", spell: "cure-wounds" }, { name: "Зло", spell: "inflict-wounds" }, { name: "Закон", spell: "bless" },
+  { name: "Хаос", spell: "bane" }, { name: "Нейтралитет", spell: "protection-from-evil-and-good" },
+];
+// Лунное чародейство: фаза → бесплатное заклинание 1-го круга («Лунное воплощение»).
+export const LUNAR_PHASES = [
+  { name: "Полнолуние", spell: "shield", spells: ["shield", "lesser-restoration", "dispel-magic", "death-ward", "rarys-telepathic-bond"] },
+  { name: "Новолуние", spell: "ray-of-sickness", spells: ["ray-of-sickness", "blindnessdeafness", "vampiric-touch", "confusion", "hold-monster"] },
+  { name: "Полумесяц", spell: "color-spray", spells: ["color-spray", "alter-self", "phantom-steed", "hallucinatory-terrain", "mislead"] },
+];
+(function patchSorcererSubclasses76() {
+  const sorc = CLASSES.find((c) => c.id === "sorcerer");
+  if (!sorc) return;
+  const sub = (slug) => (sorc.subclasses || []).find((x) => x.slug === slug);
+  const tiers = (arr) => arr.map(([level, spells]) => ({ level, spells }));
+  const ab = sub("aberrant-mind");
+  if (ab) ab.domainSpells = tiers([[1, ["arms-of-hadar", "dissonant-whispers", "mind-sliver"]], [3, ["calm-emotions", "detect-thoughts"]], [5, ["hunger-of-hadar", "sending"]], [7, ["evards-black-tentacles", "summon-aberration"]], [9, ["rarys-telepathic-bond", "telekinesis"]]]);
+  const cw = sub("clockwork-soul");
+  if (cw) cw.domainSpells = tiers([[1, ["alarm", "protection-from-evil-and-good"]], [3, ["aid", "lesser-restoration"]], [5, ["dispel-magic", "protection-from-energy"]], [7, ["freedom-of-movement", "summon-construct"]], [9, ["greater-restoration", "wall-of-force"]]]);
+  const lu = sub("lunar-sorcery");
+  if (lu) lu.domainSpells = tiers([
+    [1, ["sacred-flame", ...LUNAR_PHASES.map((p) => p.spells[0])]], [3, LUNAR_PHASES.map((p) => p.spells[1])], [5, LUNAR_PHASES.map((p) => p.spells[2])],
+    [7, LUNAR_PHASES.map((p) => p.spells[3])], [9, LUNAR_PHASES.map((p) => p.spells[4])],
+  ]);
+  const ds = sub("divine-soul");
+  if (ds) ds.expandedSpells = SPELLS.filter((sp) => (sp.classes || []).includes("cleric")).map((sp) => sp.id);
+})();
