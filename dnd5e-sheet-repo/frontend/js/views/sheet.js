@@ -4880,6 +4880,47 @@ export async function renderSheet(id) {
     doSave();
     return true;
   }
+  // ---- Стихийные практики монаха: применение с дополнительными очками ци ------------------------------------
+  // ki — базовая стоимость; spell — заклинание (level — его базовый круг, upcast — усиливается очками ци);
+  // dmg — практика с уроном, растущим на 1к10 за каждое дополнительное очко ци.
+  const DISCIPLINE_META = {
+    "Водяной кнут": { ki: 2, dmg: { base: "3d10", add: "1d10", type: "дробящий" } },
+    "Несокрушимый воздушный кулак": { ki: 2, dmg: { base: "3d10", add: "1d10", type: "дробящий" } },
+    "Зубы огненной змеи": { ki: 1, dmg: { base: "", add: "1d10", type: "огнём (за каждое доп. очко — +1к10 к одному попаданию)" } },
+    "Испепеляющий удар": { ki: 2, spell: { name: "огненные ладони", level: 1, upcast: true } },
+    "Кулак четырёх громов": { ki: 2, spell: { name: "волна грома", level: 1, upcast: true } },
+    "Натиск штормовых духов": { ki: 2, spell: { name: "порыв ветра", level: 2, upcast: false } },
+    "Гонг на вершине горы": { ki: 3, spell: { name: "дребезги", level: 2, upcast: true } },
+    "Объятья северного ветра": { ki: 3, spell: { name: "удержание личности", level: 2, upcast: true } },
+    "Осёдланный ветер": { ki: 4, spell: { name: "полёт", level: 3, upcast: true } },
+    "Пламя феникса": { ki: 4, spell: { name: "огненный шар", level: 3, upcast: true } },
+    "Туманная стойка": { ki: 4, spell: { name: "газообразная форма", level: 3, upcast: false } },
+    "Прочность вечных гор": { ki: 5, spell: { name: "каменная кожа", level: 4, upcast: false } },
+    "Река голодного пламени": { ki: 5, spell: { name: "огненная стена", level: 4, upcast: true } },
+    "Дыхание зимы": { ki: 6, spell: { name: "конус холода", level: 5, upcast: true } },
+    "Земляной вал": { ki: 6, spell: { name: "каменная стена", level: 5, upcast: false } },
+    "Формирование текущей реки": { ki: 1 },
+  };
+  function disciplineMetaFor(f) {
+    const m = /^Практика: (.+)$/.exec((f && f.name) || "");
+    return m ? DISCIPLINE_META[m[1]] || null : null;
+  }
+  function monkLevelNow() { return ((data.classes || []).find((c) => c.id === "monk") || {}).level || 0; }
+  function disciplineKiCap() { const L = monkLevelNow(); return L >= 17 ? 7 : L >= 13 ? 6 : L >= 9 ? 5 : L >= 5 ? 4 : 3; }
+  function disciplineMaxExtra(meta) {
+    const canExtra = !!(meta.dmg || (meta.spell && meta.spell.upcast));
+    return canExtra ? Math.max(0, disciplineKiCap() - meta.ki) : 0;
+  }
+  function kiCard() { return (data.features || []).find((x) => /^Ци$/i.test(x.name || "") && /Монах/i.test(x.source || "")) || null; }
+  function disciplineControlsHtml(f, i) {
+    const meta = disciplineMetaFor(f);
+    if (!meta) return "";
+    const maxExtra = disciplineMaxExtra(meta);
+    const extra = Math.min(Number(f.discExtra) || 0, maxExtra);
+    const total = meta.ki + extra;
+    const eff = meta.spell && meta.spell.upcast && extra ? ` — как заклинание ${meta.spell.level + extra}-го круга` : "";
+    return `${maxExtra ? `<label class="muted" style="font-size:0.82rem;">Доп. очки ци: <select data-action="discipline-extra" data-index="${i}" style="width:auto;">${Array.from({ length: maxExtra + 1 }, (_, n) => `<option value="${n}" ${n === extra ? "selected" : ""}>${n}</option>`).join("")}</select></label>` : ""}<button class="small feature-card-roll" data-action="cast-discipline" data-index="${i}" title="Списывает очки ци с карточки «Ци»">✨ Применить: ${total} ци${escapeHtml(eff)}</button>`;
+  }
   function resolveFeatureUses(f) {
     // Способности Пси-воина (отдельные карточки) тратят кости «Псионической силы», своих счётчиков у них нет.
     if (/^(Защитное поле|Псионический удар|Телекинетическое передвижение)$/i.test(f.name || "") && /Пси-воин/i.test(f.source || "")) return null;
@@ -6408,12 +6449,13 @@ export async function renderSheet(id) {
                   // directly (see the matching comment there).
                   const isBladesong = /^Песнь клинка$/i.test(f.name || "");
                   const bladesongActive = isBladesong && !!data.bladesongActive;
+                  const disciplineMeta = disciplineMetaFor(f);
                   const isIntervention = /^Божественное вмешательство$/i.test(f.name || "");
                   const clericLevelNow = ((data.classes || []).find((c) => c.id === "cleric") || {}).level || 0;
                   const interventionBtn = isIntervention
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="1d100" data-label="Божественное вмешательство (успех, если выпало ${clericLevelNow} или меньше)">🎲 Бросить к100</button>`
                     : "";
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura && !isIntervention) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura && !isIntervention && !disciplineMeta) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -6439,7 +6481,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -7940,6 +7982,37 @@ export async function renderSheet(id) {
     const dis = exhaustionDisadvantage("attack");
     const r = rollD20({ modifier: bonus, mode: dis ? "disadvantage" : "normal" });
     showRollResult({ label: "Атака заклинанием", detail: dis ? `к20: [${r.first}, ${r.second}] → взято ${r.picked} ${formatModifier(bonus)} (помеха: ${dis})` : `к20: [${r.first}] ${formatModifier(bonus)}`, total: r.total, isCrit: r.isCrit, isFumble: r.isFumble });
+  });
+  on(app, "change", "[data-action=discipline-extra]", (e, el) => {
+    const f = data.features[Number(el.dataset.index)];
+    if (!f) return;
+    f.discExtra = Number(el.value) || 0;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=cast-discipline]", (e, el) => {
+    const f = data.features[Number(el.dataset.index)];
+    const meta = disciplineMetaFor(f);
+    if (!meta) return;
+    const extra = Math.min(Number(f.discExtra) || 0, disciplineMaxExtra(meta));
+    const cost = meta.ki + extra;
+    const ki = kiCard();
+    const uses = ki && resolveFeatureUses(ki);
+    if (!ki || !uses || !(uses.max > 0)) { showRollResult({ label: f.name, detail: "Нет карточки «Ци» — очки ци не списаны.", total: `${cost} ци` }); return; }
+    const arr = usesArrayFor(ki, uses.max);
+    if (arr.filter(Boolean).length < cost) { showRollResult({ label: f.name, detail: `Недостаточно очков ци: нужно ${cost}, осталось ${arr.filter(Boolean).length}.`, total: "—" }); return; }
+    for (let n = 0; n < cost; n++) { const j = arr.lastIndexOf(true); if (j >= 0) arr[j] = false; }
+    setFeatureUsesState(ki, arr);
+    doSave();
+    let detail = `Потрачено очков ци: ${cost}.`;
+    let total = `${cost} ци`;
+    if (meta.spell) detail += ` Заклинание «${meta.spell.name}»${meta.spell.upcast && extra ? ` как заклинание ${meta.spell.level + extra}-го круга` : ""}, без материальных компонентов.`;
+    if (meta.dmg) {
+      const expr = meta.dmg.base ? `${meta.dmg.base}${extra ? `+${extra}d10` : ""}` : (extra ? `${extra}d10` : "");
+      if (expr) { const r = rollExpr(expr); detail += ` Урон ${toCyrillicDice(expr)} (${meta.dmg.type}): ${r.rolls.join("+")}.`; total = `${r.total} урона`; }
+    }
+    showRollResult({ label: f.name, detail, total });
+    render();
   });
   on(app, "click", "[data-action=roll-feature-expr]", (e, el) => {
     const expr = el.dataset.expr;
