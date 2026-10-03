@@ -2,7 +2,7 @@ import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeMod
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, SPIRIT_TALES_TABLE, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, SPIRIT_TALES_TABLE, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS, DRAGON_ANCESTRIES } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -582,6 +582,18 @@ export async function renderSheet(id) {
     });
     if (changed) doSave();
   })();
+  (function migrateRound75() {
+    let changed = false;
+    const before = (data.features || []).length;
+    data.features = (data.features || []).filter((f) => !(/Чародей/i.test(f.source || "") && /^Метамагия \(\d+ ур\.\)$/.test(f.name || "")));
+    if (data.features.length !== before) changed = true;
+    if ((data.features || []).some((f) => /^Драконий предок/.test(f.name || "") && /драконьей/i.test(f.source || ""))) {
+      if (!data.proficiencies) data.proficiencies = {};
+      if (!Array.isArray(data.proficiencies.languages)) data.proficiencies.languages = [];
+      if (!data.proficiencies.languages.includes("Драконий")) { data.proficiencies.languages.push("Драконий"); changed = true; }
+    }
+    if (changed) doSave();
+  })();
   const EMPTY_DESC_FEATURE_FIXES = ["Избранный враг", "Исследователь природы"];
   (function migrateEmptyRangerFeatureText() {
     let changed = false;
@@ -975,6 +987,16 @@ export async function renderSheet(id) {
       setFeatureUsesState(f, Array(uses.max).fill(true));
     });
   }
+  // Ячейки, созданные «Гибким колдовством», пропадают после продолжительного отдыха.
+  function dropCreatedSlots() {
+    const sc = data.spellcasting;
+    if (!sc || !sc.createdSlots) return;
+    Object.keys(sc.createdSlots).forEach((c) => {
+      sc.slots[c] = Math.max(0, (Number(sc.slots[c]) || 0) - (sc.createdSlots[c] || 0));
+      if (Array.isArray(sc.slotsFilled && sc.slotsFilled[c])) sc.slotsFilled[c] = sc.slotsFilled[c].slice(0, sc.slots[c]);
+    });
+    sc.createdSlots = {};
+  }
   // Refills every spell-slot circle at every level that currently has slots.
   function restoreAllSpellSlots() {
     const sc = data.spellcasting;
@@ -1100,6 +1122,7 @@ export async function renderSheet(id) {
     const diceGained = diceAfter - hd.current;
     data.hitDice.current = diceAfter;
     restoreFeatureUses(["short", "long", "any"]);
+    dropCreatedSlots();
     restoreAllSpellSlots();
     const luckyEntry = (data.feats || []).find((f) => f.id === LUCKY_FEAT_ID);
     if (luckyEntry) luckyEntry.luckyUsed = [false, false, false];
@@ -1625,7 +1648,7 @@ export async function renderSheet(id) {
     const pactEntry = (data.classes || []).find((x) => getClass(x.id)?.spellcasting?.pact);
     const pact = pactEntry ? pactSlotsAt(pactEntry.level || 1) : null;
     for (let circle = 1; circle <= 9; circle++) {
-      data.spellcasting.slots[circle] = (table[circle - 1] || 0) + (pact && pact.circle === circle ? pact.count : 0);
+      data.spellcasting.slots[circle] = (table[circle - 1] || 0) + (pact && pact.circle === circle ? pact.count : 0) + ((data.spellcasting.createdSlots || {})[circle] || 0);
     }
   }
   // Champion's "Дополнительный боевой стиль" (10th level: pick a SECOND
@@ -2256,6 +2279,74 @@ export async function renderSheet(id) {
       if (hit && hit.scrollIntoView) hit.scrollIntoView({ block: "nearest" });
       pushRollLog({ label: "Истории духов", detail: `к${sides}: [${r}]${row ? ` — ${row.name}` : ""}`, total: r });
       document.dispatchEvent(new CustomEvent("dnd5e:roll-logged"));
+    });
+  }
+  // Чародей «Гибкое колдовство» (Исток магии): окно обмена очков чародейства на ячейки заклинаний и обратно.
+  const FLEX_SLOT_COST = { 1: 2, 2: 3, 3: 5, 4: 6, 5: 7 };
+  function sorceryPointsFeature() {
+    return (data.features || []).find((x) => /^Исток магии$/i.test(x.name || "") && /Чародей/i.test(x.source || ""));
+  }
+  function openFlexibleCasting() {
+    const f = sorceryPointsFeature();
+    if (!f) return;
+    const modal = openModal(`<div data-flex-body></div>`, { wide: true });
+    const body = modal.querySelector("[data-flex-body]");
+    const paint = (msg) => {
+      const uses = resolveFeatureUses(f);
+      const max = uses ? uses.max : 0;
+      const arr = usesArrayFor(f, max);
+      const pts = arr.filter(Boolean).length;
+      const sc = data.spellcasting || {};
+      const rows = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter((c) => (Number((sc.slots || {})[c]) || 0) > 0 || FLEX_SLOT_COST[c]).map((c) => {
+        const slotMax = Number((sc.slots || {})[c]) || 0;
+        const avail = slotMax ? spellSlotsArrayFor(sc, c).filter(Boolean).length : 0;
+        const cost = FLEX_SLOT_COST[c];
+        return `<tr><td>${c}-й круг</td><td>${avail} / ${slotMax}</td>
+          <td>${cost ? `<button type="button" class="small" data-flex-create="${c}" ${pts < cost ? "disabled" : ""}>+ ячейка за ${cost} оч.</button>` : `<span class="muted">—</span>`}</td>
+          <td><button type="button" class="small" data-flex-burn="${c}" ${avail < 1 || pts >= max ? "disabled" : ""}>ячейка → +${c} оч.</button></td></tr>`;
+      }).join("");
+      body.innerHTML = `
+        <h3>Гибкое колдовство</h3>
+        <p class="muted" style="margin:0 0 8px;">Бонусным действием: потратьте очки чародейства, чтобы создать ячейку (не выше 5-го круга), или потратьте ячейку, чтобы получить очки, равные её кругу. Созданные ячейки исчезают после продолжительного отдыха.</p>
+        <p style="margin:0 0 8px;"><strong>Очки чародейства: ${pts} / ${max}</strong></p>
+        ${msg ? `<p class="muted" style="margin:0 0 8px;">${escapeHtml(msg)}</p>` : ""}
+        <table class="table" style="width:100%;"><thead><tr><th>Круг</th><th>Ячейки (есть / всего)</th><th>Очки → ячейка</th><th>Ячейка → очки</th></tr></thead><tbody>${rows}</tbody></table>
+        <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" data-action="close-modal">Закрыть</button></div>`;
+    };
+    const setPoints = (n) => {
+      const uses = resolveFeatureUses(f);
+      const max = uses ? uses.max : 0;
+      setFeatureUsesState(f, Array.from({ length: max }, (_, i) => i < n));
+    };
+    const countPoints = () => { const u = resolveFeatureUses(f); return usesArrayFor(f, u ? u.max : 0).filter(Boolean).length; };
+    paint();
+    on(modal, "click", "[data-action=close-modal]", () => { closeModal(); render(); });
+    on(modal, "click", "[data-flex-create]", (e, el) => {
+      const c = Number(el.dataset.flexCreate); const cost = FLEX_SLOT_COST[c];
+      const pts = countPoints();
+      if (!cost || pts < cost) return;
+      const sc = data.spellcasting = data.spellcasting || { slots: {} };
+      sc.slots = sc.slots || {}; sc.slotsFilled = sc.slotsFilled || {}; sc.createdSlots = sc.createdSlots || {};
+      const cur = spellSlotsArrayFor(sc, c);
+      sc.slots[c] = (Number(sc.slots[c]) || 0) + 1;
+      sc.slotsFilled[c] = [...cur, true];
+      sc.createdSlots[c] = (sc.createdSlots[c] || 0) + 1;
+      setPoints(pts - cost);
+      doSave(); paint(`Создана ячейка ${c}-го круга (−${cost} оч.).`);
+    });
+    on(modal, "click", "[data-flex-burn]", (e, el) => {
+      const c = Number(el.dataset.flexBurn);
+      const sc = data.spellcasting || {};
+      const arr = spellSlotsArrayFor(sc, c);
+      const idx = arr.lastIndexOf(true);
+      const uses = resolveFeatureUses(f); const max = uses ? uses.max : 0;
+      const pts = countPoints();
+      if (idx < 0 || pts >= max) return;
+      arr[idx] = false;
+      sc.slotsFilled = sc.slotsFilled || {}; sc.slotsFilled[c] = arr;
+      const gain = Math.min(c, max - pts);
+      setPoints(pts + gain);
+      doSave(); paint(`Потрачена ячейка ${c}-го круга: +${gain} оч.`);
     });
   }
   function openWildMagicTable() {
@@ -2979,8 +3070,8 @@ export async function renderSheet(id) {
                 : levelHasNoFeaturesByDesign
                   ? cls.scalingNotes && cls.scalingNotes[newLevel]
                     ? `<p class="muted">Новых умений нет, но растут уже имеющиеся: ${escapeHtml(cls.scalingNotes[newLevel])}</p>`
-                    : `<p class="muted">На этом уровне класс не получает новых умений.</p>`
-                  : `<p class="muted">Нет данных об умениях класса «${escapeHtml(cls.name)}» на ${newLevel} уровне в базе — добавьте их вручную на вкладке «Умения» после повышения.</p>`
+                    : `<p class="muted">Умений на этом уровне нет.</p>`
+                  : `<p class="muted">Умений на этом уровне нет.</p>`
         }
         ${cls.scalingNotes && cls.scalingNotes[newLevel] && (allFeatures.length || levelUpState.asi || levelUpState.subclassChoice) ? `<p class="muted" style="margin-top:8px;">Растут уже имеющиеся: ${escapeHtml(cls.scalingNotes[newLevel])}</p>` : ""}
       </div>
@@ -3538,7 +3629,7 @@ export async function renderSheet(id) {
         if ((data.features || []).some((existing) => existing.name === f.name && existing.source === cls.name)) {
           // Повтор умения на новом уровне (рост кости, «ещё 2 навыка» и т.п.): короткая отдельная карточка вместо полного текста.
           const repeatedLevels = Object.keys(cls.features || {}).some((lv) => Number(lv) < newLevel && (cls.features[lv] || []).some((x) => splitFeatureText(x).name === f.name));
-          if (repeatedLevels && f.desc && f.desc.length < 160) {
+          if (repeatedLevels && f.desc && f.desc.length < 160 && !/^Метамагия$/.test(f.name)) {
             const nm = `${f.name} (${newLevel} ур.)`;
             if (!(data.features || []).some((existing) => existing.name === nm && existing.source === cls.name)) {
               data.features.push({ name: nm, source: cls.name, desc: `На ${newLevel}-м уровне: ${f.desc.charAt(0).toLowerCase()}${f.desc.slice(1)}${/[.!?]$/.test(f.desc) ? "" : "."}` });
@@ -5250,6 +5341,7 @@ export async function renderSheet(id) {
   }
   function resolveFeatureUses(f) {
     if (/^(Касание смерти|Торс астрального тела)$/i.test(f.name || "")) return null;
+    if (/^Метамагия: /.test(f.name || "")) return null;
     // Способности Пси-воина (отдельные карточки) тратят кости «Псионической силы», своих счётчиков у них нет.
     if (/^(Защитное поле|Псионический удар|Телекинетическое передвижение)$/i.test(f.name || "") && /Пси-воин/i.test(f.source || "")) return null;
     const chKey = channelPoolKey(f);
@@ -6741,6 +6833,8 @@ export async function renderSheet(id) {
                   const isDreadLord = /^Жуткий лорд$/i.test(f.name || "");
                   const isSurge = /^(Всплеск дикости|Нестабильная отдача)$/i.test(f.name || "");
                   const isTales = /^Истории с того света$/i.test(f.name || "");
+                  const isDragonPick = f.name === "Драконий предок" && /драконьей/i.test(f.source || "");
+                  const isFlex = /^Исток магии$/i.test(f.name || "") && /Чародей/i.test(f.source || "");
                   // Школа Прорицания «Знамение»: 2к20 (3к20 с «Великого знамения»); значения хранятся на карточке до следующего броска.
                   const isStormAura = /^Аура бури(?::|$)/.test(f.name || "") && /буревестник/i.test(f.source || "");
                   const stormHtml = isStormAura
@@ -6790,7 +6884,7 @@ export async function renderSheet(id) {
                   const interventionBtn = isIntervention
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="1d100" data-label="Божественное вмешательство (успех, если выпало ${clericLevelNow} или меньше)">🎲 Бросить к100</button>`
                     : "";
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isTales && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isTales && !isFlex && !isDragonPick && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -6816,7 +6910,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isTales ? `<button class="small feature-card-roll" data-action="open-tales-table" title="Открыть таблицу «Истории духов» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isTales ? `<button class="small feature-card-roll" data-action="open-tales-table" title="Открыть таблицу «Истории духов» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isDragonPick ? `<select data-dragon-pick title="Наследие драконьей крови" style="flex:none;width:auto;"><option value="">Выберите предка…</option>${DRAGON_ANCESTRIES.map((d) => `<option value="${d.name}">${d.name} (${d.damage})</option>`).join("")}</select>` : ""}${isFlex ? `<button class="small feature-card-roll" data-action="open-flex-casting" title="Обменять очки чародейства на ячейки и обратно">🔁 Очки ↔ ячейки</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -8295,6 +8389,19 @@ export async function renderSheet(id) {
   });
   on(app, "click", "[data-action=open-wild-table]", () => openWildMagicTable());
   on(app, "click", "[data-action=open-tales-table]", () => openSpiritTalesTable());
+  on(app, "click", "[data-action=open-flex-casting]", () => openFlexibleCasting());
+  on(app, "change", "[data-dragon-pick]", (e, el) => {
+    const da = DRAGON_ANCESTRIES.find((d) => d.name === el.value);
+    const card = (data.features || []).find((f) => f.name === "Драконий предок" && /драконьей/i.test(f.source || ""));
+    if (!da || !card) return;
+    card.name = `Драконий предок: ${da.name} (${da.damage})`;
+    card.desc = `${card.desc || ""}\n\nВаш предок — ${da.name.toLowerCase()} дракон; связанный вид урона — ${da.damage}.`;
+    if (!data.proficiencies) data.proficiencies = {};
+    if (!Array.isArray(data.proficiencies.languages)) data.proficiencies.languages = [];
+    if (!data.proficiencies.languages.includes("Драконий")) data.proficiencies.languages.push("Драконий");
+    doSave();
+    render();
+  });
   on(app, "change", "[data-storm-env]", (e, el) => {
     if (!el.value) return;
     applyStormEnvironment(el.value);

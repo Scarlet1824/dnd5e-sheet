@@ -7,7 +7,7 @@ import {
   detectArmorIdFromText, textMentionsShield, detectWeaponsInText, weaponRangeType,
   WEAPONS, ARMORS, CLASS_STARTING_GOLD, EQUIPMENT_PACK_DESCRIPTIONS, extractStartingGold,
   equipmentNameMatches, expandPackContents, detectAmmoInText, stripStartingGoldMention, splitFeatureText,
-  parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, LANGUAGES, LANGUAGE_GROUPS, TOOLS, TOOL_GROUPS, GAMING_SETS, VEHICLE_GROUPS, FEATS,
+  parseProficiencyGrantsFromText, DRAGON_ANCESTRIES, TRAIT_NAMED_WEAPON_GRANTS, LANGUAGES, LANGUAGE_GROUPS, TOOLS, TOOL_GROUPS, GAMING_SETS, VEHICLE_GROUPS, FEATS,
 } from "../data/dnd5e-data.js";
 import { optionalFeaturesAt, additionalSpellIds, ADDITIONAL_SPELLS_NAME, OPTIONAL_CLASS_FEATURES, OPTIONAL_FEATURE_SOURCE } from "../data/optionalFeatures.js";
 import { blankCharacter } from "../character.js";
@@ -87,6 +87,7 @@ export function renderWizard() {
     weaponCategoryChoices: {}, // "gi:oi:mi:pi" -> WEAPONS id, for a "воинское оружие"/"простое оружие" category mention
     classEquipmentDeclined: false, // player chose starting gold instead of the class equipment package
     classGoldRoll: 0, // rolled amount when classEquipmentDeclined is true
+    dragonAncestry: "", // Чародей драконьей крови: название выбранного драконьего предка
     level1ChoiceIndex: null, // chosen index into the class's level1Choice.options (fighting style / subclass picked at level 1)
     favoredEnemy: "", // Следопыт: one of RANGER_FAVORED_ENEMY_TYPES
     favoredEnemyHumanoid1: "", // when favoredEnemy === "Гуманоиды": first chosen species (e.g. "гноллы")
@@ -131,6 +132,7 @@ export function renderWizard() {
       const c = CLASSES.find((x) => x.id === state.classId);
       if (!c) return false;
       if (c.level1Choice && state.level1ChoiceIndex == null) return false;
+      if (c.id === "sorcerer" && c.level1Choice && c.level1Choice.options[state.level1ChoiceIndex]?.name === "Наследие драконьей крови" && !state.dragonAncestry) return false;
     }
     if (stepId === "equipment" && !state.classId) return false;
     if (stepId === "background") {
@@ -454,6 +456,10 @@ export function renderWizard() {
               )
               .join("")}
           </div>
+          ${cls.id === "sorcerer" && choice.options[state.level1ChoiceIndex]?.name === "Наследие драконьей крови" ? `
+          <h4 style="margin:14px 0 4px;">Драконий предок</h4>
+          <p class="muted" style="font-size:0.85rem;margin:0 0 6px;">Выберите вид дракона-предка: от него зависит вид урона ваших умений.</p>
+          <div class="grid cols-3">${DRAGON_ANCESTRIES.map((d) => `<div class="card selectable ${state.dragonAncestry === d.name ? "selected" : ""}" data-dragon-ancestry="${escapeHtml(d.name)}"><h4>${escapeHtml(d.name)}</h4><p class="muted">урон: ${escapeHtml(d.damage)}</p></div>`).join("")}</div>` : ""}
         </div>`;
     }
 
@@ -2014,6 +2020,7 @@ export function renderWizard() {
       state.classEquipmentDeclined = false;
       state.classGoldRoll = 0;
       state.level1ChoiceIndex = null;
+      state.dragonAncestry = "";
       state.chosenSubclassSkills = [];
       state.chosenSubclassLanguages = [];
       state.subclassLanguageCustom = {};
@@ -2037,8 +2044,10 @@ export function renderWizard() {
       state.subclassLanguageCustom = {};
       render();
     });
+    on(app, "click", "[data-dragon-ancestry]", (e, el) => { state.dragonAncestry = el.dataset.dragonAncestry; render(); });
     on(app, "click", "[data-level1-choice]", (e, el) => {
       state.level1ChoiceIndex = Number(el.dataset.level1Choice);
+      state.dragonAncestry = "";
       // A different subclass pick can grant a different skill-choice list
       // (or none at all) -- clear out any picks that no longer make sense.
       state.chosenSubclassSkills = [];
@@ -2585,8 +2594,14 @@ export function renderWizard() {
             data.features.push({ name: `${cls.level1Choice.label}: ${sub.name}`, source: cls.name, desc: sub.intro || level1Choice.desc });
             (sub.features || []).forEach((sf) => {
               if (sf.level === 1 && sf.name) {
-                const sfDesc = (sf.desc || []).join("\n\n");
-                data.features.push({ name: sf.name, source: `${cls.name} — ${sub.name}`, desc: sfDesc });
+                let sfDesc = (sf.desc || []).join("\n\n");
+                let sfName = sf.name;
+                if (sf.name === "Драконий предок" && state.dragonAncestry) {
+                  const da = DRAGON_ANCESTRIES.find((d) => d.name === state.dragonAncestry);
+                  if (da) { sfName = `Драконий предок: ${da.name} (${da.damage})`; sfDesc += `\n\nВаш предок — ${da.name.toLowerCase()} дракон; связанный вид урона — ${da.damage}.`; }
+                  if (!data.proficiencies.languages.includes("Драконий")) data.proficiencies.languages.push("Драконий");
+                }
+                data.features.push({ name: sfName, source: `${cls.name} — ${sub.name}`, desc: sfDesc });
                 applyProficiencyGrants(sf.name, sfDesc);
               }
             });
