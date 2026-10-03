@@ -31,15 +31,18 @@ export function spellCardHtml(sp, checkboxHtml, { known = false, domain = false 
   const descParagraphs = Array.isArray(sp.desc) ? sp.desc : [sp.desc].filter(Boolean);
   const subtitle = `${sp.level === 0 ? "Заговор" : `${sp.level}-й круг`}, ${escapeHtml(sp.school || "")}` +
     (sp.ritual ? " (ритуал)" : "");
+  // Пометка «даётся умением/расой/…» — отдельной строкой НАД названием, чтобы не сжимала заголовок.
+  const badgeAbove = typeof checkboxHtml === "string" && /spell-card-badge-domain/.test(checkboxHtml);
   return `
     <div class="spell-card ${known ? "known" : ""} ${domain ? "domain-spell" : ""}" data-spell-id="${sp.id}">
+      ${badgeAbove ? `<div class="spell-card-grant-row">${checkboxHtml}</div>` : ""}
       <div class="spell-card-header">
         <div class="spell-card-icon" title="${escapeHtml(sp.school || "")}">${schoolIcon(sp.school)}</div>
         <div class="spell-card-title-group">
           <h4 class="spell-card-title">${escapeHtml(sp.name)}</h4>
           <p class="spell-card-subtitle">${subtitle}</p>
         </div>
-        <label class="spell-card-toggle" title="Известно / подготовлено">${checkboxHtml}</label>
+        ${badgeAbove ? "" : `<label class="spell-card-toggle" title="Известно / подготовлено">${checkboxHtml}</label>`}
       </div>
       <div class="spell-card-props">
         <div class="spell-card-prop"><span class="prop-label">Время накладывания</span><span>${escapeHtml(sp.castingTime || "—")}</span></div>

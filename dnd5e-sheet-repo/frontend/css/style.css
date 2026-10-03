@@ -762,3 +762,6 @@ textarea.scroll-text { resize: vertical; overflow-y: auto; line-height: 1.45; mi
 html.modal-open, html.modal-open body { overflow: hidden; }
 .modal-backdrop { overscroll-behavior: contain; }
 .modal { overscroll-behavior: contain; }
+
+.spell-card-grant-row { margin: 0 0 6px; }
+.spell-card-grant-row .spell-card-badge { display: inline-block; white-space: normal; }

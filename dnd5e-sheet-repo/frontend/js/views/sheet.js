@@ -2,7 +2,7 @@ import { mount, on, $, $all, freshApp, escapeHtml, debounce, openModal, closeMod
 import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 import { OPTIONAL_FEATURE_SOURCE, CLASS_GENITIVE, optionalFeaturesForLevelUp, optionalReplaces, additionalSpellIds, ADDITIONAL_SPELLS_NAME } from "../data/optionalFeatures.js";
-import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
+import { ABILITIES, SKILLS, CLASSES, RACES, BACKGROUNDS, SPELLS, FEATS, MANEUVERS, WEAPONS, ARMORS, GEAR, HEALING_POTIONS, ALIGNMENTS, CONDITIONS, EXHAUSTION_LEVELS, getClass, proficiencyBonusForLevel, splitFeatureText, EQUIPMENT_PACK_DESCRIPTIONS, parseProficiencyGrantsFromText, TRAIT_NAMED_WEAPON_GRANTS, weaponRangeType, WEAPON_RANGE_TYPE_LABELS, TOOL_GROUPS, GAMING_SETS, LANGUAGE_GROUPS, parseSkillChoiceGrant, parseFreeSkillChoiceGrant, parseLanguageChoiceGrant, WILD_MAGIC_SURGE_TABLE , METAMAGIC_OPTIONS, ELDRITCH_INVOCATIONS, SPIRIT_TALES_TABLE, ELEMENTAL_DISCIPLINES, SUBCLASS_BONUS_CANTRIPS, DRUID_LAND_TERRAINS } from "../data/dnd5e-data.js";
 import {
   totalLevel, proficiencyBonus, getAbilityScore, getAbilityMod, abilityCheckBonus,
   isProficientSkill, isExpertSkill, skillBonus, isProficientSave, saveBonus,
@@ -2227,6 +2227,37 @@ export async function renderSheet(id) {
       return `<tr data-wild-row="${r.roll}" style="${hit ? "background:rgba(212,175,55,0.22);" : ""}"><td style="vertical-align:top;font-weight:700;">${r.roll}</td><td><strong>${escapeHtml(m ? m[1] : "")}.</strong> ${escapeHtml(m ? m[2] : r.text)}</td></tr>`;
     }).join("")}</tbody></table>`;
   }
+  // ---- Таблица «Истории духов» (Коллегия духов) ------------------------------
+  function bardInspirationSides() {
+    const L = ((data.classes || []).find((c) => c.id === "bard") || {}).level || 1;
+    return L >= 15 ? 12 : L >= 10 ? 10 : L >= 5 ? 8 : 6;
+  }
+  function spiritTalesTableHtml(selected = null) {
+    return `<table class="sheet-table" style="table-layout:auto;margin:8px 0;"><thead><tr><th style="width:44px;">Кость</th><th>История</th></tr></thead><tbody>${SPIRIT_TALES_TABLE.map((r) => `<tr data-tale-row="${r.roll}" style="${selected === r.roll ? "background:rgba(212,175,55,0.22);" : ""}"><td style="vertical-align:top;font-weight:700;">${r.roll}</td><td><strong>${escapeHtml(r.name)}.</strong> ${escapeHtml(r.text)}</td></tr>`).join("")}</tbody></table>`;
+  }
+  function openSpiritTalesTable() {
+    const sides = bardInspirationSides();
+    const modal = openModal(`
+      <h3>Таблица «Истории духов»</h3>
+      <p class="muted" style="margin:0 0 8px;">Бросьте кость «Бардовского вдохновения» (сейчас к${sides}); история с выпавшим номером остаётся в памяти до использования или отдыха. Сл спасброска = Сл ваших заклинаний.</p>
+      <div class="row" style="gap:10px;align-items:center;margin-bottom:6px;">
+        <button type="button" class="primary" data-tale-roll>🎲 Бросить к${sides}</button>
+        <strong data-tale-result></strong>
+      </div>
+      <div data-tale-table>${spiritTalesTableHtml()}</div>
+      <div class="row" style="justify-content:flex-end;margin-top:10px;"><button type="button" data-action="close-modal">Закрыть</button></div>`, { wide: true });
+    on(modal, "click", "[data-action=close-modal]", closeModal);
+    on(modal, "click", "[data-tale-roll]", () => {
+      const r = rollDice(1, sides)[0];
+      modal.querySelector("[data-tale-table]").innerHTML = spiritTalesTableHtml(r);
+      const row = SPIRIT_TALES_TABLE.find((x) => x.roll === r);
+      modal.querySelector("[data-tale-result]").textContent = `Выпало: ${r}${row ? ` — ${row.name}` : ""}`;
+      const hit = modal.querySelector(`[data-tale-row="${r}"]`);
+      if (hit && hit.scrollIntoView) hit.scrollIntoView({ block: "nearest" });
+      pushRollLog({ label: "Истории духов", detail: `к${sides}: [${r}]${row ? ` — ${row.name}` : ""}`, total: r });
+      document.dispatchEvent(new CustomEvent("dnd5e:roll-logged"));
+    });
+  }
   function openWildMagicTable() {
     const controlled = (data.features || []).some((f) => /^Контролируемый всплеск$/i.test(f.name || ""));
     const dc = 8 + proficiencyBonus(data) + getAbilityMod(data, "con");
@@ -2479,20 +2510,21 @@ export async function renderSheet(id) {
           </div>
         </div>`;
     }
-    // Free choice (any skill not already known) -- one <select> per pick.
+    // Free choice (any skill not already known) -- checkboxes (radio for a single pick).
     const pickable = SKILLS.filter((s) => !already.has(s.id));
+    const freeType = sc.count === 1 ? "radio" : "checkbox";
     return `
       <div class="panel" style="margin:10px 0;">
-        <h4 style="margin-top:0;">${escapeHtml(sc.featureName)}: выбор навыка (${sc.count})</h4>
-        ${Array.from({ length: sc.count })
-          .map(
-            (_, idx) => `
-          <select data-level-up-sub-skill data-level-up-sub-skill-index="${idx}" style="margin-bottom:6px;">
-            <option value="">Выберите навык…</option>
-            ${pickable.map((s) => `<option value="${s.id}" ${sc.picked[idx] === s.id ? "selected" : ""}>${escapeHtml(s.label)}</option>`).join("")}
-          </select>`
-          )
-          .join("")}
+        <h4 style="margin-top:0;">${escapeHtml(sc.featureName)}: выбор навыка (${sc.picked.filter(Boolean).length}/${sc.count})</h4>
+        <div class="grid cols-3">
+          ${pickable
+            .map((s) => {
+              const checked = sc.picked.includes(s.id);
+              const blocked = !checked && sc.count > 1 && sc.picked.filter(Boolean).length >= sc.count;
+              return `<label class="row" style="gap:6px;align-items:center;${blocked ? "opacity:0.5;" : ""}"><input type="${freeType}" name="level-up-sub-skill" data-level-up-sub-skill value="${s.id}" ${checked ? "checked" : ""} ${blocked ? "disabled" : ""} /> ${escapeHtml(s.label)}</label>`;
+            })
+            .join("")}
+        </div>
       </div>`;
   }
   function subSkillChoiceIncomplete() {
@@ -3049,6 +3081,7 @@ export async function renderSheet(id) {
     let extra = "";
     if (f.name === "Тотемный дух" && levelUpState.subclassChoice) desc = desc.split("\n\n")[0];
     if (/^Всплеск дикости$/i.test(f.name)) extra = wildMagicTableHtml();
+    if (/^Истории с того света$/i.test(f.name)) extra = spiritTalesTableHtml();
     return `<p style="white-space:pre-line;"><strong>${escapeHtml(f.name)}:</strong> ${escapeHtml(desc)}</p>${extra}`;
   }
   function wireLevelUpModal(modal) {
@@ -5168,7 +5201,25 @@ export async function renderSheet(id) {
   }
   // Путь солнечной души: «Луч сияющего солнца» — постоянная атака в списке Атак, кость растёт с боевыми искусствами.
   const SUN_BOLT_NAME = "Солнечный луч";
+  // Монах «Боевые искусства»: «Безоружный удар» всегда есть в Атаках, кость растёт с уровнем монаха.
+  function ensureMonkUnarmed() {
+    if (!monkLevelNow()) return false;
+    if (!data.attacks) data.attacks = [];
+    const dmg = `1к${martialArtsSides()} дробящий`;
+    const a = data.attacks.find((x) => /^Безоружный удар$/i.test(x.name || ""));
+    if (a) {
+      if ((/^1к\d+ дробящий$/.test(a.damage || "") || /^1(\s|$)/.test(a.damage || "") || !a.damage) && a.damage !== dmg) { a.damage = dmg; return true; }
+      return false;
+    }
+    const ability = getAbilityMod(data, "dex") >= getAbilityMod(data, "str") ? "dex" : "str";
+    data.attacks.push({ name: "Безоружный удар", bonus: "", damage: dmg, special: "", useSpecial: false, rangeType: "melee", ability, hand: "" });
+    return true;
+  }
   function ensureSunBolt() {
+    const u = ensureMonkUnarmed();
+    return ensureSunBoltOnly() || u;
+  }
+  function ensureSunBoltOnly() {
     const has = (data.features || []).some((f) => /^Луч сияющего солнца$/i.test(f.name || ""));
     if (!data.weapons) data.weapons = [];
     if (!data.attacks) data.attacks = [];
@@ -6689,6 +6740,7 @@ export async function renderSheet(id) {
                   const isTentacle = /^Щупальце из глубин$/i.test(f.name || "");
                   const isDreadLord = /^Жуткий лорд$/i.test(f.name || "");
                   const isSurge = /^(Всплеск дикости|Нестабильная отдача)$/i.test(f.name || "");
+                  const isTales = /^Истории с того света$/i.test(f.name || "");
                   // Школа Прорицания «Знамение»: 2к20 (3к20 с «Великого знамения»); значения хранятся на карточке до следующего броска.
                   const isStormAura = /^Аура бури(?::|$)/.test(f.name || "") && /буревестник/i.test(f.source || "");
                   const stormHtml = isStormAura
@@ -6738,7 +6790,7 @@ export async function renderSheet(id) {
                   const interventionBtn = isIntervention
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="1d100" data-label="Божественное вмешательство (успех, если выпало ${clericLevelNow} или меньше)">🎲 Бросить к100</button>`
                     : "";
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isTales && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -6764,7 +6816,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${isTales ? `<button class="small feature-card-roll" data-action="open-tales-table" title="Открыть таблицу «Истории духов» и бросить по ней">📋 Таблица (бросок)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -8242,6 +8294,7 @@ export async function renderSheet(id) {
     arr[j] = !arr[j]; sl.usesState = arr; doSave(); render();
   });
   on(app, "click", "[data-action=open-wild-table]", () => openWildMagicTable());
+  on(app, "click", "[data-action=open-tales-table]", () => openSpiritTalesTable());
   on(app, "change", "[data-storm-env]", (e, el) => {
     if (!el.value) return;
     applyStormEnvironment(el.value);
