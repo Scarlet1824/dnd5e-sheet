@@ -554,6 +554,34 @@ export async function renderSheet(id) {
     });
     if (changed) doSave();
   })();
+  // Раунд 73: монах — чистка карточек, обновление текстов, владения инструментами.
+  (function migrateRound73() {
+    let changed = false;
+    const before = (data.features || []).length;
+    data.features = (data.features || []).filter((f) => {
+      const n = f.name || "";
+      if (/Монах/i.test(f.source || "") && (/^Стихийные практики$/i.test(n) || /^(Боевые искусства|Безоружное перемещение) \(\d+ ур\.\)$/i.test(n))) return false;
+      return true;
+    });
+    if (data.features.length !== before) changed = true;
+    if (!data.proficiencies) data.proficiencies = {};
+    if (!Array.isArray(data.proficiencies.tools)) data.proficiencies.tools = [];
+    (data.features || []).forEach((f) => {
+      const n = f.name || "";
+      if (!/Монах/i.test(f.source || "")) return;
+      if (/^(Техники открытой ладони|Адепт стихий|Орудия милосердия)$/i.test(n)) {
+        const known = findKnownFeatureText(n, f.source);
+        if (known && known !== f.desc) { f.desc = known; changed = true; }
+      }
+      if (/^Путь восходящего дракона$/i.test(n) && /Таблица «Происхождение восходящего дракона» предлагает некоторые варианты\.\s*$/.test(f.desc || "")) {
+        f.desc = f.desc.replace(/\n\n[^\n]*Таблица «Происхождение восходящего дракона»[^\n]*$/, ""); changed = true;
+      }
+      if (/^(Орудия милосердия|Дополнительные владения)$/i.test(n) && /милосердия|пьяного/i.test(f.source || "")) {
+        parseProficiencyGrantsFromText(f.desc).tools.forEach((t) => { if (!data.proficiencies.tools.includes(t)) { data.proficiencies.tools.push(t); changed = true; } });
+      }
+    });
+    if (changed) doSave();
+  })();
   const EMPTY_DESC_FEATURE_FIXES = ["Избранный враг", "Исследователь природы"];
   (function migrateEmptyRangerFeatureText() {
     let changed = false;
@@ -629,6 +657,7 @@ export async function renderSheet(id) {
     "Среди мёртвых": ["spare-the-dying"],
     "Глаза тьмы": ["darkness"],
     "Договор цепи": ["find-familiar"],
+    "Удар пылающей дуги": ["burning-hands"],
   };
   // Расовые умения, открывающие заклинания на определённом уровне персонажа (тифлинги и т.п.).
   // Заклинания добавляются в лист автоматически (без ячейки, раз в долгий отдых), убираются при откате уровня.
@@ -3698,6 +3727,7 @@ export async function renderSheet(id) {
       });
     }
     applyLevelUpSpellSlots(cls, c);
+    ensureSunBolt();
     doSave();
     render();
   }
@@ -3949,6 +3979,7 @@ export async function renderSheet(id) {
       applyFeatureProficiencyGrants(sf.name, desc);
     });
     ensureBattleragerSpikes();
+    ensureSunBolt();
   }
   // Level-up-specific sibling of applySubclassFeatures() above: that one is
   // built for the classesEditor dropdown (wholesale swap — remove everything
@@ -4016,6 +4047,7 @@ export async function renderSheet(id) {
       applyFeatureProficiencyGrants(sf.name, desc);
     });
     ensureBattleragerSpikes();
+    ensureSunBolt();
   }
   // A subclass can widen the pool of pickable spells beyond its class's own
   // list (characterExpandedSpellIds() below reads this live off
@@ -5104,12 +5136,58 @@ export async function renderSheet(id) {
     return m ? DISCIPLINE_META[m[1]] || null : null;
   }
   function monkLevelNow() { return ((data.classes || []).find((c) => c.id === "monk") || {}).level || 0; }
-  function disciplineKiCap() { const L = monkLevelNow(); return L >= 17 ? 7 : L >= 13 ? 6 : L >= 9 ? 5 : L >= 5 ? 4 : 3; }
+  function disciplineKiCap() { const L = monkLevelNow(); return L >= 17 ? 6 : L >= 13 ? 5 : L >= 9 ? 4 : 3; }
   function disciplineMaxExtra(meta) {
     const canExtra = !!(meta.dmg || (meta.spell && meta.spell.upcast));
     return canExtra ? Math.max(0, disciplineKiCap() - meta.ki) : 0;
   }
   function kiCard() { return (data.features || []).find((x) => /^Ци$/i.test(x.name || "") && /Монах/i.test(x.source || "")) || null; }
+  function martialArtsSides() { const L = monkLevelNow(); return L >= 17 ? 10 : L >= 11 ? 8 : L >= 5 ? 6 : 4; }
+  function kiPointsLeft() {
+    const k = kiCard(); const u = k && resolveFeatureUses(k);
+    if (!u || !(u.max > 0)) return 0;
+    return usesArrayFor(k, u.max).filter(Boolean).length;
+  }
+  function spendKi(n) {
+    if (kiPointsLeft() < n) { alert(`Не хватает очков ци (нужно ${n}, осталось ${kiPointsLeft()}).`); return false; }
+    for (let i = 0; i < n; i++) spendFeatureUse(kiCard());
+    return true;
+  }
+  // Карточки подпутей монаха с кубом боевых искусств (Путь милосердия: Исцеляющая/Повреждающая рука): кнопка 🎲 = кость + Мудрость.
+  function monkFeatureDice(f) {
+    if (!/^(Исцеляющая рука|Повреждающая рука)$/i.test(f.name || "") || !/милосердия/i.test(f.source || "")) return null;
+    const s = martialArtsSides(), w = getAbilityMod(data, "wis");
+    const sfx = w ? (w > 0 ? `+${w}` : `${w}`) : "";
+    return { expr: `1d${s}${sfx}`, raw: `1к${s}${sfx}` };
+  }
+  const SHARP_BLADE_NAME = /^Заостр[её]нный клинок$/i;
+  function sharpBladeControlsHtml() {
+    const n = Number(data.sharpBlade) || 0;
+    if (n) return `<span class="muted">Активно: +${n} к атаке и урону оружием кэнсэя</span><button type="button" class="small" data-action="sharp-off">Снять</button>`;
+    return [1, 2, 3].map((k) => `<button type="button" class="small" data-action="sharp-on" data-n="${k}" title="Потратить ${k} очк. ци">+${k} (${k} ци)</button>`).join("");
+  }
+  // Путь солнечной души: «Луч сияющего солнца» — постоянная атака в списке Атак, кость растёт с боевыми искусствами.
+  const SUN_BOLT_NAME = "Солнечный луч";
+  function ensureSunBolt() {
+    const has = (data.features || []).some((f) => /^Луч сияющего солнца$/i.test(f.name || ""));
+    if (!data.weapons) data.weapons = [];
+    if (!data.attacks) data.attacks = [];
+    if (!has) {
+      const n = data.weapons.length + data.attacks.length;
+      data.weapons = data.weapons.filter((w) => w.name !== SUN_BOLT_NAME);
+      data.attacks = data.attacks.filter((a) => a.name !== SUN_BOLT_NAME);
+      return data.weapons.length + data.attacks.length !== n;
+    }
+    const dmg = `1к${martialArtsSides()}`;
+    let changed = false;
+    const w = data.weapons.find((x) => x.name === SUN_BOLT_NAME);
+    if (!w) { data.weapons.push({ name: SUN_BOLT_NAME, damage: dmg, type: "излучение", properties: "Дальнобойная атака заклинанием, 30 фт., Ловкость", special: "", equipped: true, rangeType: "ranged" }); changed = true; }
+    else if (w.damage !== dmg) { w.damage = dmg; changed = true; }
+    const a = data.attacks.find((x) => x.name === SUN_BOLT_NAME);
+    if (!a) { data.attacks.push({ name: SUN_BOLT_NAME, bonus: "", damage: `${dmg} излучение`, special: "", useSpecial: false, rangeType: "ranged", ability: "dex", hand: "" }); changed = true; }
+    else if (a.damage !== `${dmg} излучение`) { a.damage = `${dmg} излучение`; changed = true; }
+    return changed;
+  }
   function disciplineControlsHtml(f, i) {
     const meta = disciplineMetaFor(f);
     if (!meta) return "";
@@ -5120,6 +5198,7 @@ export async function renderSheet(id) {
     return `${maxExtra ? `<label class="muted" style="font-size:0.82rem;">Доп. очки ци: <select data-action="discipline-extra" data-index="${i}" style="width:auto;">${Array.from({ length: maxExtra + 1 }, (_, n) => `<option value="${n}" ${n === extra ? "selected" : ""}>${n}</option>`).join("")}</select></label>` : ""}<button class="small feature-card-roll" data-action="cast-discipline" data-index="${i}" title="Списывает очки ци с карточки «Ци»">✨ Применить: ${total} ци${escapeHtml(eff)}</button>`;
   }
   function resolveFeatureUses(f) {
+    if (/^(Касание смерти|Торс астрального тела)$/i.test(f.name || "")) return null;
     // Способности Пси-воина (отдельные карточки) тратят кости «Псионической силы», своих счётчиков у них нет.
     if (/^(Защитное поле|Псионический удар|Телекинетическое передвижение)$/i.test(f.name || "") && /Пси-воин/i.test(f.source || "")) return null;
     const chKey = channelPoolKey(f);
@@ -6581,7 +6660,7 @@ export async function renderSheet(id) {
                         ? psiWarriorPowerDice()
                       : GRAVE_MIGHT_FEATURE_NAME.test(f.name || "")
                         ? graveyardShriekDice()
-                        : featureDiceInfo(f.desc);
+                        : monkFeatureDice(f) || featureDiceInfo(f.desc);
                   // «Вор заклинаний»'s own text only says "Сл равна вашей Сл
                   // спасброска заклинания" -- it doesn't restate the 8 +
                   // proficiency + ability formula featureSaveDCInfo's regex
@@ -6653,12 +6732,13 @@ export async function renderSheet(id) {
                   const isBladesong = /^Песнь клинка$/i.test(f.name || "");
                   const bladesongActive = isBladesong && !!data.bladesongActive;
                   const disciplineMeta = disciplineMetaFor(f);
+                  const isSharp = SHARP_BLADE_NAME.test(f.name || "") && /кэнсэя/i.test(f.source || "");
                   const isIntervention = /^Божественное вмешательство$/i.test(f.name || "");
                   const clericLevelNow = ((data.classes || []).find((c) => c.id === "cleric") || {}).level || 0;
                   const interventionBtn = isIntervention
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="1d100" data-label="Божественное вмешательство (успех, если выпало ${clericLevelNow} или меньше)">🎲 Бросить к100</button>`
                     : "";
-                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura && !isIntervention && !disciplineMeta) return "";
+                  if (!dice && !dc && attackBonus === null && !isSuperiority && !isSurvivor && !sneakInfo && !isBladesong && !isDreadLord && !isSurge && !isPortent && !isStormAura && !isIntervention && !disciplineMeta && !isSharp) return "";
                   const dcSpan = dc
                     ? `<span class="feature-card-dc" title="Сложность спасброска = 8 + бонус мастерства + модификатор ${ABILITIES.find((a) => a.id === dc.abilityId)?.label || ""}">Сл ${dc.dc}${dc.abilityId ? ` (${ABILITIES.find((a) => a.id === dc.abilityId)?.short || ""})` : ""}</span>`
                     : "";
@@ -6684,7 +6764,7 @@ export async function renderSheet(id) {
                   const dreadBtns = isDreadLord
                     ? `<button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="3d10${chaMod ? (chaMod > 0 ? "+" : "") + chaMod : ""}" data-label="Жуткий лорд — тени (некротическая энергия)">🎲 Тени: 3к10${chaMod ? formatModifier(chaMod) : ""} некрот.</button><button class="small feature-card-roll" data-action="roll-feature-expr" data-expr="4d10" data-label="Жуткий лорд — испуганный враг в ауре (психическая энергия)">🎲 Испуганный враг: 4к10 психич.</button>`
                     : "";
-                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
+                  return `<div class="feature-card-uses" style="justify-content:flex-start;gap:10px;">${disciplineMeta ? disciplineControlsHtml(f, i) : ""}${isSharp ? sharpBladeControlsHtml() : ""}${dreadBtns}${isSurge ? `<button class="small feature-card-roll" data-action="open-wild-table" title="Открыть таблицу «Дикая магия» и бросить по ней">📋 Таблица</button><button class="small feature-card-roll" data-action="roll-wild-surge">🎲 Бросить по таблице «Дикая магия» (к8)</button>` : ""}${interventionBtn}${attackBtn}${superiorityBtn}${rollBtn}${survivorBtn}${bladesongBtn}${portentHtml}${stormHtml}${sneakSpan}${dcSpan}</div>`;
                 })()
               }
             </div>`
@@ -7032,7 +7112,7 @@ export async function renderSheet(id) {
         ? { sides: superiorityDieSides(data), available: superiorityDiceAvailable(), onUse: () => { const used = consumeSuperiorityDie(); if (used) render(); return used; } }
         : null,
       blessed: !!data.blessingActive,
-      bonusOptions: sacredWeaponAvailable() ? [{ label: `Священное оружие (+${Math.max(1, getAbilityMod(data, "cha"))} — модификатор Харизмы) — Божественный канал активен`, bonus: Math.max(1, getAbilityMod(data, "cha")) }] : [],
+      bonusOptions: [...(sacredWeaponAvailable() ? [{ label: `Священное оружие (+${Math.max(1, getAbilityMod(data, "cha"))} — модификатор Харизмы) — Божественный канал активен`, bonus: Math.max(1, getAbilityMod(data, "cha")) }] : []), ...(Number(data.sharpBlade) && (data.features || []).some((f) => SHARP_BLADE_NAME.test(f.name || "")) ? [{ label: `Заострённый клинок (+${Number(data.sharpBlade)})`, bonus: Number(data.sharpBlade) }] : [])],
       powerAttack: hasFeat(GREAT_WEAPON_MASTER_FEAT_ID) && weaponIsHeavyMelee(a)
         ? { penalty: 5, label: "-5 к атаке (Мастер большого оружия) — при попадании +10 к урону", onToggle: (used) => { a.usePowerAttack = used; doSave(); } }
         : hasFeat(SHARPSHOOTER_FEAT_ID) && a.rangeType === "ranged"
@@ -7359,6 +7439,7 @@ export async function renderSheet(id) {
     // in startDamageRoll) -- rolled and added just like any other bonus,
     // each die type gets its own breakdown entries.
     (extraDice || []).forEach(({ sides, count, label, flat }) => {
+      if (!sides && flat) { total += flat; parts.push(`${label ? label + " " : ""}+${flat}`); breakdown.push({ value: flat, label: label || "бонус" }); return; }
       if (!count || !sides) return;
       const rolls = rollDice(count, sides);
       const sum = rolls.reduce((s, v) => s + v, 0) + (flat || 0);
@@ -7459,6 +7540,9 @@ export async function renderSheet(id) {
     if (has(/^Угроза из засады$/)) list.push({ id: "ambush", label: "Угроза из засады", note: "дополнительная атака в первый ход боя", sides: 8, count: 1 });
     if (has(/^Добыча убийцы$/)) list.push({ id: "slayer-prey", label: "Добыча убийцы", note: "первое попадание за ход по выбранной цели", sides: 6, count: 1 });
     if (has(/^Ужасающие удары$/)) list.push({ id: "dread-strikes", label: "Ужасающие удары", note: "психическая энергия, раз в ход", sides: rangerLvl >= 11 ? 6 : 4, count: 1 });
+    if (has(/^Единство с клинком$/)) list.push({ id: "kensei-agile", label: "Ловкий удар", note: "оружие кэнсэя, раз в ход; тратит 1 очко ци", sides: martialArtsSides(), count: 1, kiCost: 1 });
+    if (has(/^Торс астрального тела$/)) list.push({ id: "astral-arms", label: "Усиленные руки", note: "атака руками астрального тела, раз в ход", sides: martialArtsSides(), count: 1 });
+    if (Number(data.sharpBlade) && has(/^Заостр[её]нный клинок$/)) list.push({ id: "sharp-blade", label: "Заострённый клинок", note: "оружие кэнсэя (ци уже потрачено)", sides: 0, count: 0, flat: Number(data.sharpBlade), auto: true });
     (data.features || []).forEach((f) => {
       const t = divineStrikeType(f);
       if (!t) return;
@@ -7560,7 +7644,7 @@ export async function renderSheet(id) {
           : ""
       }
       ${riders
-        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" ${r.auto ? "checked" : ""} /> добавить «${escapeHtml(r.label)}» (${isCrit ? r.count * 2 : r.count}к${r.sides}${r.flat ? "+" + r.flat : ""}) — ${escapeHtml(r.note)}${r.consume ? " · тратит использование" : ""}</label>`)
+        .map((r, i) => `<label class="row" style="gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" data-use-rider="${i}" ${r.auto ? "checked" : ""} /> добавить «${escapeHtml(r.label)}» (${r.sides ? `${isCrit ? r.count * 2 : r.count}к${r.sides}${r.flat ? "+" + r.flat : ""}` : `+${r.flat}`}) — ${escapeHtml(r.note)}${r.consume ? " · тратит использование" : ""}</label>`)
         .join("")}
       ${
         smiteAvailable
@@ -7629,6 +7713,7 @@ export async function renderSheet(id) {
       modal.querySelectorAll("[data-use-rider]").forEach((cb) => {
         if (cb.checked) {
           const r = riders[Number(cb.dataset.useRider)];
+          if (r.kiCost && !spendKi(r.kiCost)) return;
           riderDice.push({ sides: r.sides, count: isCrit ? r.count * 2 : r.count, label: r.label, flat: r.flat || 0 });
           if (r.consume && r.featureIndex !== undefined) spendFeatureUse(data.features[r.featureIndex]);
         }
@@ -7979,7 +8064,7 @@ export async function renderSheet(id) {
         ? psiWarriorPowerDice()
       : GRAVE_MIGHT_FEATURE_NAME.test(f.name || "")
         ? graveyardShriekDice()
-        : featureDiceInfo(f.desc);
+        : monkFeatureDice(f) || featureDiceInfo(f.desc);
     if (!dice) return;
     let expr = dice.expr;
     if (SECOND_WIND_FEATURE_NAME.test(f.name || "")) {
@@ -8186,6 +8271,14 @@ export async function renderSheet(id) {
     const r = rollD20({ modifier: bonus, mode: dis ? "disadvantage" : "normal" });
     showRollResult({ label: "Атака заклинанием", detail: dis ? `к20: [${r.first}, ${r.second}] → взято ${r.picked} ${formatModifier(bonus)} (помеха: ${dis})` : `к20: [${r.first}] ${formatModifier(bonus)}`, total: r.total, isCrit: r.isCrit, isFumble: r.isFumble });
   });
+  on(app, "click", "[data-action=sharp-on]", (e, el) => {
+    const n = Number(el.dataset.n) || 1;
+    if (!spendKi(n)) return;
+    data.sharpBlade = n;
+    doSave();
+    render();
+  });
+  on(app, "click", "[data-action=sharp-off]", () => { data.sharpBlade = 0; doSave(); render(); });
   on(app, "change", "[data-action=discipline-extra]", (e, el) => {
     const f = data.features[Number(el.dataset.index)];
     if (!f) return;
@@ -8847,6 +8940,6 @@ export async function renderSheet(id) {
     if (initEl) initEl.textContent = formatModifier(initiativeBonus(data));
   }
 
-  if (ensureBattleragerSpikes()) doSave();
+  if (ensureBattleragerSpikes() | ensureSunBolt()) doSave();
   render();
 }

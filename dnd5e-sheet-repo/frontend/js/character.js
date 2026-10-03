@@ -358,6 +358,13 @@ export function speedBonusSources(data) {
   if ((data.feats || []).some((f) => f.id === "mobile")) sources.push({ label: "Подвижный", amount: 10 });
   if ((data.feats || []).some((f) => f.id === "squat-nimbleness")) sources.push({ label: "Низкорослое проворство", amount: 5 });
   if ((data.features || []).some((f) => /^Превосходная мобильность$/i.test(f.name || ""))) sources.push({ label: "Превосходная мобильность", amount: 10 });
+  // Монах «Безоружное перемещение»: бонус к скорости, пока нет доспеха и щита.
+  const monkEntry = (data.classes || []).find((c) => c.id === "monk");
+  if (monkEntry && (data.features || []).some((f) => /^Безоружное перемещение/i.test(f.name || "")) && !resolveEquippedArmor(data) && !data.shieldEquipped) {
+    const L = Number(monkEntry.level) || 0;
+    const amt = L >= 18 ? 30 : L >= 14 ? 25 : L >= 10 ? 20 : L >= 6 ? 15 : L >= 2 ? 10 : 0;
+    if (amt) sources.push({ label: "Безоружное перемещение", amount: amt });
+  }
   // Песнь клинка: +10 футов к скорости, пока песнь активна (и нет средних/тяжёлых доспехов и щита).
   if (bladesongActiveNow(data, resolveEquippedArmor(data))) sources.push({ label: "Песнь клинка", amount: 10 });
   // Варвар «Быстрое передвижение» (5 ур.): +10 фт скорости, пока не надет тяжёлый доспех — на панели
