@@ -1,14 +1,27 @@
 // Кампании: мастер видит сводку игроков и подключает Discord-вебхук; игроки вступают по коду.
 import { mount, on, freshApp, escapeHtml } from "../dom.js";
-import { api, getUser } from "../api.js";
+import { api, getUser, clearSession } from "../api.js";
 import { navigate } from "../router.js";
 
 function topBar() {
   return `<div class="top-bar"><a href="#/characters" class="brand">⚔ D&D 5e</a>
-    <div class="row"><a href="#/characters" class="small-link">Персонажи</a><a href="#/campaigns" class="small-link">Кампании</a></div></div>`;
+    <div class="row"><a href="#/characters" class="small-link">Персонажи</a><a href="#/campaigns" class="small-link">Кампании</a><button data-action="logout" class="small">Выйти</button></div></div>`;
+}
+
+let logoutBound = false;
+function bindLogout() {
+  if (logoutBound) return;
+  logoutBound = true;
+  document.addEventListener("click", async (e) => {
+    if (!e.target.closest || !e.target.closest("[data-action=logout]") || !location.hash.startsWith("#/campaigns")) return;
+    try { await api.logout(); } catch { /* ignore */ }
+    clearSession();
+    navigate("#/login");
+  });
 }
 
 export async function renderCampaigns() {
+  bindLogout();
   const app = freshApp();
   mount(`${topBar()}<div class="panel"><p class="muted">Загрузка…</p></div>`);
   let list = [];
@@ -109,6 +122,7 @@ function memberCard(m) {
 }
 
 export async function renderCampaign(id) {
+  bindLogout();
   const app = freshApp();
   mount(`${topBar()}<div class="panel"><p class="muted">Загрузка…</p></div>`);
   let timer = null;
