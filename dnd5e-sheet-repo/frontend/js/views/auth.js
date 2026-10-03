@@ -67,7 +67,7 @@ export function renderAuth() {
               <label>Пароль ${mode === "register" ? "(минимум 8 символов)" : ""}</label>
               <input type="password" name="password" required minlength="8" autocomplete="${mode === "login" ? "current-password" : "new-password"}" />
             </div>
-            ${mode === "register" ? `<div class="col"><label>Код приглашения от мастера</label><input type="text" name="inviteCode" required maxlength="12" style="text-transform:uppercase" autocomplete="off" /></div>` : ""}
+            ${mode === "register" ? `<div class="col"><label>Код приглашения от мастера <span class="muted">(владельцу не нужен)</span></label><input type="text" name="inviteCode" maxlength="12" style="text-transform:uppercase" autocomplete="off" /></div>` : ""}
             <p class="error-text" data-error style="display:none;"></p>
             <button type="submit" class="primary">${mode === "login" ? "Войти" : "Создать аккаунт"}</button>
           </form>
